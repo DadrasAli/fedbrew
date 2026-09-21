@@ -1,0 +1,208 @@
+experiment:
+  seed: 42
+  output_dir: outputs/femnist/scaffold
+  use_run_subdir: false
+  tags:
+    - femnist
+    - natural_non_iid
+    - scaffold
+    - resnet18_gn
+  notes: "SCAFFOLD on naturally writer-partitioned FEMNIST."
+
+# SCAFFOLD needs its own server strategy (unlike FedProx): the server keeps a
+# global control variate c and ships it to clients each round. Validation
+# rejects any other pairing in either direction.
+server:
+  strategy: scaffold
+
+  # NOTE: validation warns here. A client's control variate is refreshed only
+  # when the client is sampled, so at pr=0.01 each variate is on average about
+  # 100 rounds old when it is used. 0.01 matches the other cross-device FEMNIST
+  # arms: the FedOpt family, fedlalr, delta_sgd and fedavg_ft.
+  participation_rate: 0.01
+
+  # NOTE: validation notices here too, and the omission below is deliberate.
+  # aggregation_weighting is unset, so it defaults to examples: the server
+  # folds the model at n_i while scaling the summed control delta by
+  # 1/num_clients regardless. So x moves along the example-weighted mean of
+  # the local models and c estimates their uniform mean -- and the uniform
+  # one is where c = (1/N) sum(c_i) lives, the invariant the -c_i + c
+  # correction rests on. Uncommenting the line below makes both halves the
+  # paper's: _result_weight returns 1.0, so x becomes (1/|S|) sum(y_i), and
+  # the c update is already Karimireddy et al.'s c + (|S|/N)(1/|S|) sum(dc_i).
+  #
+  # It stays unset because this arm is read against fedavg, fedprox and the
+  # three fedopt arms, all of which are example-weighted. The FEMNIST arms are
+  # not uniform in either direction: fedlalr.yaml and delta_sgd.yaml do set
+  # uniform, each for its own paper. So the choice is made per arm and not by
+  # a convention that would settle it, and changing it here changes what this
+  # arm computes.
+  # aggregation_weighting: uniform
+
+  metrics:
+    - fit_loss
+    - fit_accuracy
+    - control_delta_norm
+    - client_control_norm
+    - local_steps
+    - server_control_norm
+    - mean_client_control_delta_norm
+
+    # Per-round upload volume, which preflight tells a reader to compare arms
+    # on. This list is the second filter: a client metric it does not name is
+    # dropped before round_metrics.csv, so client.metrics naming these is not
+    # enough on its own -- and for this rule, naming them only here is not
+    # enough either, because its client filters them too. Both lists carry them.
+    - communicated_parameters
+    - communicated_bytes
+
+client:
+  update_rule: scaffold
+
+  batch_size: 16
+  learning_rate: 0.2
+
+  # NOTE: like the FedProx client, this one always runs `local_iterations` full
+  # passes with plain SGD, so update_mode / momentum / weight_decay /
+  # nesterov / learning_rate_schedule are intentionally absent - it would
+  # ignore them. The comparable FedAvg baseline is update_mode:
+  # sequential_epoch.
+
+  metrics:
+    - fit_loss
+    - fit_accuracy
+    - control_delta_norm
+    - client_control_norm
+    - local_steps
+
+    # SCAFFOLD uploads the model and the control-variate delta together and
+    # receives the server control variate back beside the model, so a round is
+    # 2x a FedAvg arm's volume at the same model size. This counts both, so
+    # arms can be compared on communicated volume rather than round count.
+    - communicated_parameters
+    - communicated_bytes
+
+data:
+  path: data/generated/femnist_natural/manifest.json
+
+model:
+  name: femnist_resnet18
+  input_channels: 1
+  base_channels: 32
+  blocks_per_stage: [2, 2, 2, 2]
+  group_norm_groups: 8
+  dropout: 0.1
+  num_classes: 62
+
+runtime:
+  deterministic: true
+  # Strict: raise on a nondeterministic kernel rather than warn once on
+  # stderr. Every CUDA kernel this model uses is deterministic on this stack
+  # (measured on an A100-40GB with torch 2.5.1 and CUDA 11.8, August 2026), so
+  # this costs nothing and catches a future op that is not.
+  deterministic_warn_only: false
+  device: auto
+  use_amp: false
+  checkpointing:
+    enabled: true
+    interval: 100000
+    save_last: true
+    save_best: true
+    best_metric: val_accuracy_sample_weighted_avg
+    keep_last: 0
+    save_every_round: false
+  performance:
+    # NOT throughput-only: TF32 (10 stored mantissa bits) or a bfloat16 pair
+    # (~16) instead of fp32's 24, in every matmul of every pass. Keep it
+    # identical across every arm of a comparison; a run at "highest" is not
+    # like-for-like with these. See docs/10-reproducibility.md.
+    matmul_precision: high
+    cudnn_benchmark: false
+    # The three below are throughput-only and do not change results.
+    # See docs/10-reproducibility.md.
+    reuse_model: true
+    fast_batching: true
+    # Halved vs the fedavg/fedprox configs: SCAFFOLD stores a model-sized
+    # control variate per client (10.7 MB x 3597 writers = ~38 GB by the end
+    # of a run), so the shard cache has to give that memory back.
+    shard_cache_bytes: 2147483648
+    dataloader:
+      num_workers: 0
+      pin_memory: true
+
+evaluation:
+  # One block per split. `every` is in rounds and always pins both endpoints:
+  # round 1 and the final round, plus every multiple in between -- every: 10
+  # gives 1, 10, 20, ..., final. `clients` is all | participating |
+  # sample:<N> | resample:<N>.
+  train:
+    every: 10
+    clients: participating
+  val:
+    every: 5
+    clients: all
+  # `never`, not omitted: leaving the block out falls back to the default
+  # every: 10 / clients: all, and this is a cost choice, not a missing split.
+  # FEMNIST shards are client_shard_format split_v2 (train + eval + test), so
+  # a per-client test split does exist and evaluating it would be 3597
+  # per-client passes. central_test below reads the same examples in one
+  # batched pass: global_test.pt IS the concatenation of every writer's TEST
+  # slice (client_test_source: within_client_holdout_disjoint_from_eval), so
+  # central_test_* is the example-weighted pool of the per-client test metric,
+  # measured on data disjoint from the eval slice that val_* and best.pt
+  # selection read. What one batched pass cannot produce is the per-writer
+  # spread -- test_accuracy_{std,min,worst10} need the per-client pass.
+  #
+  # A run's shard format is recorded in run.json under
+  # reproducibility.dataset, with the manifest's sha256: a number produced
+  # from an older split_v1 shard set, whose global_test.pt was a copy of the
+  # eval data, is distinguishable from one produced here.
+  test:
+    every: never
+  central_test:
+    every: 10
+
+client_statistics:
+  per_client_csv: false
+  std: true
+  variance: false
+  min: true
+  max: true
+  worst_percent: 10
+
+# Stop an arm that is no longer learning and record why. A stopped run exits
+# SUCCESSFULLY with status "diverged"/"stalled" in run.json and
+# runs_index.jsonl -- never non-zero, so a packed job cannot mistake it for a
+# crash. Grep the sweep afterwards with:
+#   jq -r 'select(.status!="completed")|[.status,.stopped_round,.run_id]|@tsv' \
+#     outputs/runs_index.jsonl
+divergence:
+
+  # The only metric produced every round; a val_*/train_* metric would only
+  # exist on its evaluation schedule and cost up to `every` rounds of latency.
+  metric: fit_loss
+
+  non_finite: true
+
+  # Multiple of the first strictly positive fit_loss.
+  blowup_factor: 10.0
+
+  # Absolute backstop, for a run already pathological when first measured --
+  # the relative check has nothing to anchor on there. FEMNIST has 62 classes,
+  # so the random-guess cross-entropy is ln(62) = 4.13 and 41.3 is an order of
+  # magnitude worse than random. This is NOT the 23.0 used on MNIST: that
+  # number is 10x ln(10) and would sit below FEMNIST's own useful loss range.
+  # The MNIST one-label caveat also does not apply here -- FEMNIST is
+  # partitioned by writer, so no client holds a single class and fit_loss does
+  # not collapse to 0.0 while the global model is worthless.
+  blowup_absolute: 41.3
+
+  # Off: it is the only detector that can be wrong. A run can sit flat for a
+  # long time and then improve, and a false stop would look like a result, so
+  # it stays off unless a setting is known to improve without long plateaus.
+  patience: null
+  min_delta: 0.0
+
+defaults:
+  global_rounds: 500
+  local_iterations: 16

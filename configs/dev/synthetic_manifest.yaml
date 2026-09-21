@@ -1,0 +1,71 @@
+experiment:
+  seed: 42
+  output_dir: outputs/synthetic_manifest
+  use_run_subdir: false
+  tags:
+    - dev
+    - synthetic
+    - local_sgd
+    - mlp
+  notes: "Three rounds reading the generated synthetic manifest from disk."
+
+server:
+  strategy: fedavg
+  participation_rate: 1
+  metrics:
+    - fit_loss
+    - fit_accuracy
+
+client:
+  update_rule: local_sgd
+  batch_size: 32
+  learning_rate: 0.01
+  momentum: 0.0
+  weight_decay: 0.0
+  nesterov: false
+  learning_rate_schedule: constant
+  min_learning_rate: 0.0
+  metrics:
+    - fit_loss
+    - fit_accuracy
+
+data:
+  path: data/generated/synthetic_classification/manifest.json
+
+model:
+  name: mlp
+  input_dim: 5
+  hidden_dim: 16
+  num_classes: 2
+
+runtime:
+  device: cpu
+  use_amp: false
+  # This config predates the strict-determinism default and has never run
+  # under it. Written out so "not deterministic" is a statement rather than
+  # an omission.
+  deterministic: false
+  checkpointing:
+    # The values an absent block resolves to, which is what this config has
+    # always run under -- and the inverse of the per-key defaults that apply
+    # once a block is present. Writing them keeps the behaviour and removes
+    # the trap.
+    enabled: true
+    save_last: false
+    save_best: false
+    save_every_round: true
+    keep_last: null
+  performance:
+    # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
+    # mantissa bits, where "high" drops them to TF32's 10 or a bfloat16 pair's
+    # ~16. torch's own default, written out rather than left implicit --
+    # absent and "highest" are the same run but not the same document, and the
+    # FEMNIST and OpenImage arms set "high", so a config started by copying
+    # this one would otherwise change the arithmetic silently. Keep it
+    # identical across every arm of a comparison.
+    matmul_precision: highest
+    cudnn_benchmark: false
+
+defaults:
+  global_rounds: 3
+  local_iterations: 1

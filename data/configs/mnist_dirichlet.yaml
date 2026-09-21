@@ -1,0 +1,29 @@
+# Dirichlet label skew: each client's label mixture is a Dirichlet draw, so the
+# skew is graded rather than all-or-nothing. alpha is the only knob -- small
+# alpha concentrates each client on a few digits, large alpha approaches IID.
+# fedbrew generate --config data/configs/mnist_dirichlet.yaml
+# fedbrew inspect-data data/generated/mnist_dirichlet/manifest.json
+
+dataset:
+  name: mnist
+  output_dir: data/generated/mnist_dirichlet
+  raw_dir: data/raw/datasets/mnist
+  seed: 42
+
+mnist:
+  flatten: true
+  normalize: none
+  # Use the complete MNIST dataset:
+  # max_train_samples: omitted
+  # max_test_samples: omitted
+
+client_splits:
+  train_ratio: 0.8
+  eval_ratio: 0.2
+
+partition:
+  strategy: dirichlet
+  num_clients: 1000
+  # 0.1 is the value the FL literature uses for "strongly non-IID" and is what
+  # this config is for; the generator's own default is 0.5.
+  alpha: 0.1

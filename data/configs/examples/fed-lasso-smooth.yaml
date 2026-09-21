@@ -1,0 +1,35 @@
+# examples/fed-lasso -- the smooth control: the L1 term removed.
+#
+# lam = 0 makes the problem a perfectly conditioned least squares with
+# x* = x_true exactly, and FedAvg reaches central_test_optimality_gap of
+# exactly 0.0 at every learning rate in the grid. So the entire floor at
+# lam = 0.05 is the L1 term's, and none of it is the design, the
+# heterogeneity, the participation or the loop.
+#
+#   fedbrew generate --config data/configs/examples/fed-lasso-smooth.yaml
+#   fedbrew run --config configs/examples/fed-lasso-smooth/fedavg.yaml
+#
+# It is also the sharpest form of the sparsity point: x* here has 13 zeros,
+# FedAvg gets to within 1.7e-16 of it, and still reports 0 exact zeros.
+# Reaching the optimum and producing zeros are different things, and only one
+# of them is what a prox is for. See examples/fed-lasso/README.md.
+
+dataset:
+  name: fed_lasso
+  output_dir: data/generated/examples/fed-lasso-smooth
+  seed: 42
+  extensions:
+    - examples/fed-lasso/problem.py
+
+partition:
+  strategy: analytic
+  num_clients: 8
+
+problem:
+  dim: 16
+  sparsity: 3
+  # lam at zero: no non-smooth term, so x* = x_true and there is no O(eta*lam)
+  # floor for any arm to sit on.
+  penalty_strength: 0.0
+  noise: 0.0
+  heterogeneity: 0.4

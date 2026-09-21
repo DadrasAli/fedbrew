@@ -1,0 +1,29 @@
+dataset:
+  name: femnist
+  output_dir: data/generated/femnist_natural
+  raw_dir: data/raw/datasets/femnist
+  seed: 42
+
+femnist:
+  source: flwrlabs/femnist
+  revision: 5c617740df553a6d3e666035d29fb5d85e1c59a2
+  split: train
+  writer_column: writer_id
+  image_column: image
+  label_column: character
+  # Three splits per writer, so three examples is the floor.
+  min_samples_per_client: 3
+
+# Three disjoint slices per writer. eval_ratio is what save_best selects on;
+# test_ratio is pooled into shards/global_test.pt and is the only split that
+# nothing selects on, so it is the only one a reported test number may come
+# from. They were one slice serving both roles until the split was carved.
+client_splits:
+  train_ratio: 0.8
+  eval_ratio: 0.1
+  test_ratio: 0.1
+
+partition:
+  strategy: natural
+  num_clients: null
+

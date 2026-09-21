@@ -1,0 +1,103 @@
+experiment:
+  seed: 42
+  output_dir: outputs/tiny_causal_lm_fedavg
+  use_run_subdir: false
+  tags:
+    - dev
+    - causal_lm
+    - local_adamw
+    - tiny_gpt2
+  notes: "One-round smoke test of the causal-LM path on a tiny GPT-2."
+
+server:
+  strategy: fedavg
+  participation_rate: 1
+  metrics:
+    - fit_loss
+    - fit_accuracy
+
+client:
+  update_rule: local_adamw
+  batch_size: 4
+  learning_rate: 0.0005
+  learning_rate_schedule: constant
+  min_learning_rate: 0.0
+  weight_decay: 0.01
+  beta1: 0.9
+  beta2: 0.999
+  epsilon: 1.0e-8
+  metrics:
+    - fit_loss
+    - fit_accuracy
+
+data:
+  path: data/generated/tiny_causal_lm/manifest.json
+
+model:
+  name: tiny_gpt2
+  vocab_size: 258
+  sequence_length: 32
+  n_embd: 32
+  n_layer: 1
+  n_head: 2
+  dropout: 0.0
+
+runtime:
+  deterministic: true
+  # Opt-out, deliberate: scaled_dot_product_attention's flash and
+  # memory-efficient backends have no deterministic implementation, so
+  # `false` here would raise rather than fall back. The cost of `true` is
+  # measured -- Qwen2.5-0.5B at the shipped shape gave 2 distinct gradient
+  # digests over 6 identical passes (A100-40GB, torch 2.5.1, CUDA 11.8, August
+  # 2026). Set to false, and pin the math backend, when a run has to be
+  # reproducible.
+  deterministic_warn_only: true
+  device: cpu
+  use_amp: false
+  checkpointing:
+    enabled: true
+    interval: 1
+    save_last: true
+    save_best: true
+    best_metric: val_loss_sample_weighted_avg
+    keep_last: 1
+    save_every_round: true
+  performance:
+    # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
+    # mantissa bits, where "high" drops them to TF32's 10 or a bfloat16 pair's
+    # ~16. torch's own default, written out rather than left implicit --
+    # absent and "highest" are the same run but not the same document, and the
+    # FEMNIST and OpenImage arms set "high", so a config started by copying
+    # this one would otherwise change the arithmetic silently. Keep it
+    # identical across every arm of a comparison.
+    matmul_precision: highest
+    cudnn_benchmark: false
+
+evaluation:
+  # One block per split. `every` is in rounds and always pins both endpoints:
+  # round 1 and the final round, plus every multiple in between -- every: 10
+  # gives 1, 10, 20, ..., final. `clients` is all | participating |
+  # sample:<N> | resample:<N>.
+  train:
+    every: 10
+    clients: participating
+  val:
+    every: 5
+    clients: all
+  test:
+    every: 10
+    clients: all
+  central_test:
+    every: 10
+
+client_statistics:
+  per_client_csv: false
+  std: true
+  variance: false
+  min: true
+  max: true
+  worst_percent: 10
+
+defaults:
+  global_rounds: 1
+  local_iterations: 1

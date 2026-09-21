@@ -1,0 +1,23 @@
+dataset:
+  name: synthetic_classification
+  output_dir: data/generated/synthetic_label_skew
+  seed: 42
+
+synthetic:
+  num_samples: 150
+  input_dim: 6
+  num_classes: 3
+
+splits:
+  train_ratio: 0.8
+  test_ratio: 0.2
+
+client_splits:
+  train_ratio: 0.8
+  eval_ratio: 0.2
+
+partition:
+  strategy: label_skew
+  num_clients: 5
+  labels_per_client: 2
+

@@ -1,0 +1,69 @@
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+outputs/
+data/generated/
+data/raw/
+
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+
+# SLURM job logs and benchmark scratch
+logs_and_errs/
+
+# Audit and review notes stay local
+AUDIT/
+
+# Patch/merge leftovers
+*.orig
+*.rej
+
+# Snapshot archives made for sharing the tree. One was committed by a `git add
+# -A` and amended straight back out; the pattern is cheaper than the catch.
+*.tar.gz
+
+# Editor workspace files. Per person, and a VS Code workspace lists its folders
+# by path: one beside this checkout named the repositories next to it, so a
+# commit would have published their names.
+*.code-workspace
+
+# Local environment and credential files. Nothing in the tree reads one; a
+# template meant to be committed is named .env.example.
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+.netrc
+.pypirc
+.git-credentials
+
+# Logs, and SLURM output written where sbatch was called. The shipped scripts
+# write theirs to logs_and_errs/ above.
+*.log
+slurm-*.out
+slurm-*.err
+
+# Checkpoints and model weights produced locally. Runs write under outputs/,
+# but --output-dir can point anywhere, and a downloaded snapshot is a weight
+# file too.
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+pytorch_model*.bin
+
+# Per-person editor settings.
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store

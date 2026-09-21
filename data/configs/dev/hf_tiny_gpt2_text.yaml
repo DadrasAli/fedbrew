@@ -1,0 +1,28 @@
+dataset:
+  name: hf_causal_lm_text
+  output_dir: data/generated/hf_tiny_gpt2_text
+  seed: 42
+
+causal_lm:
+  corpus_path: data/raw/sample_data/tiny_causal_lm.txt
+  asset_manifest: data/raw/models/tiny_gpt2/asset_manifest.json
+  preparation_config: configs/llm_assets/tiny_gpt2.yaml
+  sequence_length: 16
+  stride: 16
+  append_eos_between_records: true
+  pad_incomplete_window: false
+  local_files_only: true
+  trust_remote_code: false
+
+splits:
+  train_ratio: 0.8
+  test_ratio: 0.2
+
+client_splits:
+  train_ratio: 0.8
+  eval_ratio: 0.2
+
+partition:
+  strategy: iid
+  num_clients: 2
+

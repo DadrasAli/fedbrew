@@ -1,0 +1,34 @@
+# The reader-facing synthetic dataset behind the README's three-line
+# quickstart (`fedbrew generate synthetic`). Distinct from
+# data/configs/synthetic_label_skew.yaml, which is the dev fixture chapter 03
+# walks through in detail and which stays exactly as it is.
+#
+# Dirichlet, not label_skew: fifty clients is enough to show a graded skew
+# rather than the all-or-nothing kind. At alpha 0.3 the fifty clients hold 13
+# to 208 examples (mean 96) and every one has an eval split, which
+# partition_stats.json records after `fedbrew generate`. A client too thin to
+# hold a usable 80/20 eval slice would mean alpha is too low for fifty clients,
+# whatever the mean says.
+
+dataset:
+  name: synthetic_classification
+  output_dir: data/generated/synthetic
+  seed: 42
+
+synthetic:
+  num_samples: 6000
+  input_dim: 32
+  num_classes: 10
+
+splits:
+  train_ratio: 0.8
+  test_ratio: 0.2
+
+client_splits:
+  train_ratio: 0.8
+  eval_ratio: 0.2
+
+partition:
+  strategy: dirichlet
+  num_clients: 50
+  alpha: 0.3

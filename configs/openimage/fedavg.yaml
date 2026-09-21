@@ -1,0 +1,152 @@
+experiment:
+  seed: 42
+  output_dir: outputs/openimage/fedavg
+  use_run_subdir: false
+  tags:
+    - openimage
+    - natural_non_iid
+    - fedavg
+    - shufflenet_v2_gn
+  notes: "FedAvg baseline on FedScale-partitioned OpenImage at 96x96."
+
+server:
+  strategy: fedavg
+  participation_rate: 0.01
+  metrics:
+    - fit_loss
+    - fit_accuracy
+
+client:
+  update_rule: fedavg
+  # Batch 32 / lr 0.04 follow FedScale's OpenImage setup. FedScale specifies
+  # K=20 local STEPS, which fedavg_client rejects (only local_adamw honours
+  # max_local_steps) -- and switching engines for this one dataset would break
+  # comparability with the fedprox/scaffold/fedopt sweeps, which all
+  # share the fedavg client's update_mode engine. So local_iterations it is, on the
+  # same engine as every other experiment here.
+  #
+  # For reference: at ~85 train examples per client and batch 32 that is ~3
+  # steps per epoch, so FedScale's K=20 sits at roughly local_iterations 7.
+  batch_size: 32
+  learning_rate: 0.04
+  learning_rate_schedule: constant
+  min_learning_rate: 0.0
+  update_mode: sequential_epoch
+  frozen_gradient_weighting: examples
+  momentum: 0.0
+  weight_decay: 0.0
+  nesterov: false
+  metrics:
+    - fit_loss
+    - fit_accuracy
+    - optimizer_steps
+    - client_learning_rate
+
+data:
+  # THIS ARM NEEDS DATA THIS REPOSITORY DOES NOT SHIP.
+  #
+  # There is no `openimage` generator: `fedbrew generate` has sections for
+  # mnist, femnist, cifar10, synthetic and the four LLM corpora, and nothing
+  # produces this manifest. The dataset is FedScale's OpenImage partition --
+  # 13,771 clients by uploader, 596 classes, naturally non-IID -- resized to
+  # 96x96 and written to the manifest format chapter 05 documents. Producing
+  # it is a manual step outside this repository, and until it is done
+  # `fedbrew run` on this file fails at load with a missing manifest.
+  #
+  # The `_96` is load-bearing, not decoration: `stem_pool: false` below drops
+  # the reference stem's max pool so that a 96x96 input still reaches the last
+  # stage at 6x6. A manifest at another resolution needs the stem reconsidered,
+  # not just this path repointed.
+  #
+  # tools/generate_openimage_shaped_synthetic.py is NOT a source for this. It
+  # writes noise pixels at 64x64 to measure round cost at OpenImage's shape,
+  # and says in its own docstring not to train anything real on it. Pointing
+  # this path at its output would make the config load and the results
+  # meaningless.
+  path: data/generated/openimage_96/manifest.json
+
+model:
+  name: openimage_shufflenet
+  input_channels: 3
+  num_classes: 596
+  stage_channels: [116, 232, 464]
+  blocks_per_stage: [4, 8, 4]
+  stem_channels: 24
+  final_channels: 1024
+  group_norm_groups: 8
+  # The reference stem is stride-2 conv + stride-2 maxpool, tuned for 224x224.
+  # With the pool off, a 96x96 input reaches the last stage at 6x6.
+  stem_pool: false
+  dropout: 0.1
+
+runtime:
+  deterministic: true
+  # Strict: raise on a nondeterministic kernel rather than warn once on
+  # stderr. Every CUDA kernel this model uses is deterministic on this stack
+  # (measured on an A100-40GB with torch 2.5.1 and CUDA 11.8, August 2026), so
+  # this costs nothing and catches a future op that is not.
+  deterministic_warn_only: false
+  device: auto
+  use_amp: false
+  checkpointing:
+    enabled: true
+    interval: 100000
+    save_last: true
+    save_best: true
+    best_metric: val_accuracy_sample_weighted_avg
+    keep_last: 0
+    save_every_round: false
+  performance:
+    # NOT throughput-only: TF32 (10 stored mantissa bits) or a bfloat16 pair
+    # (~16) instead of fp32's 24, in every matmul of every pass. Keep it
+    # identical across every arm of a comparison; a run at "highest" is not
+    # like-for-like with these. See docs/10-reproducibility.md.
+    matmul_precision: high
+    cudnn_benchmark: false
+    reuse_model: true
+    fast_batching: true
+    # Deliberately small. With train evaluated over participating clients only,
+    # roughly 1% of the corpus
+    # is touched per round, so a large cache buys almost nothing, and a large
+    # cache is what would put a run anywhere near an OOM. Keep the
+    # host-memory footprint boring instead.
+    shard_cache_bytes: 8589934592
+    dataloader:
+      num_workers: 0
+      pin_memory: true
+
+evaluation:
+  # One block per split. `every` is in rounds and always pins both endpoints:
+  # round 1 and the final round, plus every multiple in between -- every: 10
+  # gives 1, 10, 20, ..., final. `clients` is all | participating |
+  # sample:<N> | resample:<N>.
+  # 13,771 clients: `all` would re-read every shard (16 GB) each time, so val
+  # and test each draw a fixed 2000 and reuse it every round. Fixed across
+  # rounds, independent between splits: the two draws are separate, so they
+  # overlap only by chance (about 14.5% at this size). They used to be the
+  # identical 2000 -- the draw key carried no split -- which made the reported
+  # test score a measurement of the very clients best.pt was selected on. See
+  # FINDINGS.csv P07-F07.
+  train:
+    every: 10
+    clients: participating
+  val:
+    every: 5
+    clients: sample:2000
+  test:
+    every: 10
+    clients: sample:2000
+  central_test:
+    every: 10
+
+client_statistics:
+  per_client_csv: false
+  std: true
+  variance: false
+  min: true
+  max: true
+  worst_percent: 10
+
+defaults:
+  global_rounds: 500
+  local_iterations: 1

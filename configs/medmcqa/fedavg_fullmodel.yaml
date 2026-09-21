@@ -1,0 +1,121 @@
+experiment:
+  seed: 42
+  output_dir: outputs/medmcqa_qwen05b/fedavg_fullmodel
+  use_run_subdir: false
+  tags:
+    - medmcqa
+    - qwen2.5-0.5b-base
+    - full_model
+    - natural_non_iid
+    - fedavg
+  notes: "FedAvg full-model SFT on MedMCQA (no LoRA; all 494M parameters federated), one client per medical specialty, from the non-instruction-tuned base model."
+
+server:
+  strategy: fedavg
+  participation_rate: 0.25
+  metrics:
+    - fit_loss
+    - fit_accuracy
+
+client:
+  update_rule: fedavg
+  update_mode: sequential_epoch
+  frozen_gradient_weighting: examples
+  batch_size: 8
+  # Causal-LM logits are batch x 512 x 151936; the framework default of 256
+  # (fedbrew/core/factory.py: DEFAULT_MIN_EVAL_BATCH_SIZE) needs 80 GB here.
+  eval_batch_size: 8
+  learning_rate: 0.003
+  # Clip the global gradient norm at 1.0.
+  max_grad_norm: 1.0
+  learning_rate_schedule: constant
+  min_learning_rate: 0.0
+  momentum: 0.0
+  weight_decay: 0.0
+  nesterov: false
+  metrics:
+    - fit_loss
+    - fit_accuracy
+    - optimizer_steps
+    - client_learning_rate
+
+data:
+  path: data/generated/medmcqa_qwen05b_20clients/manifest.json
+
+model:
+  name: hf_causal_lm
+  asset_manifest: data/raw/models/qwen2_5_0_5b_base/asset_manifest.json
+  preparation_config: configs/llm_assets/qwen2_5_0_5b_base.yaml
+  sequence_length: 512
+  local_files_only: true
+  trust_remote_code: false
+
+runtime:
+  deterministic: true
+  # Opt-out, deliberate: scaled_dot_product_attention's flash and
+  # memory-efficient backends have no deterministic implementation, so
+  # `false` here would raise rather than fall back. The cost of `true` is
+  # measured -- Qwen2.5-0.5B at the shipped shape gave 2 distinct gradient
+  # digests over 6 identical passes (A100-40GB, torch 2.5.1, CUDA 11.8, August
+  # 2026). Set to false, and pin the math backend, when a run has to be
+  # reproducible.
+  deterministic_warn_only: true
+  device: auto
+  use_amp: false
+  checkpointing:
+    # A full-model checkpoint is all 494M parameters, ~2 GB. interval and
+    # keep_last are set so no numbered checkpoint is ever written: save_last
+    # alone keeps a single latest.pt, overwritten each round, which is both the
+    # minimum footprint and what post-hoc evaluation
+    # (fedbrew eval-medmcqa) and crash resume need. save_best is off
+    # because selecting on val_loss_sample_weighted_avg would pick a different round per arm
+    # and make the comparison inconsistent.
+    enabled: true
+    interval: 100000
+    save_last: true
+    save_best: false
+    best_metric: val_loss_sample_weighted_avg
+    keep_last: 0
+    save_every_round: false
+  performance:
+    # NOT throughput-only: TF32 (10 stored mantissa bits) or a bfloat16 pair
+    # (~16) instead of fp32's 24, in every matmul of every pass. Keep it
+    # identical across every arm of a comparison; a run at "highest" is not
+    # like-for-like with these. See docs/10-reproducibility.md.
+    matmul_precision: high
+    cudnn_benchmark: false
+    reuse_model: true
+    fast_batching: true
+    shard_cache_bytes: 4294967296
+    dataloader:
+      num_workers: 0
+      pin_memory: true
+
+evaluation:
+  # One block per split. `every` is in rounds and always pins both endpoints:
+  # round 1 and the final round, plus every multiple in between -- every: 10
+  # gives 1, 10, 20, ..., final. `clients` is all | participating |
+  # sample:<N> | resample:<N>.
+  train:
+    every: 10
+    clients: participating
+  val:
+    every: 5
+    clients: all
+  test:
+    every: 10
+    clients: all
+  central_test:
+    every: 10
+
+client_statistics:
+  per_client_csv: false
+  std: true
+  variance: false
+  min: true
+  max: true
+  worst_percent: 10
+
+defaults:
+  global_rounds: 200
+  local_iterations: 1

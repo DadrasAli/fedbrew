@@ -1,0 +1,153 @@
+experiment:
+  seed: 42
+  output_dir: outputs/mnist/centralized
+  use_run_subdir: false
+  tags:
+    - mnist
+    - label_skew
+    - centralized
+    - mlp
+  notes: "Centralized upper bound on exactly the MNIST FedAvg data and model."
+
+server:
+  # Pools every client of data.path into one client and trains it with the same
+  # local-update engine FedAvg uses. Aggregating one client is the identity, so
+  # this is the centralized upper bound on exactly the FedAvg data and model.
+  strategy: centralized
+  # Meaningless with a single pooled client; kept so runs stay comparable.
+  participation_rate: 1
+  metrics:
+    - fit_loss
+    - fit_accuracy
+
+client:
+  update_rule: centralized
+
+  batch_size: 16
+  learning_rate: 0.01
+  learning_rate_schedule: constant
+  min_learning_rate: 0.0
+
+  # single_batch | sequential_epoch | frozen_batch_gradients
+  # Per round, sequential_epoch and frozen_batch_gradients consume the whole
+  # pooled train set, matching what one federated round consumes across all
+  # clients. single_batch consumes one batch, where a federated round consumes
+  # one per participating client -- raise local_iterations to match if needed.
+  update_mode: single_batch
+
+  # examples | uniform | sum
+  frozen_gradient_weighting: examples
+
+  momentum: 0.0
+  weight_decay: 0.0
+  nesterov: false
+
+  metrics:
+    - fit_loss
+    - fit_accuracy
+    - optimizer_steps
+    - client_learning_rate
+
+data:
+  path: data/generated/mnist_one_label/manifest.json
+  ## data/generated/mnist_iid/manifest.json
+  ## data/generated/mnist_dirichlet/manifest.json
+  ## data/generated/mnist_quantity_skew/manifest.json
+
+model:
+  name: mlp
+  input_dim: 784
+  hidden_dim: 64
+  num_classes: 10
+
+runtime:
+  deterministic: true
+  # Strict: raise on a nondeterministic kernel rather than warn once on
+  # stderr. Every CUDA kernel this model uses is deterministic on this stack
+  # (measured on an A100-40GB with torch 2.5.1 and CUDA 11.8, August 2026), so
+  # this costs nothing and catches a future op that is not.
+  deterministic_warn_only: false
+  device: auto
+  use_amp: false
+  checkpointing:
+    enabled: true
+    interval: 100000
+    save_last: true
+    save_best: true
+    best_metric: val_accuracy_sample_weighted_avg
+    keep_last: 0
+    save_every_round: false
+  performance:
+    # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
+    # mantissa bits, where "high" drops them to TF32's 10 or a bfloat16 pair's
+    # ~16. torch's own default, written out rather than left implicit --
+    # absent and "highest" are the same run but not the same document, and the
+    # FEMNIST and OpenImage arms set "high", so a config started by copying
+    # this one would otherwise change the arithmetic silently. Keep it
+    # identical across every arm of a comparison.
+    matmul_precision: highest
+    cudnn_benchmark: false
+
+evaluation:
+  # One block per split. `every` is in rounds and always pins both endpoints:
+  # round 1 and the final round, plus every multiple in between -- every: 10
+  # gives 1, 10, 20, ..., final. `clients` is all | participating |
+  # sample:<N> | resample:<N>.
+  train:
+    every: 10
+    clients: participating
+  val:
+    every: 5
+    clients: all
+  test:
+    every: 10
+    clients: all
+  central_test:
+    every: 10
+
+client_statistics:
+  per_client_csv: false
+  std: true
+  variance: false
+  min: true
+  max: true
+  worst_percent: 10
+
+# Stop an arm that is no longer learning and record why. A stopped run exits
+# SUCCESSFULLY with status "diverged"/"stalled" in run.json and
+# runs_index.jsonl -- never non-zero, so a packed job cannot mistake it for a
+# crash. Grep the sweep afterwards with:
+#   jq -r 'select(.status!="completed")|[.status,.stopped_round,.run_id]|@tsv' \
+#     outputs/runs_index.jsonl
+divergence:
+
+  # The only metric produced every round; a val_*/train_* metric would only
+  # exist on its evaluation schedule and cost up to `every` rounds of latency.
+  metric: fit_loss
+
+  non_finite: true
+
+  # Multiple of the first strictly positive fit_loss.
+  blowup_factor: 10.0
+
+  # 23.0 is 10x ln(10), ten times the random-guess cross-entropy for 10
+  # classes, so nothing that is still learning can reach it. Same number as the
+  # federated MNIST arms, for a weaker reason: there it is the detector that
+  # actually matters, because every client of mnist_one_label holds a single
+  # digit and a saturated model drives fit_loss to 0.0 at accuracy 1.0, leaving
+  # blowup_factor with no sane anchor. This arm pools all 1000 clients into one
+  # holding all ten digits, so fit_loss starts near ln(10) and the relative
+  # check anchors fine. Kept identical anyway: this run is the upper bound the
+  # federated arms are read against, and a detector that could stop one and not
+  # the other is a difference in the comparison rather than in the method.
+  blowup_absolute: 23.0
+
+  # Off: it is the only detector that can be wrong. A run can sit flat for a
+  # long time and then improve, and a false stop would look like a result, so
+  # it stays off unless a setting is known to improve without long plateaus.
+  patience: null
+  min_delta: 0.0
+
+defaults:
+  global_rounds: 2000
+  local_iterations: 1

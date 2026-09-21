@@ -1,0 +1,21 @@
+dataset:
+  name: tiny_causal_lm
+  output_dir: data/generated/tiny_causal_lm
+  seed: 42
+
+causal_lm:
+  corpus_path: data/raw/sample_data/tiny_causal_lm.txt
+  sequence_length: 32
+
+splits:
+  train_ratio: 0.8
+  test_ratio: 0.2
+
+client_splits:
+  train_ratio: 0.8
+  eval_ratio: 0.2
+
+partition:
+  strategy: iid
+  num_clients: 3
+

@@ -1,0 +1,32 @@
+# examples/simplex-lsq -- the feasible control: the optimum inside the simplex.
+#
+# infeasibility = 0 leaves theta_bar at the planted point, which is already
+# feasible, so the constraint binds on nothing and the constrained and
+# unconstrained problems coincide. Every arm is then right, and FedAvg reaches
+# the optimum exactly.
+#
+#   fedbrew generate --config data/configs/examples/simplex-lsq-feasible.yaml
+#   fedbrew run --config configs/examples/simplex-lsq-feasible/fedavg.yaml
+#
+# That is what attributes the base table: nothing about the design, the
+# heterogeneity, the participation or the loop is responsible for it. The
+# constraint is, and it is responsible for all of it. See
+# examples/simplex-lsq/README.md.
+
+dataset:
+  name: simplex_lsq
+  output_dir: data/generated/examples/simplex-lsq-feasible
+  seed: 42
+  extensions:
+    - examples/simplex-lsq/problem.py
+
+partition:
+  strategy: analytic
+  num_clients: 8
+
+problem:
+  dim: 16
+  # The dial at zero: theta_bar is the planted point, x* = theta_bar, and
+  # F(theta_bar) - F* is 0 rather than negative.
+  infeasibility: 0.0
+  heterogeneity: 0.4

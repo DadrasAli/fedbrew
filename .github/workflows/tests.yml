@@ -1,0 +1,157 @@
+# Four jobs, because the suite is split by install shape and by cost.
+#
+# `tests` is the default suite: a minute or two, and it is what a contributor
+# runs locally before pushing.
+#
+# `llm` installs the `llm` extra, which is the only thing that runs the 21
+# tests gated behind `skipUnless(transformers)`/`skipUnless(peft)`. Without it
+# they are skipped everywhere -- on all three other jobs, and in the default
+# local environment -- so nothing ever executed them and they drifted: at the
+# time this job was added, eight of the 21 failed, on fixtures naming config
+# keys and methods the code had since retired. A skip is not a pass, and a
+# suite nothing runs is a suite that decays silently. The extra is pure-python
+# wheels over the pinned CPU torch, and every test under it is network-free by
+# construction -- each builds its model and tokenizer fixtures in a temporary
+# directory -- so this job needs no download beyond pip.
+#
+# `core-only` installs without any extra and runs the suite, which is the only
+# thing that detects a dependency we rely on but never declare. numpy was one:
+# it was in no dependency list at all and reached the suite through torchvision,
+# so it was invisible for as long as torchvision was a core dependency, and
+# surfaced only when torchvision moved to an extra. No amount of reading finds
+# that -- the import succeeds on every machine that happens to have the package.
+#
+# `quickstart` runs the four commands in docs/03-quickstart.md end to end. It
+# trains a model, so pyproject excludes it from the default suite by addopts
+# and it is selected here explicitly. It belongs in CI rather than in the
+# default suite because a broken quickstart is caught most cheaply by a machine
+# on every push, and most expensively by a new reader who cannot tell whether
+# the fault is theirs.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+# The torch pin is CI-only and deliberate. tests/test_regression_baseline.py
+# freezes the numbers one real run produces, and those move with torch: the
+# fixture carries dropout, so a release that changes the RNG stream changes the
+# trajectory. Pinning here keeps CI reproducible; pyproject leaves torch
+# unpinned so a site can match its own CUDA build, and the frozen assertions
+# skip off-version rather than failing. Bump this and FROZEN_TORCH_RELEASE in
+# the same commit. The version must be exact rather than a floor: the CPU
+# wheel survives `pip install -e .` only because torchvision's `torch==<v>`
+# pin matches the local version `<v>+cpu`.
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    # Two interpreters, and only this job gets both: it is the one that runs
+    # the whole default suite on the environment a contributor actually has.
+    #
+    # 3.10 is the floor pyproject declares, and testing on it rather than on
+    # the newest release is what keeps `requires-python` honest -- a tree that
+    # only ever runs on the newest Python will accept syntax its own floor
+    # cannot parse and nothing will say so.
+    #
+    # The second entry is the other end, and it had been missing entirely:
+    # `requires-python` has no upper bound, so every version above the floor
+    # was claimed and none was tested. It should track the newest Python the
+    # pinned torch below publishes CPU wheels for, and it is bumped in the same
+    # commit as FROZEN_TORCH_RELEASE for the same reason that one is -- the two
+    # move together or the job stops installing.
+    #
+    # tests/test_docs_testing.py checks that the floor is in this list and that
+    # the list has more than one entry, so neither end can be dropped quietly.
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "${{ matrix.python-version }}"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev]"
+      # Both halves, at the 100-column line-length pyproject sets. The
+      # formatter was adopted in one mechanical commit over 135 files; before
+      # that only `ruff check` was enforced, and the tree was clean on no
+      # formatter setting.
+      # These four paths cover every tracked .py in the tree, which
+      # tests/test_lint_covers_the_tree.py checks in both directions -- a
+      # directory of Python nobody lints is how examples/ went unchecked from
+      # the commit that added it.
+      # Run on both interpreters rather than gated to one. ruff reads its
+      # target-version from pyproject and does not care which Python invokes
+      # it, so the second run proves nothing -- but an `if:` here would mean
+      # the whole style gate disappears the day someone edits the matrix entry
+      # it names, and two seconds is cheaper than that failure being silent.
+      - name: Lint
+        run: |
+          ruff check tests tools fedbrew examples
+          ruff format --check tests tools fedbrew examples
+      - name: Default suite
+        run: python -m pytest -q
+
+  llm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      # The pinned CPU torch as in `tests`, because this job runs the whole
+      # suite and that includes the frozen-baseline assertions. peft declares
+      # `torch>=1.13`, which the pin satisfies, so installing torch first
+      # survives the extra rather than being replaced by it.
+      - name: Install with the llm extra
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev,llm]"
+      # Fail loudly here rather than 21 silent skips later. The whole reason
+      # this job exists is that a skip reads as a pass in the summary line.
+      - name: The optional dependencies are actually importable
+        run: python -c "import datasets, peft, transformers"
+      - name: The suite, with the LLM tests no longer skipped
+        run: python -m pytest -q
+
+  core-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      # Deliberately no extras, and deliberately not the pinned torch of the
+      # `tests` job: this job is about what a bare `pip install -e .` resolves,
+      # so it must resolve. The frozen-baseline assertions skip off-version by
+      # design and the `tests` job is where they run.
+      - name: Install with no extras at all
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+      # pytest is in the dev extra, which is the point: install it directly
+      # rather than through the extra, so nothing else arrives with it.
+      - name: The suite, on a core-only environment
+        run: |
+          pip install pytest
+          python -m pytest -q
+
+  quickstart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev]"
+      - name: The commands in docs/03-quickstart.md, end to end
+        run: python -m pytest -m quickstart -q

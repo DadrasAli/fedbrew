@@ -1,0 +1,3 @@
+dataset_identifier: openlifescienceai/medmcqa
+revision: 91c6572c454088bf71b679ad90aa8dffcd0d5868
+cache_dir: data/raw/datasets/medmcqa

@@ -1,0 +1,146 @@
+experiment:
+  seed: 42
+  output_dir: outputs/mnist/fedavg  
+  use_run_subdir: false
+  tags:
+    - mnist
+    - label_skew
+    - fedavg
+    - mlp
+  notes: "FedAvg baseline on one-digit-per-client MNIST."
+
+server:
+  strategy: fedavg
+  participation_rate: 1
+  metrics:
+    - fit_loss
+    - fit_accuracy
+
+client:
+  update_rule: fedavg
+
+  batch_size: 16
+  learning_rate: 0.01
+  learning_rate_schedule: constant
+  min_learning_rate: 0.0
+
+  # single_batch | sequential_epoch | frozen_batch_gradients
+  update_mode: single_batch
+
+  # examples | uniform | sum
+  frozen_gradient_weighting: examples
+
+  momentum: 0.0
+  weight_decay: 0.0
+  nesterov: false
+
+  metrics:
+    - fit_loss
+    - fit_accuracy
+    - optimizer_steps
+    - client_learning_rate
+
+data:
+  path: data/generated/mnist_one_label/manifest.json
+  ## data/generated/mnist_iid/manifest.json
+  ## data/generated/mnist_dirichlet/manifest.json
+  ## data/generated/mnist_quantity_skew/manifest.json
+
+model:
+  name: mlp
+  input_dim: 784
+  hidden_dim: 64
+  num_classes: 10
+
+runtime:
+  deterministic: true
+  # Strict: raise on a nondeterministic kernel rather than warn once on
+  # stderr. Every CUDA kernel this model uses is deterministic on this stack
+  # (measured on an A100-40GB with torch 2.5.1 and CUDA 11.8, August 2026), so
+  # this costs nothing and catches a future op that is not.
+  deterministic_warn_only: false
+  device: auto
+  use_amp: false
+  checkpointing:
+    enabled: true
+    interval: 100000
+    save_last: true
+    # On, because centralized.yaml has it on and the arms of a family have to
+    # agree: an arm with it off can only be read at its final round, while an
+    # arm with it on is read at its best validation round, so any table quoting
+    # a "best" figure would give one arm a maximum over every validation
+    # evaluation and the other a single draw. The requirement is that the arms
+    # agree, not which way.
+    save_best: true
+    best_metric: val_accuracy_sample_weighted_avg
+    keep_last: 0
+    save_every_round: false
+  performance:
+    # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
+    # mantissa bits, where "high" drops them to TF32's 10 or a bfloat16 pair's
+    # ~16. torch's own default, written out rather than left implicit --
+    # absent and "highest" are the same run but not the same document, and the
+    # FEMNIST and OpenImage arms set "high", so a config started by copying
+    # this one would otherwise change the arithmetic silently. Keep it
+    # identical across every arm of a comparison.
+    matmul_precision: highest
+    cudnn_benchmark: false
+
+evaluation:
+  # One block per split. `every` is in rounds and always pins both endpoints:
+  # round 1 and the final round, plus every multiple in between -- every: 10
+  # gives 1, 10, 20, ..., final. `clients` is all | participating |
+  # sample:<N> | resample:<N>.
+  train:
+    every: 10
+    clients: all
+  val:
+    every: 5
+    clients: all
+  test:
+    every: 50
+    clients: all
+  central_test:
+    every: 50
+
+client_statistics:
+  per_client_csv: false
+  std: true
+  variance: false
+  min: true
+  max: true
+  worst_percent: 10
+
+# Stop an arm that is no longer learning and record why. A stopped run exits
+# SUCCESSFULLY with status "diverged"/"stalled" in run.json and
+# runs_index.jsonl -- never non-zero, so a packed job cannot mistake it for a
+# crash. Grep the sweep afterwards with:
+#   jq -r 'select(.status!="completed")|[.status,.stopped_round,.run_id]|@tsv' \
+#     outputs/runs_index.jsonl
+divergence:
+
+  # The only metric produced every round; a val_*/train_* metric would only
+  # exist on its evaluation schedule and cost up to `every` rounds of latency.
+  metric: fit_loss
+
+  non_finite: true
+
+  # Multiple of the first strictly positive fit_loss.
+  blowup_factor: 10.0
+
+  # The backstop that actually matters for this sweep. On mnist_one_label every
+  # client holds a single digit, so a saturated model fits it exactly and
+  # fit_loss reads 0.0 at accuracy 1.0 -- the relative check above then has no
+  # sane anchor. 23.0 is 10x ln(10), ten times the random-guess cross-entropy
+  # for 10 classes, so nothing that is still learning can reach it.
+  blowup_absolute: 23.0
+
+  # Off: it is the only detector that can be wrong. A run can sit flat for a
+  # long time and then improve, and a false stop would look like a result, so
+  # it stays off unless a setting is known to improve without long plateaus.
+  patience: null
+  min_delta: 0.0
+
+defaults:
+  global_rounds: 1000
+  local_iterations: 1

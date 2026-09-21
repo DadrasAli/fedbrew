@@ -1,0 +1,53 @@
+# examples/drift-quad -- separable strongly convex quadratics, at the base dials.
+#
+#   f_i(x) = 1/2 x^T A x - b_i^T x,  A = diag(kappa^(j/(d-1))),  sum_i b_i = 0
+#   F(x) = 1/2 x^T A x,  x* = 0,  F* = 0,  mu = 1,  L = kappa
+#
+# The offsets are a deterministic function of the spec below -- Hadamard rows
+# in exact +/- pairs -- so `dataset.seed` fixes no draw here. It is written
+# because every generated dataset records the seed it was made at, and an
+# absent one reads as an omission rather than as "nothing was drawn".
+#
+#   fedbrew generate --config data/configs/examples/drift-quad.yaml
+#   fedbrew inspect-data data/generated/examples/drift-quad/manifest.json
+#
+# The two dials turn independently, and each has its own config beside this
+# one: drift-quad-rate.yaml removes the floor, drift-quad-floor.yaml removes
+# the rate. See examples/drift-quad/README.md.
+
+dataset:
+  name: drift_quad
+  output_dir: data/generated/examples/drift-quad
+  seed: 42
+  # The problem is defined outside the package, so the generator is too.
+  extensions:
+    - examples/drift-quad/problem.py
+
+partition:
+  # Not one of the five shipped strategies: the clients are the problem's, not
+  # a cut of a corpus. Recorded in the manifest as what happened.
+  strategy: analytic
+  # Four +/- pairs of offsets, so sum_i b_i is exactly zero.
+  num_clients: 8
+
+# No client_splits. The ratios describe a cut and there is nothing to cut:
+# f_i is not estimated from samples, it *is* the client, so all three splits
+# hold the same single row. The manifest declares that as
+# client_test_source: identical_to_train, and preflight tells a reader that
+# their test_* and central_test_* numbers are training numbers.
+
+problem:
+  # d. A power of two keeps the offset directions mutually orthogonal (they
+  # are Hadamard rows), so the clients disagree in directions that do not
+  # partly cancel. num_clients // 2 must be at most d - 1.
+  dim: 16
+
+  # kappa = L / mu, with mu pinned to 1. The *rate* dial: local SGD needs
+  # eta < 2/kappa to be stable in the stiffest coordinate, and the softest
+  # coordinate then contracts by (1 - eta)^K per round.
+  condition_number: 100.0
+
+  # zeta, the gradient-dissimilarity constant: sqrt(mean_i ||grad f_i(x*)||^2),
+  # and exactly ||b_i|| for every i. The *floor* dial. At 1.0 the client
+  # minimisers sit up to 0.369 from x*, against ||x_0|| = 1.94.
+  dissimilarity: 1.0

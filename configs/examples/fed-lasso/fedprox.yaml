@@ -1,0 +1,149 @@
+# examples/fed-lasso, fedprox arm -- the base dials: lam = 0.05, zeta = 0.4.
+#
+# The problem, its closed-form optimum and the generator that writes its data
+# are examples/fed-lasso/problem.py, loaded below. Generate the data first:
+#
+#   fedbrew generate --config data/configs/examples/fed-lasso.yaml
+#   fedbrew run --config configs/examples/fed-lasso/fedprox.yaml
+#
+# client.learning_rate is the best of the grid in this example's README,
+# scored on central_test_optimality_gap at the final round.
+
+experiment:
+  # Set rather than left to the filename stem, which is the convention's
+  # exception: the examples ship the same arm names, so the stem alone would
+  # put "fedprox" in runs_index.jsonl once per example and dial setting.
+  name: fed-lasso-fedprox
+  seed: 42
+  output_dir: outputs/examples/fed-lasso/fedprox
+  use_run_subdir: false
+  tags:
+    - examples
+    - fed-lasso
+    - fedprox
+  notes: "Federated lasso; d=16, s=3, lam=0.05, zeta=0.4; x* is the soft threshold of the planted signal."
+  # The task, the model and the generator are defined outside the package.
+  # Loaded before any name below is looked up; run.json records the file's
+  # SHA-256 beside the commit.
+  extensions:
+    - examples/fed-lasso/problem.py
+
+server:
+  strategy: fedavg
+  # Every client, every round. Client drift is still live: drift-quad's
+  # cancellation identity needs the local map to be affine, and sign(x) is
+  # not. A rate below 1.0 would add drift-quad's sampling floor on top of
+  # this problem's own.
+  participation_rate: 1.0
+  # Empty, deliberately: filter_metrics keeps everything when the list is
+  # empty, and a non-empty list would drop the six metrics beyond `loss` on
+  # their way to the round record, since none is a name a shipped config knows
+  # to ask for.
+  metrics: []
+
+client:
+  update_rule: fedprox
+  learning_rate: 0.004
+  batch_size: 4
+  # NOT the proximal method this problem needs. FedProx adds
+  # mu/2 ||w - w_global||^2, a smooth penalty toward the broadcast model; it
+  # never evaluates the L1 proximal operator and produces no zeros. The name
+  # is the trap this example exists to name. The whole mu grid lands within
+  # 0.1% of the FedAvg arm, so the tuner picks the bottom of it.
+  proximal_mu: 0.01
+  metrics: []
+
+data:
+  path: data/generated/examples/fed-lasso/manifest.json
+
+model:
+  name: lasso_vector
+  # input_dim is a named ModelConfig field; penalty_strength,
+  # support_tolerance and x_init travel as model.extra, forwarded verbatim and
+  # then checked by reject_unknown_model_keys. FedLassoTask cross-checks d and
+  # lam against the manifest's `reference`, so a model block describing a
+  # different problem than the data is refused rather than run.
+  input_dim: 16
+  # lam. Part of the objective the client descends, which is why it is on the
+  # model as well as in the data.
+  penalty_strength: 0.05
+  # The threshold at which a coordinate counts as being in the support. NOT
+  # part of the objective: it is how the support metrics are measured, and it
+  # decides the answer. README, "Support recovery is a threshold, not a
+  # result".
+  support_tolerance: 1.0e-3
+  # The canonical lasso start, and the sparsest possible one: d exact zeros,
+  # none of which survives a single subgradient step.
+  x_init: 0.0
+
+runtime:
+  device: cpu
+  use_amp: false
+  deterministic: true
+  deterministic_warn_only: false
+  checkpointing:
+    enabled: true
+    interval: 100000
+    save_last: true
+    # No val_ metric is produced, and best-checkpoint selection may only read
+    # one.
+    save_best: false
+    save_every_round: false
+    keep_last: 0
+  performance:
+    # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
+    # mantissa bits. This model's matmul is 16x16, so it is irrelevant here;
+    # written out because a config that omits it is not comparable with one
+    # that sets it.
+    matmul_precision: highest
+    # Also numerics-changing, and also irrelevant here: this arm runs on the
+    # CPU and touches no cuDNN kernel. Written because "irrelevant" and
+    # "unstated" are different claims, and only the first is the intended one.
+    cudnn_benchmark: false
+    # One thread. These problems are 16-dimensional and torch keeps an
+    # intra-op region on one thread below a grain size of 32768 elements, so
+    # no reduction here is threaded at any setting. The pin states the number
+    # rather than inheriting the machine's; it is NOT what makes the tables
+    # reproducible -- see examples/simplex-lsq/README.md for the retraction.
+    torch_num_threads: 1
+    reuse_model: false
+    fast_batching: false
+
+evaluation:
+  # Nothing is held out: every split is the same m rows, and the manifest says
+  # so (client_test_source: identical_to_train), which is why preflight notes
+  # that these test numbers are training numbers. `test` is measured because
+  # the per-client aggregate is the one place client spread is visible.
+  train:
+    every: never
+  val:
+    every: never
+  test:
+    every: 1
+    clients: all
+  # F(x) for the aggregated iterate, in one pass over every client's rows.
+  central_test:
+    every: 1
+
+client_statistics:
+  per_client_csv: true
+  std: true
+  variance: false
+  min: true
+  max: true
+  worst_percent: 10
+
+divergence:
+  metric: fit_loss
+  non_finite: true
+  blowup_factor: 100.0
+  # F(x_0) = 0.736 at the defaults and F* = 0.164, so a fit_loss four orders
+  # of magnitude above the start is a run that has left the basin rather than
+  # one that is merely slow.
+  blowup_absolute: 10000.0
+  patience: null
+  min_delta: 0.0
+
+defaults:
+  global_rounds: 150
+  local_iterations: 3

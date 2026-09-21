@@ -1,0 +1,145 @@
+[project]
+name = "fedbrew"
+version = "0.0.1"
+description = "A modular research-grade federated learning benchmark framework."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "PyYAML",
+    "rich",
+    "torch",
+]
+
+[project.optional-dependencies]
+dev = [
+    # Property-based tests for the aggregation invariances (permutation of
+    # client order, weight scaling, single-client identity) live in
+    # tests/test_aggregation_properties.py and skip when it is absent.
+    "hypothesis>=6.100,<7",
+    # Configured under [tool.mypy] since the tooling-adoption pass and
+    # installed by nothing, so the one gate command that is not runnable from
+    # a fresh clone was the one nobody could run. It does not gate -- README
+    # and chapter 13 both say so -- but "not enforced" and "not installable"
+    # are different claims and only the first is the intended one.
+    "mypy",
+    "pytest>=9,<10",
+    # Runs the suite across processes: `python -m pytest -n 16`. Serially the
+    # full suite took 38.6 minutes on the login node chapter 13 section 1 names,
+    # and 6.2 at 16 workers. tests/conftest.py pins every worker to one thread.
+    "pytest-xdist>=3.6,<4",
+    # Two of the four gate commands are ruff's. It was previously installed
+    # only by the CI lint step, so the gate documented in README.md and
+    # chapter 13 could not be run from a fresh clone at all.
+    "ruff",
+    # For tools/generate_openimage_shaped_synthetic.py, which imports it
+    # directly. Neither fedbrew/ nor the test suite needs it: every numpy use
+    # in the package is a guarded lazy import that degrades to "not recorded",
+    # and the one test that reached for it now hashes the RNG state without.
+    # numpy was declared nowhere and arrived through torchvision, so it was
+    # invisible until torchvision moved to an extra -- the core-only CI job is
+    # what makes the next one visible.
+    "numpy",
+]
+llm = [
+    "datasets>=2.21,<3",
+    "huggingface-hub>=0.34,<1",
+    "peft>=0.19.1,<0.20",
+    "transformers>=4.46,<5",
+]
+# Every torchvision release pins torch to one exact version -- 0.28.0 declares
+# `torch (==2.13.0)` -- so while torchvision was a core dependency,
+# `pip install -e .` discarded any pre-installed torch of another release and
+# pulled the default PyPI CUDA build in its place. That defeated the whole
+# point of installing a driver-matched torch first, and on the cu118, cu121 and
+# cu128 wheel indexes, whose newest torch is below the release torchvision
+# pins, no torch existed that could survive it at all.
+#
+# Nothing in the package imports torchvision at module level: the MNIST,
+# CIFAR-10 and FEMNIST loaders import it inside the function that needs it and
+# raise a message naming this extra. tests/test_optional_dependency_imports.py
+# keeps that true. So the core install no longer constrains torch, and the pin
+# reaches only the readers who ask for the image datasets.
+vision = [
+    "datasets>=2.21,<3",
+    "huggingface-hub>=0.25,<1",
+    "Pillow>=9.4",
+    "torchvision",
+]
+# Kept as an alias so an existing script's `pip install -e ".[femnist]"` still
+# works. FEMNIST needs exactly what MNIST and CIFAR-10 need, and two extras
+# that both mean "I want image datasets" is a choice with no information
+# behind it.
+femnist = ["fedbrew[vision]"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Each quickstart end-to-end guard trains a model, which costs about a minute
+# per guard. Excluded here and run explicitly with `pytest -m quickstart`,
+# which overrides this because command-line -m wins over addopts. CI runs
+# both.
+addopts = "-m 'not quickstart'"
+markers = [
+    "quickstart: runs a quickstart end to end (docs/03 or the README); excluded by default",
+    "fast: reads text and configs only; `-m fast` is the gate for a text, config or docs change",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+exclude = [
+    "outputs",
+    "data/generated",
+    "data/raw",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "C901"]
+
+# A ratchet, not a target. Nothing observed cyclomatic complexity at all, so the
+# count of functions above 10 could grow unnoticed. 22 is what the tree's two
+# worst functions measured when the rule was adopted, `apply_cli_overrides` and
+# `_validate_algorithm_compatibility`, so adopting it failed nothing and froze
+# the ceiling where it stood. Seventeen functions sit above the conventional 10
+# and are deliberately left alone: splitting a function because a metric says so
+# is refactoring to the metric. Lowering this is free; raising it is a review
+# moment. tests/test_complexity_ratchet.py makes it one, and checks the count
+# here against ruff's.
+[tool.ruff.lint.mccabe]
+max-complexity = 22
+
+[tool.ruff.lint.per-file-ignores]
+# warnings.filterwarnings(...) must run before `import torch` to suppress a
+# NumPy init warning raised at import time -- the ordering is deliberate.
+"fedbrew/data/generate.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = false
+explicit_package_bases = true
+mypy_path = "."
+exclude = [
+    "^outputs/",
+    "^data/generated/",
+    "^data/raw/",
+]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+
+[project.scripts]
+fedbrew = "fedbrew.cli.dispatch:main"
+
+
+[tool.setuptools.packages.find]
+include = [
+    "fedbrew*",
+]
+exclude = [
+    "outputs*",
+]

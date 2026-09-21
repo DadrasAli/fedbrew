@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 240" role="img" aria-labelledby="fedbrew-logo-title">
+  <title id="fedbrew-logo-title">fedbrew</title>
+  <text x="40" y="196" textLength="610" lengthAdjust="spacingAndGlyphs"
+        font-family="Georgia, 'Times New Roman', Times, serif" font-size="150" font-weight="700">
+    <tspan fill="#3a1f12">Fed</tspan><tspan fill="#8b4a1d">Brew</tspan>
+  </text>
+  <g fill="none" stroke="#8b4a1d" stroke-width="8" stroke-linecap="round">
+    <path d="M612 96 C 594 76, 630 62, 612 36"/>
+    <path d="M642 100 C 628 84, 656 74, 642 54"/>
+  </g>
+</svg>

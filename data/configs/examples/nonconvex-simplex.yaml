@@ -1,0 +1,62 @@
+# examples/nonconvex-simplex -- a non-convex quadratic over the simplex.
+#
+#   minimise   F(x) = -(1/2) x^T A x        subject to x in Delta
+#
+# with A the adjacency of K_5 disjoint from the star K_{1,25}. Motzkin-Straus
+# gives the value in closed form:
+#   omega(G) = 5,  F* = -(1 - 1/5)/2 = -0.4,  x* = 1/5 on the clique
+#   the star's 25 edges lie on one connected face of local optima at -0.25
+#   F(barycentre) = -0.03642
+#
+# The client views are a deterministic function of the spec below -- a fixed
+# perturbation pattern in exact +/- pairs -- so `dataset.seed` fixes no draw
+# here. It is written because every generated dataset records the seed it was
+# made at, and an absent one reads as an omission.
+#
+#   fedbrew generate --config data/configs/examples/nonconvex-simplex.yaml
+#   fedbrew inspect-data data/generated/examples/nonconvex-simplex/manifest.json
+#
+# No shipped algorithm can solve this, and the failure is louder than
+# simplex-lsq's: there is no projection, no Frank-Wolfe step and no mirror map
+# in fedbrew, and the *unconstrained* problem is unbounded below, so every arm
+# runs off to infinity. Nothing stops it -- see the divergence block in each
+# arm config and the README section of the same name.
+
+dataset:
+  name: nonconvex_simplex
+  output_dir: data/generated/examples/nonconvex-simplex
+  seed: 42
+  # The problem is defined outside the package, so the generator is too.
+  extensions:
+    - examples/nonconvex-simplex/problem.py
+
+partition:
+  # Not one of the five shipped strategies: the clients are the problem's, not
+  # a cut of a corpus. Recorded in the manifest as what happened.
+  strategy: analytic
+  # Four +/- pairs of adjacency perturbations, so their sum is exactly zero
+  # and the mean graph is A exactly. No client sees the true graph.
+  num_clients: 8
+
+# No client_splits. The ratios describe a cut and there is nothing to cut: a
+# client's objective *is* its matrix. All three splits hold the same single
+# matrix, which the manifest declares as client_test_source:
+# identical_to_train.
+
+problem:
+  # The maximum clique, and so omega, F* and x*. d is derived:
+  # clique_size + 1 + star_leaves = 31, and the model config states it.
+  clique_size: 5
+
+  # The decoy. A star's spectral radius is sqrt(star_leaves) = 5, above the
+  # clique's clique_size - 1 = 4, so the leading eigenvector of A lives on the
+  # star and a method that follows it goes to the wrong component. This must
+  # exceed (clique_size - 1)^2 = 16 or the decoy is not a decoy, and the spec
+  # refuses a value that does not -- which is why there is no "decoy removed"
+  # control config beside this one. See the README.
+  star_leaves: 25
+
+  # Per-client perturbation of the adjacency. The mean is A regardless, so
+  # this moves the clients apart without moving F*, x* or the Motzkin-Straus
+  # value.
+  heterogeneity: 0.1

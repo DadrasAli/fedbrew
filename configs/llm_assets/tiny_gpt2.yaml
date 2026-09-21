@@ -1,0 +1,4 @@
+model_identifier: sshleifer/tiny-gpt2
+tokenizer_identifier: sshleifer/tiny-gpt2
+revision: 5f91d94bd9cd7190a9f3216ff93cd1dd95f2c7be
+cache_dir: data/raw/models/tiny_gpt2

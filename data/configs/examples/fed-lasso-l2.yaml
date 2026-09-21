@@ -1,0 +1,52 @@
+# examples/fed-lasso -- the smooth control: the L1 term replaced by an L2 one.
+#
+#   f_i(x) = (1/2m)(||H x - y_i||^2 + lam ||x||^2)
+#   F(x) = 1/2 ||x - x_true||^2 + lam ||x||^2/2m + zeta^2/2
+#   x*   = (m + lam)^-1 H^T y_bar = m x_true / (m + lam)
+#   F*   = 0.08204439,  F(x_0) - F* = 0.65420561
+#
+# Everything else is fed-lasso.yaml: the same planted signal, the same lam, the
+# same design, the same offsets, the same seed. Only the term added to the
+# residual moves, which is why this is a dial and not a second example.
+#
+#   fedbrew generate --config data/configs/examples/fed-lasso-l2.yaml
+#   fedbrew inspect-data data/generated/examples/fed-lasso-l2/manifest.json
+#
+# What it controls for is the *kind* of penalty, not its presence:
+# fed-lasso-smooth.yaml beside this file removes the penalty entirely (lam = 0)
+# and is the control for the floor's existence. This one keeps lam where it was
+# and makes the objective differentiable, so the O(eta lam) subgradient floor
+# is gone and every arm converges -- the same nine arms, the same grid, the
+# same horizon. See examples/fed-lasso/README.md, "The smooth control".
+#
+# It does NOT control for sparsity, in the opposite direction from the one that
+# reads naturally: ridge sets no coordinate to zero at any lam, so support
+# recovery is not something this problem asks for. At noise 0 the pooled OLS
+# solution is x_true, whose thirteen zeros x* inherits by being a scalar
+# multiple of it -- inherited, not found.
+
+dataset:
+  name: fed_lasso
+  output_dir: data/generated/examples/fed-lasso-l2
+  seed: 42
+  extensions:
+    - examples/fed-lasso/problem.py
+
+partition:
+  strategy: analytic
+  num_clients: 8
+
+problem:
+  dim: 16
+  sparsity: 3
+  # lam, unchanged from fed-lasso.yaml. The same number and NOT the same scale:
+  # the L2 term carries the residual's 1/m and the L1 term does not, so this
+  # shrinks x_true by a factor of m/(m + lam) = 0.9969 here against L1's
+  # absolute lam*sqrt(s) = 0.0866. Two penalties at the same lam is the honest
+  # comparison; a lam picked to match the shrinkage would make the two tables
+  # look alike by construction, which is the opposite of what a control is for.
+  penalty_strength: 0.05
+  # The dial. l1 is the default and is what fed-lasso.yaml leaves unstated.
+  penalty: l2
+  noise: 0.0
+  heterogeneity: 0.4

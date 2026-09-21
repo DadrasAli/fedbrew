@@ -1,0 +1,76 @@
+experiment:
+  seed: 42
+  output_dir: outputs/smoke_eval
+  use_run_subdir: false
+  tags:
+    - dev
+    - synthetic
+    - local_sgd
+    - mlp
+  notes: "Ten-round smoke test exercising the per-split evaluation schedules."
+
+server:
+  strategy: fedavg
+  participation_rate: 1
+  metrics:
+    - fit_loss
+    - fit_accuracy
+
+client:
+  update_rule: local_sgd
+  batch_size: 32
+  learning_rate: 0.01
+  momentum: 0.0
+  weight_decay: 0.0
+  nesterov: false
+  learning_rate_schedule: constant
+  min_learning_rate: 0.0
+  metrics:
+    - fit_loss
+    - fit_accuracy
+
+data:
+  num_clients: 2
+  samples_per_client: 8
+  input_dim: 4
+  num_classes: 2
+
+model:
+  name: mlp
+  input_dim: 4
+  hidden_dim: 4
+  num_classes: 2
+
+runtime:
+  deterministic: true
+  # Strict: raise on a nondeterministic kernel rather than warn once on
+  # stderr. Every CUDA kernel this model uses is deterministic on this stack
+  # (measured on an A100-40GB with torch 2.5.1 and CUDA 11.8, August 2026), so
+  # this costs nothing and catches a future op that is not.
+  deterministic_warn_only: false
+  device: auto
+  use_amp: false
+  checkpointing:
+    # The values an absent block resolves to, which is what this config has
+    # always run under -- and the inverse of the per-key defaults that apply
+    # once a block is present. Writing them keeps the behaviour and removes
+    # the trap.
+    enabled: true
+    save_last: false
+    save_best: false
+    save_every_round: true
+    keep_last: null
+  performance:
+    # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
+    # mantissa bits, where "high" drops them to TF32's 10 or a bfloat16 pair's
+    # ~16. torch's own default, written out rather than left implicit --
+    # absent and "highest" are the same run but not the same document, and the
+    # FEMNIST and OpenImage arms set "high", so a config started by copying
+    # this one would otherwise change the arithmetic silently. Keep it
+    # identical across every arm of a comparison.
+    matmul_precision: highest
+    cudnn_benchmark: false
+
+defaults:
+  global_rounds: 10
+  local_iterations: 1

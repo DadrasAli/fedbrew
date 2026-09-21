@@ -1,0 +1,37 @@
+dataset:
+  name: oasst1_sft
+  output_dir: $FL_DATA_ROOT/oasst1_qwen05b_4clients
+  seed: 42
+
+oasst1_sft:
+  dataset_asset_manifest: $FL_CACHE_ROOT/datasets/oasst1/asset_manifest.json
+  dataset_preparation_config: data/configs/assets/oasst1_hpc.yaml
+  tokenizer_asset_manifest: $FL_CACHE_ROOT/models/qwen2_5_0_5b_instruct/asset_manifest.json
+  tokenizer_preparation_config: configs/llm_assets/qwen2_5_0_5b_instruct_hpc.yaml
+  sequence_length: 256
+  ignore_index: -100
+  local_files_only: true
+  trust_remote_code: false
+
+tree_splits:
+  train_ratio: 0.8
+  client_eval_ratio: 0.1
+  global_test_ratio: 0.1
+
+# No client_splits: OASST1's splits are the tree_splits above, cut at the
+# conversation tree by SHA. The section used to sit here "for the common
+# generator schema" with ratios nothing applied; it is refused now.
+
+partition:
+  strategy: natural_assistant_contributor_top_target_tokens
+  num_clients: 4
+
+pilot_caps:
+  maximum_qualifying_assistant_responses_per_client: 100
+  maximum_client_evaluation_responses_per_client: 20
+  maximum_global_test_responses: 80
+  maximum_generated_windows_per_split:
+    train_per_client: 100
+    client_eval_per_client: 20
+    global_test: 80
+

@@ -1,0 +1,7 @@
+# `git archive` rewrites the placeholders in any file marked `export-subst`,
+# which is the only stamping step a source tarball gets: it carries no `.git`,
+# so nothing in it can answer "which commit is this" unless the export writes
+# the answer down. fedbrew/_build_info.py is the file that holds the answer and
+# tests/test_run_provenance.py exports a real archive and reads it back, so
+# losing this line fails the suite rather than silently un-stamping releases.
+fedbrew/_build_info.py export-subst

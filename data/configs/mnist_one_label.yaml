@@ -1,0 +1,33 @@
+# Pathological non-IID: every client holds a single digit.
+# fedbrew generate --config data/configs/mnist_one_label.yaml
+# fedbrew inspect-data data/generated/mnist_one_label/manifest.json
+
+dataset:
+  name: mnist
+  output_dir: data/generated/mnist_one_label
+  raw_dir: data/raw/datasets/mnist
+  seed: 42
+
+mnist:
+  flatten: true
+  normalize: none
+  # Use the complete MNIST dataset:
+  # max_train_samples: omitted
+  # max_test_samples: omitted
+
+client_splits:
+  train_ratio: 0.8
+  eval_ratio: 0.2
+
+partition:
+  strategy: label_skew
+  num_clients: 1000
+  # The knob of this strategy, and the whole difference between the variants
+  # that used to ship as separate configs: 5 (moderate skew) and 10 (IID over
+  # labels, though not over quantity) were the other two shipped values. They
+  # were three configs of one strategy where the showcase now carries one
+  # config per strategy; nothing else about them differed. Recorded here
+  # because neither manifest.json nor partition_stats.json stores
+  # labels_per_client, so this line is the only record those datasets had.
+  labels_per_client: 1
+

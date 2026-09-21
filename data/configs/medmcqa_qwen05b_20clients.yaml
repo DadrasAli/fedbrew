@@ -1,0 +1,61 @@
+dataset:
+  name: generic_sft
+  output_dir: data/generated/medmcqa_qwen05b_20clients
+  seed: 42
+
+generic_sft:
+  dataset_asset_manifest: data/raw/datasets/medmcqa/asset_manifest.json
+  dataset_preparation_config: data/configs/assets/medmcqa.yaml
+  tokenizer_asset_manifest: data/raw/models/qwen2_5_0_5b_base/asset_manifest.json
+  tokenizer_preparation_config: configs/llm_assets/qwen2_5_0_5b_base.yaml
+  sequence_length: 512
+  ignore_index: -100
+  local_files_only: true
+  trust_remote_code: false
+
+  # One client per medical specialty. These are public category names, not
+  # personal identifiers, so keeping them readable lets results be reported
+  # per specialty.
+  client_field: subject_name
+  anonymize_client_ids: false
+  group_field: id
+
+  # Rows without a written explanation carry no usable supervision target.
+  required_fields: [exp, question]
+
+  choice:
+    index_field: cop
+    option_fields: [opa, opb, opc, opd]
+    labels: [A, B, C, D]
+
+  system_prompt: "You are a medical expert answering board examination questions."
+
+  prompt_template: |-
+    {question}
+
+    A. {opa}
+    B. {opb}
+    C. {opc}
+    D. {opd}
+
+  response_template: |-
+    The correct answer is {answer_label}. {answer_text}
+
+    {exp}
+
+tree_splits:
+  train_ratio: 0.8
+  client_eval_ratio: 0.1
+  global_test_ratio: 0.1
+
+partition:
+  num_clients: 20
+
+caps:
+  # Keep the same share of every client so the natural 5.7x size imbalance
+  # survives; a flat window cap would level all clients to one size.
+  train_fraction: 0.25
+  train_windows_per_client: null
+  client_eval_windows_per_client: 64
+  global_test_windows: 512
+

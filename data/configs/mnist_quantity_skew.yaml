@@ -1,0 +1,35 @@
+# Quantity skew: every client sees all ten digits, but the amount of data per
+# client is lognormal -- a few prolific clients and a long tail. The other
+# three vary WHICH labels a client holds; this one varies HOW MUCH it holds,
+# which is what makes example-weighted and uniform aggregation disagree.
+# fedbrew generate --config data/configs/mnist_quantity_skew.yaml
+# fedbrew inspect-data data/generated/mnist_quantity_skew/manifest.json
+
+dataset:
+  name: mnist
+  output_dir: data/generated/mnist_quantity_skew
+  raw_dir: data/raw/datasets/mnist
+  seed: 42
+
+mnist:
+  flatten: true
+  normalize: none
+  # Use the complete MNIST dataset:
+  # max_train_samples: omitted
+  # max_test_samples: omitted
+
+client_splits:
+  train_ratio: 0.8
+  eval_ratio: 0.2
+
+partition:
+  strategy: quantity_skew
+  num_clients: 1000
+  # 60000 training examples over 1000 clients averages 60 each. The allocator
+  # refuses min_size above that average and max_size below it, so these bound
+  # a spread from a sixth of the mean to sixteen times it.
+  min_size: 10
+  max_size: 1000
+  # Tail shape. 0 gives equal sizes; 1.0 is the default and gives a Gini
+  # around 0.5.
+  sigma: 1.0

@@ -1,0 +1,107 @@
+experiment:
+  seed: 42
+  output_dir: outputs/femnist_natural_fedadam
+  use_run_subdir: true
+  tags:
+    - femnist
+    - natural_non_iid
+    - fedadam
+    - resnet18_gn
+  notes: "FedAdam with a cosine client learning-rate schedule on naturally writer-partitioned FEMNIST."
+
+server:
+  strategy: fedadam
+  participation_rate: 0.02
+  metrics:
+    - fit_loss
+    - fit_accuracy
+  server_learning_rate: 0.1
+  beta1: 0.9
+  beta2: 0.99
+  tau: 0.001
+
+client:
+  update_rule: local_sgd
+  batch_size: 32
+  learning_rate: 0.02
+  momentum: 0.9
+  weight_decay: 0.0001
+  nesterov: true
+  learning_rate_schedule: cosine
+  min_learning_rate: 0.0002
+  metrics:
+    - fit_loss
+    - fit_accuracy
+
+data:
+  path: data/generated/femnist_natural/manifest.json
+
+model:
+  name: femnist_resnet18
+  input_channels: 1
+  base_channels: 32
+  blocks_per_stage:
+    - 2
+    - 2
+    - 2
+    - 2
+  group_norm_groups: 8
+  dropout: 0.1
+  num_classes: 62
+
+evaluation:
+  # One block per split. `every` is in rounds and always pins both endpoints:
+  # round 1 and the final round, plus every multiple in between -- every: 10
+  # gives 1, 10, 20, ..., final. `clients` is all | participating |
+  # sample:<N> | resample:<N>.
+  train:
+    every: 10
+    clients: participating
+  val:
+    every: 5
+    clients: all
+  test:
+    every: 10
+    clients: all
+  central_test:
+    every: 10
+
+client_statistics:
+  per_client_csv: false
+  std: true
+  variance: false
+  min: true
+  max: true
+  worst_percent: 10
+
+runtime:
+  deterministic: true
+  # Strict: raise on a nondeterministic kernel rather than warn once on
+  # stderr. Every CUDA kernel this model uses is deterministic on this stack
+  # (measured on an A100-40GB with torch 2.5.1 and CUDA 11.8, August 2026), so
+  # this costs nothing and catches a future op that is not.
+  deterministic_warn_only: false
+  device: auto
+  use_amp: false
+  checkpointing:
+    enabled: true
+    interval: 25
+    save_last: true
+    save_best: true
+    best_metric: val_accuracy_sample_weighted_avg
+    keep_last: 3
+    save_every_round: false
+  performance:
+    # NOT throughput-only: TF32 (10 stored mantissa bits) or a bfloat16 pair
+    # (~16) instead of fp32's 24, in every matmul of every pass. Keep it
+    # identical across every arm of a comparison; a run at "highest" is not
+    # like-for-like with these. See docs/10-reproducibility.md.
+    matmul_precision: high
+    cudnn_benchmark: false
+    dataloader:
+      num_workers: 0
+      pin_memory: true
+
+defaults:
+  global_rounds: 100
+  local_iterations: 2

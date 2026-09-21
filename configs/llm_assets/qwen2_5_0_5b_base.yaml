@@ -1,0 +1,4 @@
+model_identifier: Qwen/Qwen2.5-0.5B
+tokenizer_identifier: Qwen/Qwen2.5-0.5B
+revision: 060db6499f32faf8b98477b0a26969ef7d8b9987
+cache_dir: data/raw/models/qwen2_5_0_5b_base

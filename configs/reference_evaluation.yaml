@@ -1,0 +1,202 @@
+# Reference config for the evaluation and client-statistics sections.
+#
+# This is a runnable 12-round MNIST job, small enough to finish on a CPU in a
+# couple of minutes, whose only purpose is to show every evaluation option in
+# one place. `outputs/smoke/` is what it produces.
+#
+#   python -m fedbrew.core.runner --config configs/reference_evaluation.yaml
+
+experiment:
+  # Kept rather than inferred: the filename is reference_evaluation and the
+  # recorded name is shorter on purpose, so run.json and runs_index.jsonl
+  # read as 'reference' wherever this config is used as one.
+  name: reference
+  seed: 42
+  output_dir: outputs/smoke
+  use_run_subdir: false
+  tags:
+    - mnist
+    - label_skew
+    - fedavg
+    - mlp
+    - reference
+  notes: "Reference config for the evaluation and client_statistics sections; not a research arm."
+
+server:
+  strategy: fedavg
+  participation_rate: 0.02
+  metrics:
+    - fit_loss
+    - fit_accuracy
+
+client:
+  update_rule: fedavg
+  batch_size: 16
+  learning_rate: 0.01
+  learning_rate_schedule: constant
+  min_learning_rate: 0.0
+  update_mode: single_batch
+  frozen_gradient_weighting: examples
+  momentum: 0.0
+  weight_decay: 0.0
+  nesterov: false
+  metrics:
+    - fit_loss
+    - fit_accuracy
+    - optimizer_steps
+    - client_learning_rate
+
+data:
+  path: data/generated/mnist_one_label/manifest.json
+
+model:
+  name: mlp
+  input_dim: 784
+  hidden_dim: 64
+  num_classes: 10
+
+runtime:
+  deterministic: true
+  # Strict: raise on a nondeterministic kernel rather than warn once on
+  # stderr. Every CUDA kernel this model uses is deterministic on this stack
+  # (measured on an A100-40GB with torch 2.5.1 and CUDA 11.8, August 2026), so
+  # this costs nothing and catches a future op that is not.
+  deterministic_warn_only: false
+  device: cpu
+  use_amp: false
+  checkpointing:
+    enabled: true
+    interval: 100000
+    save_last: true
+    save_best: true
+    # Must be a val_* metric. Selecting best.pt on a test metric would make the
+    # reported test score optimistically biased, so anything else is rejected
+    # at config load. The direction is derived from the name -- loss minimises,
+    # accuracy maximises -- so there is no best_mode setting.
+    best_metric: val_accuracy_sample_weighted_avg
+    keep_last: 0
+    save_every_round: false
+  performance:
+    # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
+    # mantissa bits, where "high" drops them to TF32's 10 or a bfloat16 pair's
+    # ~16. torch's own default, written out rather than left implicit --
+    # absent and "highest" are the same run but not the same document, and the
+    # FEMNIST and OpenImage arms set "high", so a config started by copying
+    # this one would otherwise change the arithmetic silently. Keep it
+    # identical across every arm of a comparison.
+    matmul_precision: highest
+    cudnn_benchmark: false
+
+# One block per data split. Evaluation is the expensive part of a round, so
+# these knobs control cost only: which metrics come out is fixed, and is
+# identical for every split.
+#
+#   every    <int>  round 1, every multiple of `every`, and the final round --
+#                   every: 10 gives 1, 10, 20, ..., final. Both endpoints are
+#                   pinned so a curve has a baseline to compare against and
+#                   does not end on a stale number.
+#            final  the final round only
+#            never  not evaluated at all
+#
+#   clients  all              every client -- exact, most expensive
+#            participating    this round's trainers -- free, but the set changes
+#                             every round and is biased toward clients the model
+#                             has just been fitted on
+#            sample:<N>       N clients drawn once and reused every round, so a
+#                             change in the metric can only come from the model
+#            resample:<N>     N clients drawn fresh each round -- tracks the
+#                             whole population, at the cost of sampling noise in
+#                             every round-over-round comparison
+#
+# Both sampling modes are deterministic in experiment.seed, so a resumed run
+# keeps measuring the same clients without storing the draw anywhere.
+evaluation:
+  # An optimisation diagnostic: the global model re-evaluated on client train
+  # data is F(w), the objective every FL algorithm minimises. Cheap here because
+  # at participation_rate 0.02 only ~20 of 1000 clients are visited.
+  train:
+    every: 10
+    clients: participating
+
+  # The only split model selection is allowed to read. A fixed draw rather than
+  # `all` so the curve is comparable round to round at a fraction of the cost.
+  # "Fixed" means fixed across rounds. It does not mean shared with `test`:
+  # each split draws its own sample, so these 40 and test's 40 are independent
+  # draws that overlap only by chance (about 4% of 1000 clients). They used to
+  # be the identical 40 -- the draw key carried no split -- which made the
+  # reported test score a measurement of the very clients best.pt was selected
+  # on. See FINDINGS.csv P07-F07.
+  val:
+    every: 5
+    clients: sample:40
+
+  # Reporting only. `participating` is rejected here: the reported number must
+  # not come from the clients the model was just fitted on. Its own draw, for
+  # the same reason -- see the note on `val` above.
+  test:
+    every: 10
+    clients: sample:40
+
+  # The server's own pooled test shard, evaluated in one batched pass. A sibling
+  # of the three client splits rather than a flag on `test`, because it is
+  # different data with a different cost and either can be wanted alone. Set
+  # `every: never` to skip it, or give `test` `every: never` to keep only this.
+  central_test:
+    every: 10
+
+# Statistics across clients, computed from the per-client numbers an evaluation
+# pass already produced. Each toggle is independent, and each applies to loss
+# and accuracy alike on all three client splits.
+client_statistics:
+  # One row per client per round. Off by default: at `clients: all` this is
+  # 1.8M rows for a 500-round FEMNIST run.
+  per_client_csv: false
+  std: true
+  variance: true
+  min: true
+  max: true
+  # Mean over the worst N% of clients -- the lowest accuracies, but the highest
+  # losses. Emitted as e.g. test_accuracy_worst10. null or 0 turns it off.
+  worst_percent: 10
+
+# Stop a run that is no longer learning, and record why. A run stopped here
+# exits SUCCESSFULLY with status "diverged" or "stalled" in run.json and
+# runs_index.jsonl -- never with a non-zero exit code, because the packed SLURM
+# scripts treat a failing arm as a failed job and divergence would then be
+# indistinguishable from an OOM.
+divergence:
+
+  # Must be produced every round. fit_loss is the local training loss and is
+  # free; train_loss_sample_weighted_avg only exists on evaluation.train's
+  # schedule, so watching it would burn up to `every` rounds on a dead run.
+  # Caveat: on a one-label-per-client split each client fits its single label
+  # exactly, so fit_loss can sit at 0.0 with accuracy 1.0 while the global
+  # model is worthless. Watch a val_* metric there and accept the latency.
+  metric: fit_loss
+
+  # NaN/Inf. Fires on the round it appears, cannot false-positive.
+  non_finite: true
+
+  # Multiple of the metric's first strictly positive value. Relative, so one
+  # number works across tasks with different loss scales. null disables it.
+  blowup_factor: 10.0
+
+  # Absolute backstop, for a run already pathological when first measured --
+  # the relative check has nothing to anchor on there. For cross-entropy the
+  # natural reference is the random-guess loss ln(num_classes): 2.30 for
+  # MNIST's 10 classes, so 23.0 is an order of magnitude worse than random.
+  blowup_absolute: 23.0
+
+  # Observations (not rounds) without improvement before the run is called
+  # "stalled" -- a weaker and different claim from divergence, which is why it
+  # gets its own status. Off by default: it is the only detector that can be
+  # wrong, and counting consecutive increases instead would be worse still,
+  # since for trendless noise P(k in a row) = 1/(k+1)! gives a 500-round run
+  # about 21 false alarms at k=3.
+  patience: null
+  # Relative improvement needed to reset the patience counter.
+  min_delta: 0.0
+
+defaults:
+  global_rounds: 12
+  local_iterations: 1

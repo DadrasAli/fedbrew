@@ -1,0 +1,61 @@
+# examples/simplex-lsq -- least squares over the probability simplex.
+#
+#   minimise   F(x) = 1/2 ||x - theta_bar||^2 + zeta^2/2
+#   subject to x in Delta = { x >= 0, sum x = 1 }
+#
+# with H the d x d Hadamard matrix so H^T H = m I and the constrained optimum
+# is a Euclidean projection:
+#   theta_bar = x_true + displacement,  sum = 1.5, min = -0.09375  (infeasible)
+#   x*        = Proj(theta_bar) = x_true exactly,  F* = 0.21281
+#   F(theta_bar) - F* = -0.13281                     <- the negative floor
+#
+# The targets are a deterministic function of the spec below -- a planted
+# point and Hadamard rows in exact +/- pairs -- so `dataset.seed` fixes no
+# draw here. It is written because every generated dataset records the seed it
+# was made at, and an absent one reads as an omission.
+#
+#   fedbrew generate --config data/configs/examples/simplex-lsq.yaml
+#   fedbrew inspect-data data/generated/examples/simplex-lsq/manifest.json
+#
+# No shipped algorithm can solve this: there is no projection, no Frank-Wolfe
+# step and no mirror map anywhere in fedbrew, so every arm minimises F over all
+# of R^d and converges to theta_bar -- which is not a solution, and which
+# scores *better* than the optimum on the objective alone. The control that
+# puts the optimum back inside the simplex is simplex-lsq-feasible.yaml beside
+# this file. See examples/simplex-lsq/README.md.
+
+dataset:
+  name: simplex_lsq
+  output_dir: data/generated/examples/simplex-lsq
+  seed: 42
+  # The problem is defined outside the package, so the generator is too.
+  extensions:
+    - examples/simplex-lsq/problem.py
+
+partition:
+  # Not one of the five shipped strategies: the clients are the problem's, not
+  # a cut of a corpus. Recorded in the manifest as what happened.
+  strategy: analytic
+  # Four +/- pairs of client offsets, so their sum is exactly zero and the
+  # pooled OLS solution is theta_bar exactly.
+  num_clients: 8
+
+# No client_splits. The ratios describe a cut and there is nothing to cut:
+# f_i is defined over all m of a client's rows. All three splits hold the same
+# rows, which the manifest declares as client_test_source: identical_to_train.
+
+problem:
+  # d, and also m: the design is the full d x d Hadamard matrix. A power of
+  # two, so H^T H = m I exactly and the constrained optimum is a projection.
+  dim: 16
+
+  # How far the unconstrained optimum sits outside the simplex. At 0.5,
+  # theta_bar has eight coordinates at -0.09375 and sums to 1.5 -- both
+  # constraints violated, so neither min_coordinate nor simplex_sum is a
+  # column that happens to look fine.
+  infeasibility: 0.5
+
+  # zeta: how far the clients' own OLS solutions sit from the pooled one. The
+  # mean is exact regardless, so this moves the clients apart without moving
+  # x*. It contributes zeta^2/2 = 0.08 to F*, which no x removes.
+  heterogeneity: 0.4

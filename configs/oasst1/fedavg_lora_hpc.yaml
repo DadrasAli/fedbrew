@@ -1,0 +1,142 @@
+# NOT a baseline, and not comparable with the other two arms in this
+# directory. This is the HPC plumbing check: one round, four clients, batch
+# size 1, five local steps -- enough to prove the federated LoRA SFT path runs
+# end to end on the cluster and writes what it should. Read fedavg_base.yaml
+# or fedavg_instruct.yaml for the baseline arms.
+#
+# Three of the differences would be mistakes in a baseline and are the point
+# here:
+#
+#   client.update_rule is local_adamw, not fedavg. The `fedavg` in the
+#   filename is the SERVER strategy, which all three share; the two siblings
+#   pair it with the fedavg client rule and this pairs it with AdamW.
+#
+#   matmul_precision is `highest` where the siblings run `high`. That is a
+#   numerics difference, not a throughput one, so even with the optimizer
+#   matched this arm's losses would not be like-for-like.
+#
+#   defaults.global_rounds is 1 and participation_rate is 0.5 over four
+#   clients, against 200 rounds at 0.25 over twenty.
+#
+# The rest is the cluster: $FL_OUTPUT_ROOT/$FL_DATA_ROOT rather than in-tree
+# paths, device: cuda rather than auto, and checkpointing every round keeping
+# one, because a preempted job has to resume from the round it lost rather
+# than from the last interval.
+
+experiment:
+  # Written out rather than inferred from the filename, because the output
+  # root is shared with other jobs and `fedavg_lora_hpc` would not say which
+  # model or dataset produced the directory.
+  name: qwen05b_oasst1_lora_fedavg
+  seed: 42
+  output_dir: $FL_OUTPUT_ROOT/qwen05b_oasst1_lora_fedavg
+  use_run_subdir: false
+  tags:
+    - oasst1
+    - qwen2.5-0.5b
+    - lora
+    - local_adamw
+    - hpc_smoke
+  notes: "HPC plumbing check for the federated LoRA SFT path: one round, four clients. Not a baseline."
+
+server:
+  strategy: fedavg
+  participation_rate: 0.5
+  metrics:
+    - fit_loss
+    - fit_accuracy
+
+client:
+  # Conservative first-pass optimizer settings for federated LoRA SFT.
+  update_rule: local_adamw
+  batch_size: 1
+  learning_rate: 0.0001
+  learning_rate_schedule: constant
+  min_learning_rate: 0.0
+  weight_decay: 0.0
+  beta1: 0.9
+  beta2: 0.999
+  epsilon: 1.0e-8
+  max_local_steps: 5
+  metrics:
+    - fit_loss
+    - fit_accuracy
+
+data:
+  path: $FL_DATA_ROOT/oasst1_qwen05b_4clients/manifest.json
+
+model:
+  name: hf_causal_lm_lora
+  asset_manifest: $FL_CACHE_ROOT/models/qwen2_5_0_5b_instruct/asset_manifest.json
+  preparation_config: configs/llm_assets/qwen2_5_0_5b_instruct_hpc.yaml
+  sequence_length: 256
+  local_files_only: true
+  trust_remote_code: false
+  adapter_name: federated_sft
+  r: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
+  target_modules:
+    - q_proj
+    - v_proj
+  bias: none
+
+runtime:
+  deterministic: true
+  # Opt-out, deliberate: scaled_dot_product_attention's flash and
+  # memory-efficient backends have no deterministic implementation, so
+  # `false` here would raise rather than fall back. The cost of `true` is
+  # measured -- Qwen2.5-0.5B at the shipped shape gave 2 distinct gradient
+  # digests over 6 identical passes (A100-40GB, torch 2.5.1, CUDA 11.8, August
+  # 2026). Set to false, and pin the math backend, when a run has to be
+  # reproducible.
+  deterministic_warn_only: true
+  device: cuda
+  use_amp: false
+  checkpointing:
+    enabled: true
+    interval: 1
+    save_last: true
+    save_best: true
+    best_metric: val_loss_sample_weighted_avg
+    keep_last: 1
+    save_every_round: true
+  performance:
+    # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
+    # mantissa bits, where "high" drops them to TF32's 10 or a bfloat16 pair's
+    # ~16. torch's own default, written out rather than left implicit --
+    # absent and "highest" are the same run but not the same document, and the
+    # FEMNIST and OpenImage arms set "high", so a config started by copying
+    # this one would otherwise change the arithmetic silently. Keep it
+    # identical across every arm of a comparison.
+    matmul_precision: highest
+    cudnn_benchmark: false
+
+evaluation:
+  # One block per split. `every` is in rounds and always pins both endpoints:
+  # round 1 and the final round, plus every multiple in between -- every: 10
+  # gives 1, 10, 20, ..., final. `clients` is all | participating |
+  # sample:<N> | resample:<N>.
+  train:
+    every: 10
+    clients: participating
+  val:
+    every: 5
+    clients: all
+  test:
+    every: 10
+    clients: all
+  central_test:
+    every: 10
+
+client_statistics:
+  per_client_csv: false
+  std: true
+  variance: false
+  min: true
+  max: true
+  worst_percent: 10
+
+defaults:
+  global_rounds: 1
+  local_iterations: 1

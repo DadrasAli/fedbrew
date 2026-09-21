@@ -1,0 +1,17 @@
+dataset:
+  name: synthetic_classification
+  output_dir: data/generated/synthetic_classification
+  seed: 42
+
+synthetic:
+  num_samples: 90
+  input_dim: 5
+  num_classes: 2
+
+partition:
+  strategy: iid
+  num_clients: 3
+
+splits:
+  train_ratio: 0.8
+  test_ratio: 0.2

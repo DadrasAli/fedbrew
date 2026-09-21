@@ -1,0 +1,137 @@
+# examples/pl-1d, fedlalr arm -- F(x) = x^2 + 3 sin^2(x), tilted per client.
+#
+# The problem, its closed-form optimum and the generator that writes its data
+# are examples/pl-1d/problem.py, loaded below. Generate the data first:
+#
+#   fedbrew generate --config data/configs/examples/pl-1d.yaml
+#   fedbrew run --config configs/examples/pl-1d/fedlalr.yaml
+#
+# The rates are the ones this example has always shipped; its README records
+# the search band each sits inside rather than a grid it was picked from.
+
+experiment:
+  # Set rather than left to the filename stem, which is the convention's
+  # exception: the five examples ship the same arm names, so the stem alone
+  # would put "fedlalr" in runs_index.jsonl once per example.
+  name: pl-1d-fedlalr
+  seed: 42
+  output_dir: outputs/examples/pl-1d/fedlalr
+  use_run_subdir: false
+  tags:
+    - examples
+    - pl-1d
+    - fedlalr
+  notes: "Scalar Polyak-Lojasiewicz objective; x* = 0, F* = 0."
+  # The task, the model and the generator are defined outside the package.
+  # Loaded before any name below is looked up; run.json records the file's
+  # SHA-256 beside the commit.
+  extensions:
+    - examples/pl-1d/problem.py
+
+server:
+  strategy: fedlalr
+  # The paper aggregates the sampled clients uniformly. Every client here
+  # already carries the same weight, so this changes nothing and is written
+  # only so the arm is not silently different from the published algorithm.
+  aggregation_weighting: uniform
+  # Half the roster per round. At 1.0 the sampled mean shift is exactly zero
+  # and every round descends F itself, which reaches machine precision in
+  # three rounds and separates no two strategies. At 0.5 the round's
+  # objective is tilted by whichever four clients were drawn, so client drift
+  # and client sampling are both live and the arms differ.
+  participation_rate: 0.5
+  # Empty, deliberately: filter_metrics keeps everything when the list is
+  # empty, and a non-empty list would drop optimality_gap and
+  # distance_to_optimum on their way to the round record, since neither is a
+  # name a shipped config knows to ask for.
+  metrics: []
+
+client:
+  update_rule: fedlalr
+  # alpha. Local AMSGrad normalises the step by sqrt(v_hat), so this is not
+  # on the same scale as the SGD arms' learning_rate. Reads no update_mode.
+  learning_rate: 0.05
+  batch_size: 1
+  metrics: []
+
+data:
+  path: data/generated/examples/pl-1d/manifest.json
+
+model:
+  name: pl_scalar
+  # Where every client starts. Chosen outside the well around x*: F'' is
+  # negative on part of the path from here, so a run has to cross the
+  # non-convex region rather than descend a bowl. The one model key, and it
+  # says nothing about the problem, so there is nothing to cross-check
+  # against the manifest.
+  x_init: 2.5
+
+runtime:
+  device: cpu
+  use_amp: false
+  deterministic: true
+  deterministic_warn_only: false
+  checkpointing:
+    enabled: true
+    interval: 100000
+    save_last: true
+    # No val_ metric is produced, and best-checkpoint selection may only read
+    # one.
+    save_best: false
+    save_every_round: false
+    keep_last: 0
+  performance:
+    # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
+    # mantissa bits. Irrelevant for a scalar, written out because a config
+    # that omits it is not comparable with one that sets it.
+    matmul_precision: highest
+    # Also numerics-changing, and also irrelevant here: this arm runs on the
+    # CPU and touches no cuDNN kernel. Written because "irrelevant" and
+    # "unstated" are different claims, and only the first is the intended one.
+    cudnn_benchmark: false
+    # One thread. This problem is one-dimensional and torch keeps an intra-op
+    # region on one thread below a grain size of 32768 elements, so no
+    # reduction here is threaded at any setting. The pin states the number
+    # rather than inheriting the machine's; it is NOT what makes the tables
+    # reproducible -- see examples/simplex-lsq/README.md for the retraction.
+    torch_num_threads: 1
+    reuse_model: false
+    fast_batching: false
+
+evaluation:
+  # Nothing is held out: every split is the same single row, and the manifest
+  # says so (client_test_source: identical_to_train), which is why preflight
+  # notes that these test numbers are training numbers. `test` is measured
+  # because the per-client aggregate is the one place client spread is visible.
+  train:
+    every: never
+  val:
+    every: never
+  test:
+    every: 1
+    clients: all
+  # F(x) for the aggregated iterate, in one pass over every shift.
+  central_test:
+    every: 1
+
+client_statistics:
+  per_client_csv: true
+  std: true
+  variance: false
+  min: true
+  max: true
+  worst_percent: 10
+
+divergence:
+  metric: fit_loss
+  non_finite: true
+  blowup_factor: 100.0
+  # F(2.5) = 6.25 + 3 sin^2(2.5) = 7.32, so a fit_loss two orders of
+  # magnitude above the start is a run that has left the basin.
+  blowup_absolute: 1000.0
+  patience: null
+  min_delta: 0.0
+
+defaults:
+  global_rounds: 200
+  local_iterations: 5

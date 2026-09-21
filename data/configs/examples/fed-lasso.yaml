@@ -1,0 +1,69 @@
+# examples/fed-lasso -- least squares plus an L1 term, planted sparse signal.
+#
+#   f_i(x) = (1/2m)||H x - y_i||^2 + lam ||x||_1,  H^T H = m I
+#   F(x) = 1/2 ||x - x_true||^2 + lam ||x||_1 + zeta^2/2
+#   x*   = S_lam(x_true),  F* = 0.16375,  F(x_0) - F* = 0.5725
+#
+# The targets are a deterministic function of the spec below -- a planted
+# signal plus Hadamard rows in exact +/- pairs -- so `dataset.seed` fixes no
+# draw here. It is written because every generated dataset records the seed it
+# was made at, and an absent one reads as an omission rather than as "nothing
+# was drawn".
+#
+#   fedbrew generate --config data/configs/examples/fed-lasso.yaml
+#   fedbrew inspect-data data/generated/examples/fed-lasso/manifest.json
+#
+# No shipped algorithm can solve this: there is no proximal operator anywhere
+# in fedbrew, so every arm runs subgradient descent on a non-smooth objective
+# and none produces an exact zero. The control that removes the non-smooth
+# term is fed-lasso-smooth.yaml beside this file. See
+# examples/fed-lasso/README.md.
+
+dataset:
+  name: fed_lasso
+  output_dir: data/generated/examples/fed-lasso
+  seed: 42
+  # The problem is defined outside the package, so the generator is too.
+  extensions:
+    - examples/fed-lasso/problem.py
+
+partition:
+  # Not one of the five shipped strategies: the clients are the problem's, not
+  # a cut of a corpus. Recorded in the manifest as what happened.
+  strategy: analytic
+  # Four +/- pairs of client offsets, so their sum is exactly zero and the
+  # pooled OLS solution is x_true exactly.
+  num_clients: 8
+
+# No client_splits. The ratios describe a cut and there is nothing to cut:
+# f_i is defined over all m of a client's rows, so holding rows out would
+# change the objective rather than estimate it. All three splits hold the same
+# m rows, which the manifest declares as client_test_source:
+# identical_to_train.
+
+problem:
+  # d, and also m: the design is the full d x d Hadamard matrix. A power of
+  # two, so H^T H = m I exactly and the lasso has a closed form.
+  dim: 16
+
+  # Non-zeros in x_true, at evenly spaced coordinates, magnitudes halving and
+  # signs alternating: 1.0 at 0, -0.5 at 5, 0.25 at 10. The smallest planted
+  # coefficient is 2^-(s-1) = 0.25.
+  sparsity: 3
+
+  # lam. Below 0.25, so x* keeps the whole planted support and support
+  # recovery is possible in principle; the shrinkage still moves x* off x_true
+  # by exactly lam*sqrt(s) = 0.0866, which is a floor and not an error.
+  penalty_strength: 0.05
+
+  # Sup-norm of the pooled perturbation of the OLS solution. 0.0 keeps the
+  # pooled problem noiseless, so x* differs from x_true only by the shrinkage.
+  # Above penalty_strength every off-support coordinate becomes a false
+  # positive in x* itself and the ceiling on support_f1 drops below 1.
+  noise: 0.0
+
+  # zeta: how far the clients' own OLS solutions sit from the pooled one. At
+  # 0.4 each off-support coordinate of theta_i is 0.1, above lam, so *every
+  # client's own lasso solution is dense* (16 non-zeros) while the federated
+  # one has 3. No client can see the true support; only the average can.
+  heterogeneity: 0.4

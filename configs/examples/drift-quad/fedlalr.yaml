@@ -1,0 +1,135 @@
+# examples/drift-quad, fedlalr arm -- the base dials: kappa = 100, zeta = 1.
+#
+# The problem, its closed-form optimum and the generator that writes its data
+# are examples/drift-quad/problem.py, loaded below. Generate the data first:
+#
+#   fedbrew generate --config data/configs/examples/drift-quad.yaml
+#   fedbrew run --config configs/examples/drift-quad/fedlalr.yaml
+#
+# client.learning_rate is the best of the grid in this example's README,
+# scored on central_test_loss at the final round, re-tuned for these dials.
+
+experiment:
+  # Set rather than left to the filename stem, which is the convention's
+  # exception: three dial settings ship the same eight arm names, so the stem
+  # alone would put "fedavg" in runs_index.jsonl three times over.
+  name: drift-quad-fedlalr
+  seed: 42
+  output_dir: outputs/examples/drift-quad/fedlalr
+  use_run_subdir: false
+  tags:
+    - examples
+    - drift-quad
+    - fedlalr
+  notes: "d=16, kappa=100, zeta=1; x* = 0, F* = 0."
+  # The task, the model and the generator are defined outside the package.
+  # Loaded before any name below is looked up; run.json records the file's
+  # SHA-256 beside the commit.
+  extensions:
+    - examples/drift-quad/problem.py
+
+server:
+  strategy: fedlalr
+  participation_rate: 0.5
+  metrics: []
+  # The paper aggregates the sampled clients uniformly. Every client here
+  # already carries the same weight, so this changes nothing and is written
+  # only so the arm is not silently different from the published algorithm.
+  aggregation_weighting: uniform
+
+client:
+  update_rule: fedlalr
+  learning_rate: 0.001
+  batch_size: 1
+  metrics: []
+
+data:
+  path: data/generated/examples/drift-quad/manifest.json
+
+model:
+  name: quad_vector
+  # input_dim is a named ModelConfig field; condition_number and x_init travel
+  # as model.extra, forwarded verbatim and then checked by
+  # reject_unknown_model_keys. DriftQuadTask cross-checks all of it against
+  # the manifest's `reference`, so a model block describing a different
+  # problem than the data is refused rather than run.
+  input_dim: 16
+  condition_number: 100.0
+  # The per-coordinate energy of the starting point: x_0[j] = x_init/sqrt(a_j),
+  # so every coordinate contributes x_init^2/2 to the initial gap and
+  # F(x_0) - F* is exactly d*x_init^2/2 = 8.0, whatever kappa is. Not x_init in
+  # every coordinate: from a start where every coordinate is equidistant from
+  # 0, a per-coordinate normalised server step lands on x* in one round
+  # regardless of kappa, and the table then measures the start.
+  x_init: 1.0
+
+runtime:
+  device: cpu
+  use_amp: false
+  deterministic: true
+  deterministic_warn_only: false
+  checkpointing:
+    enabled: true
+    interval: 100000
+    save_last: true
+    # No val_ metric is produced, and best-checkpoint selection may only read
+    # one.
+    save_best: false
+    save_every_round: false
+    keep_last: 0
+  performance:
+    # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
+    # mantissa bits. Irrelevant at d = 16, written out because a config that
+    # omits it is not comparable with one that sets it.
+    matmul_precision: highest
+    # Also numerics-changing, and also irrelevant here: this arm runs on the
+    # CPU and touches no cuDNN kernel. Written because "irrelevant" and
+    # "unstated" are different claims, and only the first is the intended one.
+    cudnn_benchmark: false
+    # One thread. These problems are 16-dimensional and torch keeps an
+    # intra-op region on one thread below a grain size of 32768 elements, so
+    # no reduction here is threaded at any setting. The pin states the number
+    # rather than inheriting the machine's; it is NOT what makes the tables
+    # reproducible -- see examples/simplex-lsq/README.md for the retraction.
+    torch_num_threads: 1
+    reuse_model: false
+    fast_batching: false
+
+evaluation:
+  # Nothing is held out: every split is the same single row, and the manifest
+  # says so (client_test_source: identical_to_train), which is why preflight
+  # notes that these test numbers are training numbers. `test` is measured
+  # because the per-client aggregate is the one place client spread is visible.
+  train:
+    every: never
+  val:
+    every: never
+  test:
+    every: 1
+    clients: all
+  # F(x) for the aggregated iterate, in one pass over every offset.
+  central_test:
+    every: 1
+
+client_statistics:
+  per_client_csv: true
+  std: true
+  variance: false
+  min: true
+  max: true
+  worst_percent: 10
+
+divergence:
+  metric: fit_loss
+  non_finite: true
+  blowup_factor: 100.0
+  # F(x_0) - F* is exactly 8.0 at every dial setting, and fit_loss is one
+  # client's tilted objective near that. Four orders above it is a run that
+  # has left the basin rather than one that is merely slow.
+  blowup_absolute: 100000.0
+  patience: null
+  min_delta: 0.0
+
+defaults:
+  global_rounds: 200
+  local_iterations: 10

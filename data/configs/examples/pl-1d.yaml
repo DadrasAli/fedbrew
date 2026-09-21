@@ -1,0 +1,48 @@
+# examples/pl-1d -- a scalar Polyak-Lojasiewicz objective, tilted per client.
+#
+#   F(x) = x^2 + 3 sin^2(x),  x* = 0,  F* = 0,  PL constant mu = 1/32
+#   f_i(x) = F(x) + s_i x,    sum_i s_i = 0
+#
+# The shifts are a deterministic function of the spec below -- exact +/- pairs
+# -- so `dataset.seed` fixes no draw here. It is written because every
+# generated dataset records the seed it was made at, and an absent one reads
+# as an omission rather than as "nothing was drawn".
+#
+#   fedbrew generate --config data/configs/examples/pl-1d.yaml
+#   fedbrew inspect-data data/generated/examples/pl-1d/manifest.json
+#
+# See examples/pl-1d/README.md.
+
+dataset:
+  name: pl_1d
+  output_dir: data/generated/examples/pl-1d
+  seed: 42
+  # The problem is defined outside the package, so the generator is too.
+  extensions:
+    - examples/pl-1d/problem.py
+
+partition:
+  # Not one of the five shipped strategies: the clients are the problem's, not
+  # a cut of a corpus. Recorded in the manifest as what happened.
+  strategy: analytic
+  # Four +/- pairs of shifts, so sum_i s_i is exactly zero. More clients does
+  # not make the problem harder -- the mean is F either way. What it changes
+  # is how many distinct minimisers the round has to reconcile, and, under
+  # participation < 1, how much the sampled mean drifts from F.
+  num_clients: 8
+
+# No client_splits. The ratios describe a cut and there is nothing to cut:
+# f_i is not estimated from samples, it *is* the client, so all three splits
+# hold the same single row. The manifest declares that as
+# client_test_source: identical_to_train, and preflight tells a reader that
+# their test_* and central_test_* numbers are training numbers.
+
+problem:
+  # Largest |s_i|. Client i's own minimiser solves F'(x) = -s_i, so this is
+  # the client-drift knob and the only source of heterogeneity in the problem.
+  #   0.0 -> every client is F; FedAvg with 1 local step is exact gradient
+  #          descent and every strategy sees the same iterates.
+  #   2.0 -> client minimisers spread over roughly [-0.26, 0.26]. The
+  #          shifts themselves run to +/-2.0; the minimisers solve
+  #          F'(x) = -s_i, which is far nearer the origin.
+  shift_scale: 2.0

@@ -1,0 +1,139 @@
+experiment:
+  seed: 42
+  # Short, stable, no run-id subdirectory: the README's quickstart names this
+  # path directly and expects it to always be the same place. A second run of
+  # this exact command overwrites round_metrics.csv, run.json and the
+  # checkpoints cleanly -- that is the trade for a predictable path. Only a
+  # *different* seed into this directory is refused; see
+  # fedbrew/core/runner.py's _refuse_a_foreign_seed.
+  output_dir: outputs/synthetic/fedavg
+  use_run_subdir: false
+  tags:
+    - synthetic
+    - dirichlet
+    - fedavg
+    - mlp
+  notes: "FedAvg baseline on the fifty-client Dirichlet synthetic dataset."
+
+server:
+  strategy: fedavg
+  participation_rate: 1
+  metrics:
+    - fit_loss
+    - fit_accuracy
+
+client:
+  update_rule: fedavg
+
+  batch_size: 16
+  learning_rate: 0.01
+  learning_rate_schedule: constant
+  min_learning_rate: 0.0
+
+  # single_batch | sequential_epoch | frozen_batch_gradients
+  # Started as configs/mnist/fedavg.yaml's single_batch, to match that
+  # family's shape -- wrong once measured. That config amortises one step per
+  # round over 1000 rounds; at this config's ~30 rounds, single_batch left
+  # test accuracy flat at chance (~12% at round 30, chance is 10%) instead of
+  # climbing. sequential_epoch runs a full local epoch's worth of steps (~5,
+  # at batch_size 16 over a ~77-row mean client) each round, which is enough
+  # to move it: 22% and still rising at round 30. A quickstart that is
+  # visibly not learning is the first thing a reader would see, so the
+  # measurement overrules matching the mnist family here.
+  update_mode: sequential_epoch
+
+  # examples | uniform | sum
+  frozen_gradient_weighting: examples
+
+  momentum: 0.0
+  weight_decay: 0.0
+  nesterov: false
+
+  metrics:
+    - fit_loss
+    - fit_accuracy
+    - optimizer_steps
+    - client_learning_rate
+
+data:
+  path: data/generated/synthetic/manifest.json
+
+model:
+  name: mlp
+  input_dim: 32
+  hidden_dim: 32
+  num_classes: 10
+
+runtime:
+  deterministic: true
+  # Strict: raise on a nondeterministic kernel rather than warn once on
+  # stderr. See configs/mnist/fedavg.yaml's identical comment -- this is the
+  # same MLP-on-CPU/CUDA arithmetic, so the same guarantee holds.
+  deterministic_warn_only: false
+  # Pinned rather than auto, unlike the mnist family: the README says this
+  # exact command runs on CPU in about a minute, and a GPU host resolving auto to
+  # cuda would pay a warm-up tax on a model this small for no benefit.
+  device: cpu
+  use_amp: false
+  checkpointing:
+    enabled: true
+    interval: 100000
+    save_last: true
+    save_best: false
+    best_metric: val_accuracy_sample_weighted_avg
+    keep_last: 0
+    save_every_round: false
+  performance:
+    # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
+    # mantissa bits, where "high" drops them to TF32's 10 or a bfloat16 pair's
+    # ~16. torch's own default, written out rather than left implicit --
+    # absent and "highest" are the same run but not the same document. Keep it
+    # identical across every arm of a comparison.
+    matmul_precision: highest
+    cudnn_benchmark: false
+    # Absent from the mnist family, which this config otherwise mirrors --
+    # added here because this one is the config every reader runs first, and
+    # left unset it was not fine. This workload is the same shape as
+    # configs/examples/*: tiny per-client tensors, many clients, one process,
+    # and unset, torch took every core this shared node exposes and spent
+    # more on thread launch/join than on the arithmetic -- docs/11 §4.4.
+    # Measured, not assumed, on 2026-09-15 with one run each on a shared AMD
+    # EPYC 7502 node (128 logical CPUs; torch 2.5.1 defaulted to 64 threads):
+    # 30 rounds of this config took 16.6s unset and 6.3s pinned to 1, and the
+    # process used 392s and 11s of CPU time.
+    torch_num_threads: 1
+
+evaluation:
+  train:
+    every: 10
+    clients: all
+  val:
+    every: 5
+    clients: all
+  test:
+    every: 50
+    clients: all
+  central_test:
+    every: 50
+
+client_statistics:
+  per_client_csv: false
+  std: true
+  variance: false
+  min: true
+  max: true
+  worst_percent: 10
+
+divergence:
+  metric: fit_loss
+  non_finite: true
+  blowup_factor: 10.0
+  # 10 x ln(10): ten times the random-guess cross-entropy for ten classes,
+  # identical to configs/mnist/fedavg.yaml's -- also a ten-class problem.
+  blowup_absolute: 23.0
+  patience: null
+  min_delta: 0.0
+
+defaults:
+  global_rounds: 30
+  local_iterations: 1

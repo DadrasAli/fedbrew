@@ -1,0 +1,178 @@
+experiment:
+  seed: 42
+  output_dir: outputs/femnist/fedadam
+  use_run_subdir: false
+  tags:
+    - femnist
+    - natural_non_iid
+    - fedadam
+    - resnet18_gn
+  notes: "FedAdam (Reddi et al., arXiv:2003.00295) on naturally writer-partitioned FEMNIST."
+
+# Server-side adaptive optimization. The client is plain local SGD; all of the
+# adaptivity is in how the server applies the aggregated pseudo-gradient
+#   delta_t = mean_i(x_i^K) - x_t
+#   m_t     = beta1*m + (1-beta1)*delta_t
+#   v_t     = beta2*v + (1-beta2)*delta_t^2          <- FedAdam
+#   x_{t+1} = x_t + server_learning_rate * m_t/(sqrt(v_t) + tau)
+#
+# Known deviation from the paper: delta_t here is example-weighted (inherited
+# from the FedAvg aggregation path) rather than the uniform 1/|S| of Algorithm 2.
+# The paper notes non-uniform weighting "can be incorporated fairly easily", and
+# keeping it matches the fedavg/fedprox/scaffold baselines.
+server:
+  strategy: fedadam
+  participation_rate: 0.01
+
+  # Paper's best for EMNIST CR (their closest task): eta=10^-2.5, tau=10^-4.
+  # tau floors the denominator sqrt(v) + tau, so how much it matters depends
+  # on the scale of delta, which the model and the data set.
+  server_learning_rate: 0.003
+  beta1: 0.9
+  beta2: 0.99
+  tau: 0.0001
+
+  metrics:
+    - fit_loss
+    - fit_accuracy
+
+# Identical to the fedavg/fedprox/scaffold baselines so the ONLY difference
+# between those sweeps and this one is the server update rule.
+client:
+  update_rule: fedavg
+  batch_size: 16
+  learning_rate: 0.2
+  learning_rate_schedule: constant
+  min_learning_rate: 0.0
+  update_mode: sequential_epoch
+  frozen_gradient_weighting: examples
+  momentum: 0.0
+  weight_decay: 0.0
+  nesterov: false
+  metrics:
+    - fit_loss
+    - fit_accuracy
+    - optimizer_steps
+    - client_learning_rate
+
+data:
+  path: data/generated/femnist_natural/manifest.json
+
+model:
+  name: femnist_resnet18
+  input_channels: 1
+  base_channels: 32
+  blocks_per_stage: [2, 2, 2, 2]
+  group_norm_groups: 8
+  dropout: 0.1
+  num_classes: 62
+
+runtime:
+  deterministic: true
+  # Strict: raise on a nondeterministic kernel rather than warn once on
+  # stderr. Every CUDA kernel this model uses is deterministic on this stack
+  # (measured on an A100-40GB with torch 2.5.1 and CUDA 11.8, August 2026), so
+  # this costs nothing and catches a future op that is not.
+  deterministic_warn_only: false
+  device: auto
+  use_amp: false
+  checkpointing:
+    enabled: true
+    interval: 100000
+    save_last: true
+    save_best: true
+    best_metric: val_accuracy_sample_weighted_avg
+    keep_last: 0
+    save_every_round: false
+  performance:
+    # NOT throughput-only: TF32 (10 stored mantissa bits) or a bfloat16 pair
+    # (~16) instead of fp32's 24, in every matmul of every pass. Keep it
+    # identical across every arm of a comparison; a run at "highest" is not
+    # like-for-like with these. See docs/10-reproducibility.md.
+    matmul_precision: high
+    cudnn_benchmark: false
+    # The three below are throughput-only and do not change results.
+    # See docs/10-reproducibility.md.
+    reuse_model: true
+    fast_batching: true
+    shard_cache_bytes: 4294967296
+    dataloader:
+      num_workers: 0
+      pin_memory: true
+
+evaluation:
+  # One block per split. `every` is in rounds and always pins both endpoints:
+  # round 1 and the final round, plus every multiple in between -- every: 10
+  # gives 1, 10, 20, ..., final. `clients` is all | participating |
+  # sample:<N> | resample:<N>.
+  train:
+    every: 10
+    clients: participating
+  val:
+    every: 5
+    clients: all
+  # `never`, not omitted: leaving the block out falls back to the default
+  # every: 10 / clients: all, and this is a cost choice, not a missing split.
+  # FEMNIST shards are client_shard_format split_v2 (train + eval + test), so
+  # a per-client test split does exist and evaluating it would be 3597
+  # per-client passes. central_test below reads the same examples in one
+  # batched pass: global_test.pt IS the concatenation of every writer's TEST
+  # slice (client_test_source: within_client_holdout_disjoint_from_eval), so
+  # central_test_* is the example-weighted pool of the per-client test metric,
+  # measured on data disjoint from the eval slice that val_* and best.pt
+  # selection read. What one batched pass cannot produce is the per-writer
+  # spread -- test_accuracy_{std,min,worst10} need the per-client pass.
+  #
+  # A run's shard format is recorded in run.json under
+  # reproducibility.dataset, with the manifest's sha256: a number produced
+  # from an older split_v1 shard set, whose global_test.pt was a copy of the
+  # eval data, is distinguishable from one produced here.
+  test:
+    every: never
+  central_test:
+    every: 10
+
+client_statistics:
+  per_client_csv: false
+  std: true
+  variance: false
+  min: true
+  max: true
+  worst_percent: 10
+
+# Stop an arm that is no longer learning and record why. A stopped run exits
+# SUCCESSFULLY with status "diverged"/"stalled" in run.json and
+# runs_index.jsonl -- never non-zero, so a packed job cannot mistake it for a
+# crash. Grep the sweep afterwards with:
+#   jq -r 'select(.status!="completed")|[.status,.stopped_round,.run_id]|@tsv' \
+#     outputs/runs_index.jsonl
+divergence:
+
+  # The only metric produced every round; a val_*/train_* metric would only
+  # exist on its evaluation schedule and cost up to `every` rounds of latency.
+  metric: fit_loss
+
+  non_finite: true
+
+  # Multiple of the first strictly positive fit_loss.
+  blowup_factor: 10.0
+
+  # Absolute backstop, for a run already pathological when first measured --
+  # the relative check has nothing to anchor on there. FEMNIST has 62 classes,
+  # so the random-guess cross-entropy is ln(62) = 4.13 and 41.3 is an order of
+  # magnitude worse than random. This is NOT the 23.0 used on MNIST: that
+  # number is 10x ln(10) and would sit below FEMNIST's own useful loss range.
+  # The MNIST one-label caveat also does not apply here -- FEMNIST is
+  # partitioned by writer, so no client holds a single class and fit_loss does
+  # not collapse to 0.0 while the global model is worthless.
+  blowup_absolute: 41.3
+
+  # Off: it is the only detector that can be wrong. A run can sit flat for a
+  # long time and then improve, and a false stop would look like a result, so
+  # it stays off unless a setting is known to improve without long plateaus.
+  patience: null
+  min_delta: 0.0
+
+defaults:
+  global_rounds: 500
+  local_iterations: 16

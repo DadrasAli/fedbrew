@@ -1,0 +1,160 @@
+# examples/fed-lasso, fedlalr arm -- the smooth control: penalty = l2.
+#
+# The same problem as configs/examples/fed-lasso/ with one dial turned:
+# problem.penalty is l2, so lam multiplies ||x||^2/2m instead of ||x||_1 and
+# the objective is differentiable everywhere. Same planted signal, same lam,
+# same design, same offsets, same grid, same horizon. Generate the data first:
+#
+#   fedbrew generate --config data/configs/examples/fed-lasso-l2.yaml
+#   fedbrew run --config configs/examples/fed-lasso-l2/fedlalr.yaml
+#
+# client.learning_rate is the best of the grid in this example's README,
+# scored on central_test_optimality_gap at the final round.
+
+experiment:
+  # Set rather than left to the filename stem, which is the convention's
+  # exception: the examples ship the same arm names, so the stem alone would
+  # put "fedlalr" in runs_index.jsonl once per example and dial setting.
+  name: fed-lasso-l2-fedlalr
+  seed: 42
+  output_dir: outputs/examples/fed-lasso-l2/fedlalr
+  use_run_subdir: false
+  tags:
+    - examples
+    - fed-lasso-l2
+    - fedlalr
+  notes: "Federated ridge, the smooth control; d=16, s=3, lam=0.05 on ||x||^2/2m, zeta=0.4; x* = m*x_true/(m+lam)."
+  # The task, the model and the generator are defined outside the package.
+  # Loaded before any name below is looked up; run.json records the file's
+  # SHA-256 beside the commit.
+  extensions:
+    - examples/fed-lasso/problem.py
+
+server:
+  strategy: fedlalr
+  # The paper aggregates the sampled clients uniformly. Every client here
+  # already carries the same weight, so this changes nothing and is written
+  # only so the arm is not silently different from the published algorithm.
+  aggregation_weighting: uniform
+  # Every client, every round, as on the L1 arm. What differs is why it
+  # matters: drift-quad's cancellation identity needs the local map to be
+  # affine, and sign(x) is not -- but lam*x/m is, so here the local map IS
+  # affine and the identity does hold. At participation 1.0 there is no
+  # sampling for it to cancel; a rate below 1.0 is where that would show, and
+  # changing it would stop this being a control for the L1 arm.
+  participation_rate: 1.0
+  # Empty, deliberately: filter_metrics keeps everything when the list is
+  # empty, and a non-empty list would drop the six metrics beyond `loss` on
+  # their way to the round record, since none is a name a shipped config knows
+  # to ask for.
+  metrics: []
+
+client:
+  update_rule: fedlalr
+  # alpha. Local AMSGrad normalises the step by sqrt(v_hat), so this is not on
+  # the same scale as the SGD arms' learning_rate. Reads no update_mode.
+  learning_rate: 0.003
+  batch_size: 4
+  metrics: []
+
+data:
+  path: data/generated/examples/fed-lasso-l2/manifest.json
+
+model:
+  name: lasso_vector
+  # input_dim is a named ModelConfig field; penalty_strength, penalty,
+  # support_tolerance and x_init travel as model.extra, forwarded verbatim and
+  # then checked by reject_unknown_model_keys. FedLassoTask cross-checks d, lam
+  # and the penalty form against the manifest's `reference`, so a model block
+  # describing a different problem than the data is refused rather than run.
+  input_dim: 16
+  # lam, the same number as the L1 arm and NOT the same scale: the L2 term
+  # carries the residual's 1/m and the L1 term does not. Part of the objective
+  # the client descends, which is why it is on the model as well as in the
+  # data.
+  penalty_strength: 0.05
+  # The dial, and the only line in this file the L1 arm does not have.
+  penalty: l2
+  # Kept at the L1 arm's value so the two tables are read at the same
+  # threshold, and reported by the README with the warning that under ridge it
+  # measures nothing: x* is theta_bar scaled, so no coordinate is selected out
+  # and the support columns say what the pooled OLS solution already said.
+  support_tolerance: 1.0e-3
+  # The same start as the L1 arm: d exact zeros, none of which survives a
+  # single gradient step. No arm here produces a zero either, and for a
+  # stronger reason: on the L1 problem a proximal step would and none is
+  # shipped, while under ridge no method would, because x* is theta_bar
+  # scaled and nothing in the objective sets a coordinate to zero.
+  x_init: 0.0
+
+runtime:
+  device: cpu
+  use_amp: false
+  deterministic: true
+  deterministic_warn_only: false
+  checkpointing:
+    enabled: true
+    interval: 100000
+    save_last: true
+    # No val_ metric is produced, and best-checkpoint selection may only read
+    # one.
+    save_best: false
+    save_every_round: false
+    keep_last: 0
+  performance:
+    # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
+    # mantissa bits. This model's matmul is 16x16, so it is irrelevant here;
+    # written out because a config that omits it is not comparable with one
+    # that sets it.
+    matmul_precision: highest
+    # Also numerics-changing, and also irrelevant here: this arm runs on the
+    # CPU and touches no cuDNN kernel. Written because "irrelevant" and
+    # "unstated" are different claims, and only the first is the intended one.
+    cudnn_benchmark: false
+    # One thread. These problems are 16-dimensional and torch keeps an
+    # intra-op region on one thread below a grain size of 32768 elements, so
+    # no reduction here is threaded at any setting. The pin states the number
+    # rather than inheriting the machine's; it is NOT what makes the tables
+    # reproducible -- see examples/simplex-lsq/README.md for the retraction.
+    torch_num_threads: 1
+    reuse_model: false
+    fast_batching: false
+
+evaluation:
+  # Nothing is held out: every split is the same m rows, and the manifest says
+  # so (client_test_source: identical_to_train), which is why preflight notes
+  # that these test numbers are training numbers. `test` is measured because
+  # the per-client aggregate is the one place client spread is visible.
+  train:
+    every: never
+  val:
+    every: never
+  test:
+    every: 1
+    clients: all
+  # F(x) for the aggregated iterate, in one pass over every client's rows.
+  central_test:
+    every: 1
+
+client_statistics:
+  per_client_csv: true
+  std: true
+  variance: false
+  min: true
+  max: true
+  worst_percent: 10
+
+divergence:
+  metric: fit_loss
+  non_finite: true
+  blowup_factor: 100.0
+  # F(x_0) = 0.736 at these dials and F* = 0.0820, so a fit_loss four orders
+  # of magnitude above the start is a run that has left the basin rather than
+  # one that is merely slow.
+  blowup_absolute: 10000.0
+  patience: null
+  min_delta: 0.0
+
+defaults:
+  global_rounds: 150
+  local_iterations: 3
