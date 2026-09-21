@@ -277,7 +277,7 @@ performance change is only a performance change if the numbers are identical.**
 | --- | --- |
 | `fedbrew/core/loop.py` | `_stream_fit_results` — streaming fit results, and why clients are not released after fitting |
 | `fedbrew/core/state.py` | `ClientHistorySummary`, the running totals |
-| `fedbrew/core/artifacts.py` | `flush_client_csvs` and `_append_csv_rows` — the per-client CSV write volume, and the append path that replaced rewriting each file in full |
+| `fedbrew/core/artifacts.py` | `flush_round_metrics_csv`, `flush_client_csvs` and `_append_csv_rows` — the CSV write volume, and the append path that replaced rewriting each file in full |
 | `fedbrew/core/factory.py` | `_shard_cache_bytes`, including the centralized zero |
 | `fedbrew/core/runtime_setup.py` | `configure_runtime` — thread count, cudnn, matmul |
 | `fedbrew/core/data_staging.py` | staging, and the unresolvable-root path |
@@ -325,6 +325,7 @@ python tools/bench_compare_runs.py --help
 | --- | --- |
 | `tests/test_docs_performance.py` | The dataloader keys, their gates, the staging keys and the tool list here match the code. |
 | `tests/test_client_csv_append.py` | The per-client CSVs append rather than rewrite. |
+| `tests/test_round_metrics_are_appended.py` | `round_metrics.csv` appends rather than rewrites. |
 | `tests/test_checkpoint_no_duplicate_model.py` | A checkpoint stores the model once. |
 | `tests/test_client_history_summary.py` | The running totals replace the re-scan. |
 | `tests/test_aggregation_peak_memory.py` | §3's peak model memory, measured at three participation counts. |

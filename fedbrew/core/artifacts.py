@@ -107,37 +107,37 @@ def save_round_metrics_csv(
 
     metrics_path = prepare_output_dir(output_dir) / "round_metrics.csv"
     metric_names = _round_metric_names(history)
-    fieldnames = [
-        "round_id",
-        "num_clients",
-        "num_examples",
-        *metric_names,
-        *_ROUND_TIMING_FIELDS,
-    ]
     with _atomic_text_writer(metrics_path) as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer = csv.DictWriter(file, fieldnames=_round_metrics_fields(metric_names))
         writer.writeheader()
         for record in history:
-            row: dict[str, object] = {
-                "round_id": record.round_id,
-                "num_clients": record.num_clients,
-                "num_examples": record.num_examples,
-            }
-            row.update({name: record.metrics.get(name, "") for name in metric_names})
-            # Rounds replayed from an artifact written before timings existed
-            # leave these blank rather than claiming a zero-second round.
-            row.update(
-                {
-                    column: (
-                        ""
-                        if record.timings is None
-                        else round(getattr(record.timings, attribute), 4)
-                    )
-                    for column, attribute in _ROUND_TIMING_FIELDS.items()
-                }
-            )
-            writer.writerow(row)
+            writer.writerow(_round_metrics_row(record, metric_names))
     return metrics_path
+
+
+def _round_metrics_fields(metric_names: Sequence[str]) -> list[str]:
+    return ["round_id", "num_clients", "num_examples", *metric_names, *_ROUND_TIMING_FIELDS]
+
+
+def _round_metrics_row(
+    record: MetricRecord,
+    metric_names: Sequence[str],
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        "round_id": record.round_id,
+        "num_clients": record.num_clients,
+        "num_examples": record.num_examples,
+    }
+    row.update({name: record.metrics.get(name, "") for name in metric_names})
+    # Rounds replayed from an artifact written before timings existed
+    # leave these blank rather than claiming a zero-second round.
+    row.update(
+        {
+            column: "" if record.timings is None else round(getattr(record.timings, attribute), 4)
+            for column, attribute in _ROUND_TIMING_FIELDS.items()
+        }
+    )
+    return row
 
 
 def save_client_metrics_csv(
@@ -197,9 +197,9 @@ def _append_csv_rows(
     of that single call, and these files are appended to every round of every
     run. It is a smaller window than the full rewrite it replaces, which spent
     a large part of each round streaming the whole history into a temp file --
-    but unlike the rename, it is not atomic, so the last row can be short if
-    the process dies inside it. The two readers drop an unparseable final row
-    for exactly that reason.
+    but unlike the rename, it is not atomic, so the last row can be cut short
+    if the process dies inside it. _read_appended_rows drops such a row for
+    exactly that reason.
     """
 
     buffer = io.StringIO()
@@ -245,6 +245,48 @@ def retired_metric_columns(output_dir: str | Path | None) -> dict[str, list[str]
         if retired:
             found[name] = retired
     return found
+
+
+def flush_round_metrics_csv(
+    history: list[MetricRecord],
+    output_dir: str | Path,
+    cursor: dict[str, Any],
+) -> None:
+    """Bring round_metrics.csv up to date by appending the rounds since the last flush.
+
+    One row per round, and it was rewritten in full every round, so the bytes
+    written grew with the square of the round count: a 10,000-round
+    fed-logistic-l1 point spent 2165 s of its 2707 s outside its rounds, most
+    of it rewriting this file, and 919 s in all once it appended (POST-F31).
+    It is appended to now, the way flush_client_csvs appends the per-client
+    files, and for the same reason those are: it has to be current every
+    round, because save_last makes every round a rewind point.
+
+    ``cursor`` carries how many rounds are on disk and the metric names the
+    header was written with. The names are extended from the new rounds only,
+    since collecting them from the whole history was itself a scan of every
+    earlier round. A full rewrite still happens whenever appending cannot be
+    trusted: no cursor yet -- the first flush of every attempt, which is what
+    drops the rows a resume is recomputing -- a history that shrank, a header
+    that does not match, or a new metric name widening the columns.
+    """
+
+    path = prepare_output_dir(output_dir) / "round_metrics.csv"
+    written = int(cursor.get("round_metrics", 0))
+    known = cursor.get("round_metric_names")
+    if known is None or written > len(history):
+        save_round_metrics_csv(history, output_dir)
+        metric_names = _round_metric_names(history)
+    else:
+        new = history[written:]
+        metric_names = sorted({*known, *(name for record in new for name in record.metrics)})
+        fields = _round_metrics_fields(metric_names)
+        if metric_names != known or _csv_header(path) != fields:
+            save_round_metrics_csv(history, output_dir)
+        else:
+            _append_csv_rows(path, fields, (_round_metrics_row(r, metric_names) for r in new))
+    cursor["round_metrics"] = len(history)
+    cursor["round_metric_names"] = metric_names
 
 
 def flush_client_csvs(
@@ -328,28 +370,27 @@ def flush_round_artifacts(
     --resume-latest needs to replay. Calling this every round closes that gap:
     the file on disk always covers every round that finished.
 
-    round_metrics.csv is one row per round, so it is rewritten in full every
-    time. The per-client CSVs are 1.8M rows over a 500-round FEMNIST run at
-    clients "all", so they are appended to instead -- see flush_client_csvs.
-    They used to be rewritten in full on rounds that "wrote a checkpoint",
-    which save_last makes every round, so turning per_client_csv on meant
-    rewriting every earlier round's rows on every round.
+    All three CSVs are appended to, a round's rows written once: round_metrics.csv
+    by flush_round_metrics_csv, the per-client files by flush_client_csvs.
+    Rewriting them in full every round made the bytes written grow with the
+    square of the round count, for files that grow linearly.
 
-    ``cursor`` is the per-run bookkeeping flush_client_csvs needs to know what
-    is already on disk. Without one, the per-client files are rewritten in
-    full, which is what a caller outside the round loop wants.
+    ``cursor`` is the per-run bookkeeping both need to know what is already on
+    disk. Without one, every file is rewritten in full, which is what a caller
+    outside the round loop wants.
     """
 
     if output_dir is None:
         return
-    save_round_metrics_csv(history, output_dir)
-    if not per_client_csv:
-        return
     if cursor is None:
-        save_client_metrics_csv(client_history, output_dir)
-        save_client_update_metrics_csv(client_update_history, output_dir)
+        save_round_metrics_csv(history, output_dir)
+        if per_client_csv:
+            save_client_metrics_csv(client_history, output_dir)
+            save_client_update_metrics_csv(client_update_history, output_dir)
         return
-    flush_client_csvs(client_history, client_update_history, output_dir, cursor)
+    flush_round_metrics_csv(history, output_dir, cursor)
+    if per_client_csv:
+        flush_client_csvs(client_history, client_update_history, output_dir, cursor)
 
 
 def round_metrics_gap(
@@ -371,7 +412,9 @@ def round_metrics_gap(
         return f"{path.name} is missing"
 
     try:
-        recorded = {record.round_id for record in load_round_metrics_csv(output_dir)}
+        recorded = {
+            record.round_id for record in load_round_metrics_csv(output_dir, announce=False)
+        }
     except ValueError as exc:
         return f"{path.name} could not be parsed ({exc})"
 
@@ -436,12 +479,20 @@ def clear_stale_temp_files(output_dir: str | Path | None) -> None:
             stale.unlink(missing_ok=True)
 
 
-def load_round_metrics_csv(output_dir: str | Path) -> list[MetricRecord]:
+def load_round_metrics_csv(
+    output_dir: str | Path,
+    *,
+    announce: bool = True,
+) -> list[MetricRecord]:
     """Load round history from the CSV a previous run wrote.
 
     This is the only round-level format now. A metric column is blank on rounds
     where its split was not scheduled, and blanks are dropped rather than read
     as zero -- "not measured" and "measured as 0.0" are different facts.
+
+    The file is appended to every round, so a killed run can end it with a
+    row cut short, which is dropped (see _read_appended_rows). ``announce``
+    False drops it without the warning, for a caller that only inspects.
     """
 
     path = Path(output_dir) / "round_metrics.csv"
@@ -450,31 +501,30 @@ def load_round_metrics_csv(output_dir: str | Path) -> list[MetricRecord]:
 
     records: list[MetricRecord] = []
     timing_columns = dict(_ROUND_TIMING_FIELDS)
-    with path.open("r", encoding="utf-8", newline="") as file:
-        for line_number, row in enumerate(csv.DictReader(file), start=2):
-            try:
-                metrics = {
-                    name: float(value)
-                    for name, value in row.items()
-                    if name not in {"round_id", "num_clients", "num_examples", *timing_columns}
-                    and value not in (None, "")
-                }
-                timings = {
-                    attribute: float(row[column] or 0.0)
-                    for column, attribute in timing_columns.items()
-                    if column in row
-                }
-                records.append(
-                    MetricRecord(
-                        round_id=int(row["round_id"]),
-                        metrics=metrics,
-                        num_clients=int(row["num_clients"] or 0),
-                        num_examples=int(row["num_examples"] or 0),
-                        timings=RoundTimings(**timings) if timings else None,
-                    )
+    for line_number, row in enumerate(_read_appended_rows(path, announce), start=2):
+        try:
+            metrics = {
+                name: float(value)
+                for name, value in row.items()
+                if name not in {"round_id", "num_clients", "num_examples", *timing_columns}
+                and value not in (None, "")
+            }
+            timings = {
+                attribute: float(row[column] or 0.0)
+                for column, attribute in timing_columns.items()
+                if column in row
+            }
+            records.append(
+                MetricRecord(
+                    round_id=int(row["round_id"]),
+                    metrics=metrics,
+                    num_clients=int(row["num_clients"] or 0),
+                    num_examples=int(row["num_examples"] or 0),
+                    timings=RoundTimings(**timings) if timings else None,
                 )
-            except Exception as exc:
-                raise ValueError(f"Could not parse {path}:{line_number}: {exc}") from exc
+            )
+        except Exception as exc:
+            raise ValueError(f"Could not parse {path}:{line_number}: {exc}") from exc
     return records
 
 
@@ -498,35 +548,52 @@ def _row_is_short(row: Mapping[str, Any]) -> bool:
     return any(value is None for value in row.values())
 
 
-def _refuse_or_drop_short_row(
-    path: Path,
-    line_number: int,
-    total_rows: int,
-) -> bool:
-    """Drop an incomplete final row; refuse an incomplete row anywhere else.
+def _read_appended_rows(path: Path, announce: bool = True) -> list[dict[str, Any]]:
+    """Every row of an appended-to CSV, less a last row an interrupted append cut.
 
     These files are appended to once per round, in one buffered write, so the
-    only corruption an interrupted run can leave is a short final line.
-    Dropping it costs that round's rows -- work a resume redoes anyway --
-    whereas raising refuses the whole resume, because the resume path will not
-    rewrite a history it could not read. A short row earlier in the file is
-    real corruption and still raises.
+    only damage an interrupted run can leave is its last line cut short. A cut
+    line has no line break after it -- DictWriter ends every row it writes with
+    one -- and that is the test, because a missing field is not: a cut inside
+    the last column leaves every field present and the value shortened. A
+    checkpoint_sec of 0.0123 read as 0.01, or as 0 when the cut left it empty;
+    a per-client metric of 5e-05 read as "5e-", which no float parses, so the
+    resume was refused outright. A final row with fields missing is dropped
+    too.
+
+    Dropping it costs that round's rows -- work a resume redoes anyway, since
+    a round's checkpoint is committed only after its rows are written
+    (POST-F24). A short row anywhere before the last is real corruption and
+    raises.
     """
 
-    if line_number != total_rows + 1:
-        raise ValueError(
-            f"{path}:{line_number} has fewer fields than its header. Only the "
-            "last row of these files can be a torn write; a short row before "
-            "it means the file is corrupt."
-        )
-    print(
-        f"Warning: dropping the incomplete last row of {path}. A row is "
-        "written per client per round and the file is appended to each round, "
-        "so a short final line is how an interrupted run ends. Every earlier "
-        "row is intact.",
-        flush=True,
-    )
-    return True
+    with path.open("r", encoding="utf-8", newline="") as file:
+        rows = list(csv.DictReader(file))
+    if rows and (not _ends_with_line_break(path) or _row_is_short(rows[-1])):
+        rows.pop()
+        if announce:
+            print(
+                f"Warning: dropping the incomplete last row of {path}. The file is "
+                "appended to each round, so a final line cut short is how an "
+                "interrupted run ends. Every earlier row is intact.",
+                flush=True,
+            )
+    for line_number, row in enumerate(rows, start=2):
+        if _row_is_short(row):
+            raise ValueError(
+                f"{path}:{line_number} has fewer fields than its header. Only the "
+                "last row of these files can be a torn write; a short row before "
+                "it means the file is corrupt."
+            )
+    return rows
+
+
+def _ends_with_line_break(path: Path) -> bool:
+    with path.open("rb") as file:
+        if file.seek(0, os.SEEK_END) == 0:
+            return True
+        file.seek(-1, os.SEEK_END)
+        return file.read(1) in (b"\n", b"\r")
 
 
 def load_client_metrics_csv(
@@ -544,14 +611,8 @@ def load_client_metrics_csv(
     if not path.exists():
         return []
 
-    with path.open("r", encoding="utf-8", newline="") as file:
-        rows = list(csv.DictReader(file))
-
     records: list[ClientEvaluationRecord] = []
-    for line_number, row in enumerate(rows, start=2):
-        if _row_is_short(row):
-            _refuse_or_drop_short_row(path, line_number, len(rows))
-            break
+    for line_number, row in enumerate(_read_appended_rows(path), start=2):
         try:
             records.append(
                 ClientEvaluationRecord(
@@ -592,14 +653,8 @@ def load_client_update_metrics_csv(
         return []
 
     fixed = {"round_id", "client_id", "phase", "num_examples"}
-    with path.open("r", encoding="utf-8", newline="") as file:
-        rows = list(csv.DictReader(file))
-
     records: list[ClientMetricRecord] = []
-    for line_number, row in enumerate(rows, start=2):
-        if _row_is_short(row):
-            _refuse_or_drop_short_row(path, line_number, len(rows))
-            break
+    for line_number, row in enumerate(_read_appended_rows(path), start=2):
         try:
             metrics = {
                 name: float(value)

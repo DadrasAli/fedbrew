@@ -210,14 +210,18 @@ class RunJsonSchemaTest(unittest.TestCase):
 
 
 class AtomicityClaimTest(unittest.TestCase):
-    """Section 2's two write strategies, and why they differ."""
+    """Section 2's two write strategies: the CSVs appended, the rest replaced."""
 
     def setUp(self) -> None:
         self.source = (REPO_ROOT / "fedbrew" / "core" / "artifacts.py").read_text(encoding="utf-8")
 
-    def test_round_metrics_is_replaced_atomically(self) -> None:
+    def test_round_metrics_is_appended(self) -> None:
+        self.assertIn("def flush_round_metrics_csv", self.source)
+        self.assertTrue(_says("`round_metrics.csv` is appended to every round."))
+
+    def test_a_full_rewrite_is_still_atomic(self) -> None:
         self.assertIn("os.replace(temp_path, path)", self.source)
-        self.assertTrue(_says("rewritten in full every round, atomically"))
+        self.assertTrue(_says("atomically through `_atomic_text_writer`"))
 
     def test_the_per_client_files_are_appended(self) -> None:
         self.assertIn("def _append_csv_rows", self.source)

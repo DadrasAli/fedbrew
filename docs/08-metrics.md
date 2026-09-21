@@ -1074,6 +1074,7 @@ head -1 <output_dir>/round_metrics.csv | tr ',' '\n'
   `round_metrics.csv`, `run.json` and `checkpoints/` only —
   `DEFAULT_ARTIFACT_FILES` names all four possible files, but
   `runner._artifact_file_names` decides which a given config produces.
-- **Reading a CSV's last row after a kill.** `client_update_metrics.csv` is
-  appended, not atomically replaced, so a process killed inside the write can
-  leave a short final row. Both readers drop an unparseable final row.
+- **Reading a CSV's last row after a kill.** All three CSVs are appended, not
+  atomically replaced, so a process killed inside the write can leave a final
+  row cut short — possibly with every field present and the last one
+  shortened. The readers drop a final row with no line break after it.

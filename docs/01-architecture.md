@@ -259,7 +259,7 @@ Four files, written every round. Chapter 09 covers them in full.
 
 ```
 <output_dir>/
-  round_metrics.csv          one row per round, rewritten atomically
+  round_metrics.csv          one row per round, appended
   client_metrics.csv         per-client evaluation; off unless per_client_csv
   client_update_metrics.csv  per-client fit diagnostics, appended
   run.json                   identity, config echo, results, provenance

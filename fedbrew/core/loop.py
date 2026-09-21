@@ -180,10 +180,11 @@ def run_fl_loop(
         checkpoint_policy,
         state.metrics_history,
     )
-    # How much of each per-client history is already on disk, so the round
-    # flush appends its new rows instead of rewriting the whole run. Starts
-    # empty even on a resume: the first flush then rewrites both files once,
-    # which is what puts the replayed history back under a correct header.
+    # How much of each history is already on disk, so the round flush appends
+    # its new rows instead of rewriting the whole run. Starts empty even on a
+    # resume: the first flush then rewrites all three CSVs once from the
+    # replayed history, which drops the rows past the checkpoint's round and
+    # puts the rest back under a correct header.
     csv_cursor: dict[str, Any] = {}
 
     client_infos = _build_client_infos(dataset)

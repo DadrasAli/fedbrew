@@ -39,15 +39,19 @@ halves.
 
 ## 2. How the files are written
 
-Two different strategies, for two different sizes.
+The three CSVs are appended to; `run.json` and the checkpoints are replaced.
 
-**`round_metrics.csv` is rewritten in full every round, atomically.** It is one
-row per round, so a full rewrite is cheap. The write goes to a sibling `.tmp`
-and is `os.replace`d into position by `_atomic_text_writer`
-(`fedbrew/core/artifacts.py`), so the visible file
-is always either the previous complete version or the new complete one. That
-matters because these files are now rewritten every round: a process killed
-mid-write is no longer rare, it is how a preempted run normally ends.
+**`round_metrics.csv` is appended to every round.** One row per round, written
+by `flush_round_metrics_csv` (`fedbrew/core/artifacts.py`) as one buffered
+`write()` plus `fsync`, tracked by a per-run cursor. It used to be rewritten in
+full every round, which made the bytes written grow with the square of the
+round count: a 10,000-round point took 2707 s, 2165 s of them outside its
+rounds, and 919 s once the file was appended to (`POST-F31`). The full rewrite
+still happens, atomically through `_atomic_text_writer`, whenever appending
+cannot be trusted: the first flush of every attempt — which is what drops the
+rows a resume is recomputing — a header that does not match, a history that
+shrank, or a metric first reported mid-run widening the columns. The appended
+file is byte-for-byte what the rewrite would write.
 
 **`run.json` is first written after the first completed round.** There is no
 initial `run.json`: nothing is written before round 1, so a run that fails
@@ -74,7 +78,7 @@ no checkpoint glob matches a `.tmp` name in between.
 resume replays `round_metrics.csv` up to the checkpoint's round, so a
 checkpoint visible for a round the CSV does not hold cannot be continued. The
 loop used to write the checkpoints first, and late in a long run the CSV
-rewrite is most of each round, so a time limit's kill landed between the two
+rewrite was most of each round, so a time limit's kill landed between the two
 almost every time: on 2026-09-20 all ten SCAFFOLD points a 12 h limit stopped
 had `latest.pt` one round ahead of their CSV. The checkpoints are now staged in
 place — written, flushed and `fsync`ed as `.tmp`, so `checkpoint_sec` still
@@ -91,8 +95,14 @@ the round count, for data that grew linearly.
 
 The append is one buffered `write()` followed by `fsync`, so the exposure to a
 kill is the width of that single call. Unlike the rename it is **not atomic**,
-so the last row can be short if the process dies inside it. Both readers drop
-an unparseable final row for exactly that reason.
+so the last row can be cut short if the process dies inside it. All three
+readers drop a final row with no line break after it, or with fields missing,
+and warn once (`_read_appended_rows`). The line break is the test because a cut
+inside the last column leaves every field present and the value shortened —
+`0.0123` read as `0.01`, or a per-client `5e-05` as `5e-`, which refused the
+resume. A round's checkpoint is committed only after its rows are written, so
+the round a dropped row belonged to is always one the resume recomputes. A
+short row anywhere before the last is corruption and is refused.
 
 ## 3. `run.json`
 
@@ -523,6 +533,7 @@ python -m pytest tests/test_run_provenance.py \
                  tests/test_resume_metrics_continuity.py \
                  tests/test_resume_rng_state.py \
                  tests/test_client_csv_append.py \
+                 tests/test_round_metrics_are_appended.py \
                  tests/test_checkpoint_no_duplicate_model.py \
                  tests/test_resume_is_all_or_nothing.py \
                  tests/test_best_checkpoint_selection_is_not_frozen.py \
@@ -538,12 +549,13 @@ python -m pytest tests/test_run_provenance.py \
 
 1. **Artifacts are flushed every round.** Never move a write to the end of the
    run.
-2. **`round_metrics.csv`, `run.json` and every checkpoint are replaced
-   atomically.** `.tmp` plus `os.replace`; never `open("w")` or `torch.save`
-   over the live file. **A round's checkpoints are committed last**, after its
-   CSV rows and `run.json`.
-3. **The per-client CSVs are appended, and their last row may be short.**
-   Readers must tolerate an unparseable final row.
+2. **`run.json` and every checkpoint are replaced atomically**, and so is a
+   CSV whenever it is rewritten in full. `.tmp` plus `os.replace`; never
+   `open("w")` or `torch.save` over the live file. **A round's checkpoints are
+   committed last**, after its CSV rows and `run.json`.
+3. **The three CSVs are appended, and their last row may be cut short.**
+   Readers drop a final row with no line break after it; never read a CSV
+   without `_read_appended_rows`.
 4. **`json_safe` runs on every record reaching JSON**, paired with
    `allow_nan=False`.
 5. **Nothing appears twice in `run.json`.** Policy lives in the config echo;
@@ -577,6 +589,7 @@ python -m pytest tests/test_run_provenance.py \
 | `tests/test_resume_metrics_continuity.py` | A resumed run's history is continuous. |
 | `tests/test_resume_rng_state.py` | RNG position is restored. |
 | `tests/test_client_csv_append.py` | The per-client CSVs append rather than rewrite. |
+| `tests/test_round_metrics_are_appended.py` | §2: `round_metrics.csv` appends rather than rewrites, byte-for-byte what a rewrite writes; a row cut short is dropped, and a kill inside the append is resumable. |
 | `tests/test_checkpoint_no_duplicate_model.py` | The model is stored once. |
 | `tests/test_resume_is_all_or_nothing.py` | §5: a SCAFFOLD resume that would strand the control variate is refused, and the narrower cases are not. |
 | `tests/test_best_checkpoint_selection_is_not_frozen.py` | §4: a non-finite selection metric is skipped rather than made the run's best. |
