@@ -14,6 +14,8 @@ run.json recorded "hihg".
 from __future__ import annotations
 
 import glob
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -22,8 +24,6 @@ import torch
 
 from fedbrew.core.config import MATMUL_PRECISIONS, load_config, validate_config
 from fedbrew.core.runtime_setup import configure_runtime
-
-pytestmark = pytest.mark.fast
 
 #: Where the documentation has to keep saying that matmul_precision changes
 #: results. The section anchor keeps its leading hashes so a table-of-contents
@@ -39,22 +39,12 @@ _REPRODUCIBILITY_HEADING = "## Reproducibility"
 _CHANGES_NUMERICS_HEADING = "**do** change numerics"
 
 
+@pytest.mark.fast
 class MatmulPrecisionValueTest(unittest.TestCase):
     def _config(self, precision: object) -> object:
         config = load_config("configs/femnist/fedavg.yaml")
         config.runtime.extra["performance"]["matmul_precision"] = precision
         return config
-
-    def test_torch_itself_does_not_reject_a_typo(self) -> None:
-        """The premise of the guard, pinned so it is not taken on trust."""
-
-        before = torch.get_float32_matmul_precision()
-        try:
-            with self.assertWarns(UserWarning):
-                torch.set_float32_matmul_precision("hihg")
-            self.assertEqual(torch.get_float32_matmul_precision(), before)
-        finally:
-            torch.set_float32_matmul_precision(before)
 
     def test_a_typo_is_refused_at_config_load(self) -> None:
         for precision in ("hihg", "HIGH", "fp32", 32, True):
@@ -75,6 +65,35 @@ class MatmulPrecisionValueTest(unittest.TestCase):
         validate_config(config)
 
 
+class TorchAcceptsATypoTest(unittest.TestCase):
+    """Not in the fast gate: it starts a child interpreter."""
+
+    def test_torch_itself_does_not_reject_a_typo(self) -> None:
+        """The premise of the guard, pinned so it is not taken on trust.
+
+        Checked in a child interpreter. With the pip wheel of torch 2.5.1+cpu,
+        an unknown value leaves the process corrupted: the next
+        `torch.library.Library(...)` in it -- importing torchvision or
+        torch._dynamo does one -- fails with "could not parse dispatch key:
+        hihg", so under pytest-xdist whichever test a worker ran next failed.
+        """
+
+        script = (
+            "import warnings, torch\n"
+            "before = torch.get_float32_matmul_precision()\n"
+            "with warnings.catch_warnings(record=True) as caught:\n"
+            "    warnings.simplefilter('always')\n"
+            "    torch.set_float32_matmul_precision('hihg')\n"
+            "assert any(issubclass(w.category, UserWarning) for w in caught), caught\n"
+            "assert torch.get_float32_matmul_precision() == before\n"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, check=False
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+
+@pytest.mark.fast
 class MatmulPrecisionIsRecordedTest(unittest.TestCase):
     """run.json has to say what the run did, not what it was asked to do."""
 
@@ -107,6 +126,7 @@ class MatmulPrecisionIsRecordedTest(unittest.TestCase):
         self.assertEqual(self._runtime(None)["matmul_precision"], "highest")
 
 
+@pytest.mark.fast
 class PerformanceBlockDocumentationTest(unittest.TestCase):
     def test_no_config_still_claims_the_whole_block_is_free(self) -> None:
         """The comment used to read "none of these change results"."""
