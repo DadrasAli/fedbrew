@@ -68,6 +68,38 @@ def assert_code_state_is_wellformed(case: unittest.TestCase, state: dict) -> Non
         case.assertIn("git_error", state)
 
 
+def _init_repository(root: Path) -> None:
+    """Create a repository whose own commands write nothing in the background.
+
+    `git commit` asks git to run auto maintenance, and recent git runs it
+    detached: on 2.55, the version the public runners ship, the commit returns
+    while a `git maintenance run --auto --quiet --detach` child is still
+    starting. That child takes .git/objects/maintenance.lock and drops it again
+    in under a millisecond on an idle machine, which is short enough to be
+    invisible here and long enough, on a loaded runner, to land inside the
+    window `test_the_lookup_writes_nothing_to_the_repository` compares -- the
+    public core-only job failed once on exactly
+    `['.git/objects/maintenance.lock'] != []`, which is that file, written by
+    the test's own `git commit` in its own temporary repository rather than by
+    the lookup. `capture_code_state` runs `git rev-parse` and `git status`, and
+    neither runs maintenance at all, so turning it off here removes the race
+    without weakening anything the tests assert.
+    """
+
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    for name, value in (
+        ("user.email", "t@t"),
+        ("user.name", "t"),
+        # Either setting alone stops the spawn on 2.55. Both are set so a git
+        # that stops consulting one of them cannot bring the race back
+        # silently, and they are set before the first commit, which is the one
+        # command here that would ask for maintenance.
+        ("maintenance.auto", "false"),
+        ("gc.auto", "0"),
+    ):
+        subprocess.run(["git", "config", name, value], cwd=root, check=True)
+
+
 def _write_config(directory: Path) -> Path:
     config_path = directory / "provenance.yaml"
     config_path.write_text(
@@ -200,7 +232,7 @@ class CaptureCodeStateTest(unittest.TestCase):
         """A sweep launches every arm from the submit directory."""
 
         with tempfile.TemporaryDirectory() as directory:
-            subprocess.run(["git", "init", "-q"], cwd=directory, check=True)
+            _init_repository(Path(directory))
             here = Path.cwd()
             try:
                 import os
@@ -217,9 +249,7 @@ class CaptureCodeStateTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
-            for name, value in (("user.email", "t@t"), ("user.name", "t")):
-                subprocess.run(["git", "config", name, value], cwd=root, check=True)
+            _init_repository(root)
             (root / "tracked.py").write_text("x = 1\n", encoding="utf-8")
             subprocess.run(["git", "add", "tracked.py"], cwd=root, check=True)
             subprocess.run(["git", "commit", "-q", "-m", "first"], cwd=root, check=True)
@@ -240,6 +270,10 @@ class CaptureCodeStateTest(unittest.TestCase):
         same checkout fail. The stale stat is forced with an old mtime: a file
         just committed gives status nothing to refresh, and the write this test
         exists to catch would not happen.
+
+        The repository watched is a fresh one this test creates, so the only
+        writer that can reach it is the lookup. `_init_repository` says which
+        background writer git itself would otherwise add, and why it is off.
         """
 
         import os
@@ -253,9 +287,7 @@ class CaptureCodeStateTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
-            for name, value in (("user.email", "t@t"), ("user.name", "t")):
-                subprocess.run(["git", "config", name, value], cwd=root, check=True)
+            _init_repository(root)
             tracked = root / "tracked.py"
             tracked.write_text("x = 1\n", encoding="utf-8")
             subprocess.run(["git", "add", "tracked.py"], cwd=root, check=True)
