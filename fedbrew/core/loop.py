@@ -135,10 +135,17 @@ def run_fl_loop(
     client_statistics: ClientStatisticsConfig | None = None,
     evaluation_seed: int | None = None,
     divergence: DivergenceConfig | None = None,
+    # Write the CSV rows, run.json and latest.pt every flush_every rounds
+    # (runtime.flush_every), each fsynced then; 1 writes every round. Between
+    # flushes the rows wait in memory and the numbered and best checkpoints
+    # wait staged, so no checkpoint is ever visible ahead of the CSVs. A kill
+    # loses at most the rounds since the last flush, which a resume recomputes.
+    flush_every: int = 1,
 ) -> ExperimentState:
     """Run a minimal task-agnostic federated loop."""
 
     _require_positive_global_rounds(global_rounds)
+    _require_positive_flush_every(flush_every)
     evaluation = evaluation or EvaluationConfig()
     statistics = client_statistics or ClientStatisticsConfig()
     monitor = DivergenceMonitor(divergence or DivergenceConfig())
@@ -186,6 +193,9 @@ def run_fl_loop(
     # replayed history, which drops the rows past the checkpoint's round and
     # puts the rest back under a correct header.
     csv_cursor: dict[str, Any] = {}
+    # Checkpoints written in full since the last flush and not yet visible.
+    staged: StagedCheckpoints | None = None
+    unflushed = False
 
     client_infos = _build_client_infos(dataset)
     evaluation_clients = {
@@ -315,23 +325,22 @@ def run_fl_loop(
         metrics = dict(round_info.metrics)
         if isinstance(server_payload, dict):
             server_payload["metrics"] = metrics
+        # Judged before the round is written, so a round that stops the run is
+        # always a flush round; acted on below, once the round is recorded.
+        verdict = monitor.update(round_id, metrics)
+        flush_due = _flush_due(round_id, global_rounds, flush_every, verdict)
         checkpoint_started = time.perf_counter()
-        checkpoint_payload = _build_checkpoint_payload(
-            server,
-            client,
-            server_payload,
-            metrics,
-            round_id,
-        )
         # Written now, so checkpoint_sec times the write; visible only at the
-        # commit below, after this round's CSV rows and run.json. POST-F24.
+        # commit below, after the CSV rows and run.json. POST-F24.
         staged = _update_checkpoints(
-            checkpoint_payload,
+            _checkpoint_payload_builder(server, client, server_payload, metrics, round_id),
             metrics,
             output_dir,
             round_id,
             checkpoint_policy,
             checkpoint_tracker,
+            staged,
+            write_latest=flush_due,
         )
         checkpoint_seconds = time.perf_counter() - checkpoint_started
 
@@ -366,43 +375,45 @@ def run_fl_loop(
             timings=timings,
         )
         state.metrics_history.append(metric_record)
-        # Written every round rather than once at the end: a run that is
-        # cancelled, preempted or hits its wall clock never reaches the save in
-        # runner.run(), and used to leave a checkpoint at round N beside no
-        # metrics at all -- so --resume-latest had nothing to replay and the
-        # resumed run's CSV started mid-experiment.
-        flush_round_artifacts(
-            state.metrics_history,
-            state.client_metrics_history,
-            state.client_update_metrics_history,
+        staged = _flush_rounds(
+            flush_due,
+            state,
             output_dir,
-            statistics.per_client_csv,
+            statistics,
             csv_cursor,
+            on_round_flush,
+            staged,
+            checkpoint_policy,
         )
-        # run.json is assembled from config and run metadata the loop does not
-        # hold, so the runner supplies its own writer rather than the loop
-        # reaching for them.
-        if on_round_flush is not None:
-            on_round_flush(state)
-        # Last of the round's writes: a checkpoint must never be visible for a
-        # round the history does not hold yet, or a kill in between leaves a
-        # run no resume can continue. POST-F24.
-        _commit_checkpoints(staged, output_dir, checkpoint_policy)
+        unflushed = not flush_due
         if on_round_end is not None:
             on_round_end(metric_record)
 
-        # Checked last, so the round that triggers the stop is still fully
+        # Acted on last, so the round that triggers the stop is still fully
         # recorded: its metrics, timings and checkpoint are the evidence of
         # what went wrong. Breaking rather than raising keeps the exit code
         # zero, which is what stops a packed SLURM job from reporting a
         # diverged arm as a failed one.
-        verdict = monitor.update(round_id, metrics)
         if verdict is not None:
             state.status = verdict.status
             state.termination = verdict.as_dict()
             if on_termination is not None:
                 on_termination(verdict)
             break
+
+    # Only an aggregation refusal leaves rounds unflushed: every other way out
+    # of the loop ends on a flush round. latest.pt stays at the last flush, the
+    # refused round's state being neither complete nor healthy.
+    _flush_rounds(
+        unflushed,
+        state,
+        output_dir,
+        statistics,
+        csv_cursor,
+        on_round_flush,
+        staged,
+        checkpoint_policy,
+    )
 
     if divergence is not None and divergence.active and not monitor.observed:
         # Every detector reads one metric name; a name nothing emits silences
@@ -915,6 +926,67 @@ _REQUIRED_CENTRAL_METRICS = frozenset({"loss"})
 _CENTRAL_TEST_OFF = "Set evaluation.central_test.every to never to run without it."
 
 
+def _require_positive_flush_every(flush_every: int) -> None:
+    if isinstance(flush_every, bool) or not isinstance(flush_every, int) or flush_every < 1:
+        raise RunRefused(f"flush_every must be a positive integer, not {flush_every!r}")
+
+
+def _flush_due(
+    round_id: int,
+    global_rounds: int,
+    flush_every: int,
+    verdict: DivergenceVerdict | None = None,
+) -> bool:
+    """Whether this round's writes are flushed: every flush_every-th round, the last, a stop.
+
+    Counted from round 1 rather than from where this attempt started, so a
+    resumed run flushes on the same rounds as the uninterrupted one.
+    """
+
+    return verdict is not None or round_id % flush_every == 0 or round_id == global_rounds
+
+
+def _flush_rounds(
+    due: bool,
+    state: ExperimentState,
+    output_dir: str | Path | None,
+    statistics: ClientStatisticsConfig,
+    csv_cursor: dict[str, Any],
+    on_round_flush: Callable[[ExperimentState], None] | None,
+    staged: StagedCheckpoints | None,
+    checkpoint_policy: Mapping[str, Any],
+) -> StagedCheckpoints | None:
+    """When ``due``, write every round since the last flush; return what is still staged.
+
+    The CSV rows, then run.json, then the staged checkpoints. Written during
+    the run rather than once at the end: a run that is cancelled, preempted or
+    hits its wall clock never reaches the save in runner.run(), and used to
+    leave a checkpoint at round N beside no metrics at all -- so
+    --resume-latest had nothing to replay and the resumed run's CSV started
+    mid-experiment. The checkpoints go last: one must never be visible for a
+    round the history does not hold yet, or a kill in between leaves a run no
+    resume can continue. POST-F24.
+    """
+
+    if not due:
+        return staged
+    flush_round_artifacts(
+        state.metrics_history,
+        state.client_metrics_history,
+        state.client_update_metrics_history,
+        output_dir,
+        statistics.per_client_csv,
+        csv_cursor,
+    )
+    # run.json is assembled from config and run metadata the loop does not
+    # hold, so the runner supplies its own writer rather than the loop
+    # reaching for them.
+    if on_round_flush is not None:
+        on_round_flush(state)
+    _commit_checkpoints(staged, output_dir, checkpoint_policy)
+    return None
+
+
 def _require_positive_global_rounds(global_rounds: int) -> None:
     """Refuse a round count below one from Python code calling `run_fl_loop`.
 
@@ -1317,6 +1389,26 @@ def _build_client_metric_record(result: FitResult) -> ClientMetricRecord:
     )
 
 
+def _checkpoint_payload_builder(
+    server: ServerStrategy,
+    client: ClientPool,
+    server_payload: dict[str, Any],
+    metrics: dict[str, float],
+    round_id: int,
+) -> Callable[[], dict[str, Any] | None] | None:
+    """Build the round's checkpoint payload on demand; None when there is no model.
+
+    Deferred because a round that writes no checkpoint -- one between flushes,
+    or a run without checkpointing -- has no use for the snapshot, and taking
+    it clones the model, the server state and every client state. The
+    snapshots are copies, so taking fewer changes nothing else.
+    """
+
+    if "model_state" not in server_payload:
+        return None
+    return lambda: _build_checkpoint_payload(server, client, server_payload, metrics, round_id)
+
+
 def _build_checkpoint_payload(
     server: ServerStrategy,
     client: ClientPool,
@@ -1384,28 +1476,30 @@ def _without_client_states(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _update_checkpoints(
-    checkpoint_payload: dict[str, Any] | None,
+    build_payload: Callable[[], dict[str, Any] | None] | None,
     metrics: dict[str, float],
     output_dir: str | Path | None,
     round_id: int,
     checkpoint_policy: Mapping[str, Any],
     checkpoint_tracker: dict[str, Any],
+    staged: StagedCheckpoints | None = None,
+    write_latest: bool = True,
 ) -> StagedCheckpoints | None:
     """Stage the round's numbered, latest and best checkpoints; return them.
 
-    Written in full here and made visible by _commit_checkpoints once the
-    round's CSV rows and run.json are on disk (POST-F24). This used to report
-    whether any file was written, and the per-client CSV flush keyed off that
-    to decide whether to rewrite itself. The signal was always true --
-    save_last writes latest.pt every round, independently of interval -- and
-    the flush no longer needs it either way: it appends its new rows rather
-    than rewriting the run.
+    Written in full here and made visible by _commit_checkpoints once the CSV
+    rows and run.json are on disk (POST-F24). ``staged`` carries what earlier
+    rounds since the last flush staged. latest.pt is written only when
+    ``write_latest`` -- on flush rounds -- since between flushes it would be
+    replaced before anyone could see it; a numbered or best checkpoint is
+    staged on the round it belongs to, because the state it holds is gone by
+    the flush. The payload is built at most once, and only if one is written.
     """
 
-    if output_dir is None or checkpoint_payload is None:
-        return None
+    if output_dir is None or build_payload is None:
+        return staged
     if not bool(checkpoint_policy.get("enabled", True)):
-        return None
+        return staged
 
     from fedbrew.core.checkpointing import (
         save_best_checkpoint,
@@ -1414,12 +1508,21 @@ def _update_checkpoints(
         should_save_checkpoint,
     )
 
-    staged = StagedCheckpoints()
-    if should_save_checkpoint(round_id, checkpoint_policy):
-        save_checkpoint(checkpoint_payload, output_dir, round_id, staged)
+    staged = staged or StagedCheckpoints()
+    built: list[dict[str, Any]] = []
 
-    if bool(checkpoint_policy.get("save_last", False)):
-        latest_path = save_latest_checkpoint(checkpoint_payload, output_dir, staged)
+    def checkpoint_payload() -> dict[str, Any]:
+        if not built:
+            payload = build_payload()
+            assert payload is not None, "a builder is only handed over for a model"
+            built.append(payload)
+        return built[0]
+
+    if should_save_checkpoint(round_id, checkpoint_policy):
+        save_checkpoint(checkpoint_payload(), output_dir, round_id, staged)
+
+    if write_latest and bool(checkpoint_policy.get("save_last", False)):
+        latest_path = save_latest_checkpoint(checkpoint_payload(), output_dir, staged)
         checkpoint_tracker["latest_checkpoint"] = latest_path
 
     if bool(checkpoint_policy.get("save_best", False)):
@@ -1434,7 +1537,7 @@ def _update_checkpoints(
             str(checkpoint_policy.get("best_mode", "max")),
         ):
             best_path = save_best_checkpoint(
-                _without_client_states(checkpoint_payload),
+                _without_client_states(checkpoint_payload()),
                 output_dir,
                 best_metric,
                 metric_value,

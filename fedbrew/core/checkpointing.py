@@ -197,7 +197,15 @@ class StagedCheckpoints:
         self._pending: list[tuple[Path, Path]] = []
 
     def stage(self, payload: Mapping[str, Any], path: Path) -> None:
-        self._pending.append((_stage(payload, path), path))
+        """Write ``payload`` for ``path``; a path staged again replaces the earlier payload.
+
+        Between two flushes (runtime.flush_every) best.pt can improve twice;
+        the second write lands on the same temp file, and one rename commits it.
+        """
+
+        pending = (_stage(payload, path), path)
+        if pending not in self._pending:
+            self._pending.append(pending)
 
     def commit(self) -> None:
         """Rename each staged file over its target, in the order staged."""

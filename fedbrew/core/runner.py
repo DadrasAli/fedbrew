@@ -159,6 +159,7 @@ def run(
         client_statistics=config.client_statistics,
         evaluation_seed=config.experiment.seed,
         divergence=config.divergence,
+        flush_every=config.runtime.extra.get("flush_every", 1),
         on_round_end=_round_progress_reporter(config, progress),
         on_round_flush=_run_json_writer(config, run_metadata, output_dir, run_started),
         on_client_progress=client_progress_reporter(config, progress),
@@ -410,6 +411,8 @@ _NOT_CONFIGURATION = frozenset(
         "runtime.extra.verbose",
         "runtime.extra.no_rich",
         "runtime.extra.print_every",
+        # How often the artifacts are written, not what they hold.
+        "runtime.extra.flush_every",
         "runtime.extra.resume_from",
         "runtime.extra.resume_latest",
     }

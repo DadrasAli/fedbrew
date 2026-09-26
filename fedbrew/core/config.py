@@ -716,6 +716,7 @@ _KNOWN_EXTRA_KEYS: dict[str, frozenset[str]] = {
             "no_rich",
             "print_every",
             "data_staging",
+            "flush_every",
         }
     ),
     "runtime.checkpointing": frozenset(
@@ -1235,6 +1236,7 @@ def validate_config(config: FullConfig) -> None:
         ("deterministic", "deterministic_warn_only"),
     )
     _validate_print_every(config.runtime.extra.get("print_every"))
+    _validate_flush_every(config.runtime.extra.get("flush_every"))
     _validate_extra_bools(
         "client",
         config.client.extra,
@@ -1969,6 +1971,15 @@ def _validate_print_every(value: object) -> None:
         return
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise RunRefused(f"runtime.print_every must be a positive integer, not {value!r}")
+
+
+def _validate_flush_every(value: object) -> None:
+    """runtime.flush_every: a positive integer, or unset (1, every round)."""
+
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise RunRefused(f"runtime.flush_every must be a positive integer, not {value!r}")
 
 
 def _validate_unhonoured_client_options(config: FullConfig) -> None:

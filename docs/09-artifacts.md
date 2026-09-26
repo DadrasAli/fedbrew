@@ -53,6 +53,17 @@ rows a resume is recomputing — a header that does not match, a history that
 shrank, or a metric first reported mid-run widening the columns. The appended
 file is byte-for-byte what the rewrite would write.
 
+**`runtime.flush_every: N` sets how often all of it is written.** The default,
+1, writes every round. With N > 1 the CSV rows, `run.json` and `latest.pt` are
+written, each with one `fsync`, on rounds N, 2N, … and the final round, or the
+round a divergence detector stops the run on. Between flushes the rows wait in
+memory, and a numbered or `best.pt` checkpoint is staged as `.tmp` on the round
+it belongs to and committed with the next flush, after the rows and `run.json`,
+so the rule below holds at every flush: no checkpoint is visible for a round
+the CSV does not hold. A kill loses at most the rounds since the last flush,
+and a resume recomputes them. An `fsync` on `/proj`'s NFS costs ~7 ms against
+~0.7 ms on `/tmp`, and a round does five, which is what N buys back.
+
 **`run.json` is first written after the first completed round.** There is no
 initial `run.json`: nothing is written before round 1, so a run that fails
 while building its components or inside round 1 leaves none. After each
@@ -550,6 +561,7 @@ python -m pytest tests/test_run_provenance.py \
                  tests/test_resume_rng_state.py \
                  tests/test_client_csv_append.py \
                  tests/test_round_metrics_are_appended.py \
+                 tests/test_flush_cadence.py \
                  tests/test_checkpoint_no_duplicate_model.py \
                  tests/test_checkpoint_size_is_constant_in_rounds.py \
                  tests/test_resume_is_all_or_nothing.py \
@@ -606,6 +618,7 @@ python -m pytest tests/test_run_provenance.py \
 | `tests/test_resume_metrics_continuity.py` | A resumed run's history is continuous. |
 | `tests/test_resume_rng_state.py` | RNG position is restored. |
 | `tests/test_client_csv_append.py` | The per-client CSVs append rather than rewrite. |
+| `tests/test_flush_cadence.py` | §2: `runtime.flush_every` changes no number; the CSVs are at or past every visible checkpoint after each flush and between them; a SIGKILL anywhere, then `--resume-latest`, ends bit-identical to the uninterrupted run. |
 | `tests/test_round_metrics_are_appended.py` | §2: `round_metrics.csv` appends rather than rewrites, byte-for-byte what a rewrite writes; a row cut short is dropped, and a kill inside the append is resumable. |
 | `tests/test_checkpoint_no_duplicate_model.py` | The model is stored once. |
 | `tests/test_checkpoint_size_is_constant_in_rounds.py` | §4: `latest.pt` is the same size after 3 rounds and 30 for every server family; a checkpoint carrying the old history still resumes. |

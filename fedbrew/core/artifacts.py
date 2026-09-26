@@ -307,8 +307,9 @@ def flush_client_csvs(
     latest.pt, save_last writes latest.pt every round, and the resumed run
     rebuilds its per-client history from these files. Any round the CSV lagged
     behind would lose its rows permanently. So the files have to be current
-    every round, and the only way to make that affordable is to write each
-    round's rows once instead of rewriting the run each time.
+    whenever a checkpoint becomes visible -- every flush, every round by
+    default (runtime.flush_every) -- and the only way to make that affordable
+    is to write each round's rows once instead of rewriting the run each time.
 
     ``cursor`` carries how many records of each history are already on disk,
     and the column set the update file's header was written with. A full

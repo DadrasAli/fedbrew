@@ -390,6 +390,7 @@ strategy does not load clean under another.
 | `resume_latest` | bool | `false` | Written by `--resume-latest`. |
 | `quiet`, `verbose`, `no_rich` | bool | `false` | Written by the matching flags. `verbose` expands the plan header to every column and reports every round; `quiet` wins if both are set. |
 | `print_every` | int ≥ 1 \| null | `null` | Written by `--print-every`. The rounds that print a block: 1, N, 2N, … and the final round — the rounds an `every: N` schedule pins — in place of the evaluation rounds. What is evaluated and written to `round_metrics.csv` does not change. `verbose` still widens each block to every column; `quiet` wins over it. |
+| `flush_every` | int ≥ 1 | `1` | How often the run's files are written: the CSV rows, `run.json` and `latest.pt` on rounds N, 2N, … and the final round, each `fsync`ed then. Between flushes the rows wait in memory and the numbered and best checkpoints wait staged, so no checkpoint is visible ahead of the CSVs; a kill loses at most the rounds since the last flush, which a resume recomputes. Changes no number, so a resume may change it. Chapter 09 §2. |
 
 ### 7.1 `runtime.performance`
 
