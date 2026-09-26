@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter, OrderedDict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -76,6 +76,36 @@ class ManifestFederatedDataset(FederatedDataset):
         self.shard_cache_bytes = max(0, int(shard_cache_bytes))
         self._shard_cache: OrderedDict[str, CachedPayload] = OrderedDict()
         self._shard_cache_bytes_used = 0
+        self._eviction_listeners: list[Callable[[str], None]] = []
+
+    def on_shard_evicted(self, listener: Callable[[str], None]) -> None:
+        """Call ``listener(client_id)`` whenever the cache evicts that client's shard.
+
+        LazyClientPool keeps a client built while its shard is cached and
+        releases it here, so a client object never holds a shard the cache has
+        let go: the cache's budget stays the bound on client data in memory.
+        """
+
+        self._eviction_listeners.append(listener)
+
+    def touch_shard(self, client_id: str) -> bool:
+        """Whether the client's shard is cached; if it is, mark it most recently used.
+
+        A client kept built reads its shard once, at construction, so without
+        this its shard would age out of the LRU order while the client was in
+        use every round. It is checked for an in-place edit here too, as each
+        serve checks it, since a client kept built is not served again.
+
+        Raises:
+            RuntimeError: A tensor of the cached shard was edited in place.
+        """
+
+        cached = self._shard_cache.get(client_id)
+        if cached is None:
+            return False
+        self._shard_cache.move_to_end(client_id)
+        cached.check(self._shard_label(client_id))
+        return True
 
     def _load_shard_cached(self, client_id: str, shard_path: Path) -> dict[str, Any]:
         """Return a client shard, reading from disk only on a cache miss.
@@ -103,8 +133,10 @@ class ManifestFederatedDataset(FederatedDataset):
         self._shard_cache[client_id] = entry
         self._shard_cache_bytes_used += shard_bytes
         while self._shard_cache_bytes_used > self.shard_cache_bytes and len(self._shard_cache) > 1:
-            _, evicted = self._shard_cache.popitem(last=False)
+            evicted_id, evicted = self._shard_cache.popitem(last=False)
             self._shard_cache_bytes_used -= _shard_nbytes(evicted.payload)
+            for listener in self._eviction_listeners:
+                listener(evicted_id)
         return entry.serve(self._shard_label(client_id))
 
     def _shard_label(self, client_id: str) -> str:

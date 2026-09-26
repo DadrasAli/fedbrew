@@ -17,14 +17,22 @@ class LazyClientPool(Mapping[str, ClientUpdate]):
         self,
         client_ids: list[str],
         client_factory: Callable[[str], ClientUpdate],
+        keep_resident: Callable[[str], bool] | None = None,
     ) -> None:
         """Register the roster without constructing any client.
 
         Args:
             client_ids: Every client in the run, in roster order. Must be
                 unique.
-            client_factory: Called with one client id to build that client, at
-                most once per id. Its result is cached for the rest of the run.
+            client_factory: Called with one client id to build that client.
+                Its result is kept until the client is released.
+            keep_resident: Whether a client may stay built past
+                :meth:`release_client`, asked each time; also called on every
+                access to a built client. ``None`` releases every client asked,
+                which is what the pool always did. The factory passes the
+                dataset's ``touch_shard``: a client stays built while its shard
+                is in the shard cache, and the cache's eviction releases it
+                (:meth:`evict_client`).
 
         Raises:
             ValueError: If ``client_ids`` contains a duplicate.
@@ -41,6 +49,7 @@ class LazyClientPool(Mapping[str, ClientUpdate]):
         if len(self._client_id_set) != len(self._client_ids):
             raise ValueError("client_ids must be unique")
         self._client_factory = client_factory
+        self._keep_resident = keep_resident
         self._clients: dict[str, ClientUpdate] = {}
         self._client_infos: dict[str, ClientInfo] = {}
         self._saved_states: dict[str, dict[str, Any]] = {}
@@ -50,7 +59,10 @@ class LazyClientPool(Mapping[str, ClientUpdate]):
             raise KeyError(client_id)
         existing = self._clients.get(client_id)
         if existing is not None:
-            return existing
+            if self._keep_resident is None or self._keep_resident(client_id):
+                return existing
+            # Its shard left the cache without the eviction reaching the pool.
+            self.evict_client(client_id)
 
         client = self._client_factory(client_id)
         client_info = self._client_infos.get(client_id)
@@ -115,7 +127,27 @@ class LazyClientPool(Mapping[str, ClientUpdate]):
         return snapshot
 
     def release_client(self, client_id: str) -> None:
-        """Snapshot and evict one materialized client to bound memory use."""
+        """Let one built client go, unless it may stay resident.
+
+        Every client used to be evicted here after each evaluation and rebuilt
+        for its next fit: the constructor, its setup and a load_state of its own
+        snapshot, per client per round -- 20% of an MNIST MLP round at 1000
+        clients (perf/report.txt). A client whose shard is in the shard cache
+        now stays built; it holds nothing the cache does not already hold, so
+        memory stays under the cache's budget.
+        """
+
+        if self._keep_resident is not None and self._keep_resident(client_id):
+            return
+        self.evict_client(client_id)
+
+    def evict_client(self, client_id: str) -> None:
+        """Snapshot one built client's state and drop the client, to bound memory use.
+
+        What was built from the snapshot later is the client that was dropped:
+        the state it carries across rounds is its get_state, and everything
+        else it is built from the config and its shard.
+        """
 
         client = self._clients.pop(client_id, None)
         if client is not None:

@@ -480,7 +480,7 @@ def _build_clients(
             return client_factory(**kwargs)
 
         if _use_lazy_clients(config):
-            return LazyClientPool(client_ids, build_client)
+            return _lazy_client_pool(client_ids, build_client, dataset)
 
         return {client_id: build_client(client_id) for client_id in client_ids}
 
@@ -973,6 +973,26 @@ def _client_extra_optional_positive_float(
     if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
         raise RunRefused(f"client.{name} must be a positive number or null")
     return float(value)
+
+
+def _lazy_client_pool(
+    client_ids: list[str],
+    build_client: Callable[[str], ClientUpdate],
+    dataset: FederatedDataset,
+) -> LazyClientPool:
+    """The pool, with each client kept built while its shard is in the dataset's cache.
+
+    A dataset without a shard cache gets the pool as it was: every client
+    released after its evaluation.
+    """
+
+    touch_shard = getattr(dataset, "touch_shard", None)
+    on_shard_evicted = getattr(dataset, "on_shard_evicted", None)
+    if not (callable(touch_shard) and callable(on_shard_evicted)):
+        return LazyClientPool(client_ids, build_client)
+    pool = LazyClientPool(client_ids, build_client, keep_resident=touch_shard)
+    on_shard_evicted(pool.evict_client)
+    return pool
 
 
 def _use_lazy_clients(config: FullConfig) -> bool:

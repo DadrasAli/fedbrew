@@ -88,6 +88,19 @@ every client to be rebuilt moments later. The cost is that a round holds
 every participating client's data at once — `_stream_fit_results`
 (`fedbrew/core/loop.py`).
 
+**A manifest client stays built while its shard is cached.** The pool used to
+release every client after its evaluation and rebuild it for its next fit —
+constructor, setup, and a `load_state` of its own snapshot, per client per
+round, 20% of an MNIST MLP round at 1000 clients. `LazyClientPool` now keeps a
+client built while `touch_shard` finds its shard in the cache, and the cache's
+eviction releases it (`on_shard_evicted`, `fedbrew/data/manifest_dataset.py`),
+so a client object never holds a shard the cache has let go:
+`shard_cache_bytes` (§4.5) stays the bound on client data in memory, and a
+built client adds only its own small state beside it. With the cache off,
+every client is released after its evaluation, as before.
+`tests/test_resident_clients.py` pins the trajectory against released clients
+and the bound at a small cap.
+
 **The two per-client histories are held in memory for the whole run.** One
 record per client per round. At thousands of clients with `clients: all` over
 hundreds of rounds this is the dominant memory cost, and it is not streamed.
@@ -348,6 +361,7 @@ python tools/bench_compare_runs.py --help
 | `tests/test_docs_performance.py` | The dataloader keys, their gates, the staging keys and the tool list here match the code. |
 | `tests/test_client_csv_append.py` | The per-client CSVs append rather than rewrite. |
 | `tests/test_round_metrics_are_appended.py` | `round_metrics.csv` appends rather than rewrites. |
+| `tests/test_resident_clients.py` | §3: a client stays built while its shard is cached, at the released trajectory and within the cache's budget. |
 | `tests/test_finiteness_is_checked_on_the_aggregate.py` | One finiteness check per round on the average, still naming the client. |
 | `tests/test_optimizer_is_reused.py` | §2: one optimizer per worker, reset for each update, and the trajectory of one per update. |
 | `tests/test_evaluation_cadence.py` | `evaluation.fit.every` skips the post-fit forward pass and changes no training number. |

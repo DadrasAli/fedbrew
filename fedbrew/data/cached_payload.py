@@ -50,6 +50,21 @@ class CachedPayload:
             RuntimeError: A tensor was edited in place since the last serve.
         """
 
+        self.check(label)
+        return _copy_containers(self.payload)
+
+    def check(self, label: str) -> None:
+        """Refuse a payload a tensor of which was edited in place since it was cached.
+
+        What :meth:`serve` does before serving, on its own: a client kept built
+        across rounds (LazyClientPool) was served its shard once, and is checked
+        here each time it is used instead, so an edit is refused as many rounds
+        later as it was when the client was rebuilt and re-served every round.
+
+        Raises:
+            RuntimeError: A tensor was edited in place since it was cached.
+        """
+
         # strict=True: nothing outside this object holds the cached structure,
         # so a differing length would mean the payload itself was restructured.
         current = _tensor_versions(self.payload)
@@ -63,7 +78,6 @@ class CachedPayload:
                 "data that changed under it. Build new tensors from a served "
                 "shard rather than editing one."
             )
-        return _copy_containers(self.payload)
 
 
 def _copy_containers(payload: Mapping[str, Any]) -> dict[str, Any]:

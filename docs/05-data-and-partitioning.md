@@ -524,6 +524,11 @@ refuses a shard that changed under it (`fedbrew/data/cached_payload.py`), which
 is one serve late by construction -- an edit to a payload nobody reads again
 changes no later round. The pooled centralized payload is served the same way.
 
+A client stays built while its shard is cached (chapter 11 §3), so it is served
+its shard once rather than every round. Each use of a built client checks the
+shard's version counters instead (`touch_shard`, `CachedPayload.check`), so an
+in-place edit is refused as many rounds later as the rebuild's serve refused it.
+
 Chapter 11 covers when this matters and what `--staging` does about slow shared
 storage.
 
@@ -620,6 +625,7 @@ python -m pytest tests/test_partition_disjointness.py \
 | `tests/test_manifest_input_claims.py` | `input_dtype` and `input_range` describe the shards the manifest names: the dtype exactly, the range as a bound, both checked by `validate_manifest`. |
 | `tests/test_femnist_writer_split.py` | FEMNIST's natural writer partition, and that its three per-writer slices are disjoint and exhaustive. |
 | `tests/test_shard_cache.py` | The cache is bounded, and serves without handing over what it keeps. |
+| `tests/test_resident_clients.py` | §8: a client kept built is released when its shard is evicted, and an edit of its shard is refused on its next use. |
 | `tests/test_generator_atomic_write.py` | A killed generator leaves no half-written manifest. |
 | `tests/test_dataset_paths_resolve.py` | Every dataset path a run config names, commented alternatives included, is one a generator config here produces — unless the config declares in full that its data comes from outside this repository. |
 | `tests/test_classification_client_test_partitions.py` | Client test splits come from the global shard, for the generators that have one. |
