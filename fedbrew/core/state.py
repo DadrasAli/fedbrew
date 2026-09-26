@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import heapq
+import math
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 from fedbrew.core.divergence import STATUS_COMPLETED
@@ -103,6 +105,81 @@ class ClientHistorySummary:
     metric_names: set[str] = field(default_factory=set)
 
 
+@dataclass(slots=True)
+class RoundTimingSummary:
+    """Running aggregates of the rounds' wall clock, for run.json's timing block.
+
+    run.json is rewritten every round, and its timing block summed, averaged,
+    sorted for the median and took the extremes of every round's timings since
+    round 1, each time: O(rounds so far) per round, which took the per-round
+    write from 1.0 to 2.3 ms between 200 and 2000 rounds. Each aggregate is
+    kept here as records arrive instead, in O(log rounds), and each is the
+    value the full computation gives, bit for bit: the totals add in the same
+    order as sum(), ``partials`` holds the exact sum math.fsum -- and so
+    statistics.fmean -- rounds, and the two heaps hold the halves of the sorted
+    durations whose middle statistics.median reads.
+    """
+
+    timed_rounds: int = 0
+    total_sec: float = 0.0
+    minimum_sec: float = math.inf
+    maximum_sec: float = -math.inf
+    #: Non-overlapping partial sums of every duration (Shewchuk), whose exact
+    #: total math.fsum rounds once, as it does over the durations themselves.
+    partials: list[float] = field(default_factory=list)
+    #: The smaller half of the durations, negated so heapq keeps the largest
+    #: on top, and the larger half; the smaller half is never the shorter.
+    lower_half: list[float] = field(default_factory=list)
+    upper_half: list[float] = field(default_factory=list)
+    #: Seconds per RoundTimings field other than "total", summed in order.
+    phase_sec: dict[str, float] = field(default_factory=dict)
+
+    def add(self, timings: RoundTimings) -> None:
+        duration = timings.total
+        self.timed_rounds += 1
+        self.total_sec += duration
+        self.minimum_sec = min(self.minimum_sec, duration)
+        self.maximum_sec = max(self.maximum_sec, duration)
+        _add_exactly(self.partials, duration)
+        if not self.lower_half or duration <= -self.lower_half[0]:
+            heapq.heappush(self.lower_half, -duration)
+        else:
+            heapq.heappush(self.upper_half, duration)
+        if len(self.lower_half) > len(self.upper_half) + 1:
+            heapq.heappush(self.upper_half, -heapq.heappop(self.lower_half))
+        elif len(self.upper_half) > len(self.lower_half):
+            heapq.heappush(self.lower_half, -heapq.heappop(self.upper_half))
+        for timing in fields(RoundTimings):
+            if timing.name != "total":
+                self.phase_sec[timing.name] = self.phase_sec.get(timing.name, 0.0) + getattr(
+                    timings, timing.name
+                )
+
+    def mean_sec(self) -> float:
+        return math.fsum(self.partials) / self.timed_rounds
+
+    def median_sec(self) -> float:
+        if len(self.lower_half) > len(self.upper_half):
+            return -self.lower_half[0]
+        return (-self.lower_half[0] + self.upper_half[0]) / 2
+
+
+def _add_exactly(partials: list[float], value: float) -> None:
+    """Fold ``value`` into ``partials`` so they still sum exactly to every value so far."""
+
+    kept = 0
+    for partial in partials:
+        if abs(value) < abs(partial):
+            value, partial = partial, value
+        high = value + partial
+        low = partial - (high - value)
+        if low:
+            partials[kept] = low
+            kept += 1
+        value = high
+    partials[kept:] = [value]
+
+
 class _AppendOnlyHistory(list):  # type: ignore[type-arg]
     """A list that keeps a summary of itself current, and refuses to forget.
 
@@ -150,6 +227,20 @@ class _AppendOnlyHistory(list):  # type: ignore[type-arg]
     __iadd__ = _refuse
 
 
+class RoundHistory(_AppendOnlyHistory):
+    """The completed rounds' records, with running timing aggregates."""
+
+    __slots__ = ()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.summary = RoundTimingSummary()
+
+    def _accumulate(self, record: MetricRecord) -> None:
+        if record.timings is not None:
+            self.summary.add(record.timings)
+
+
 class ClientEvaluationHistory(_AppendOnlyHistory):
     """Post-aggregation per-client evaluations, with running totals."""
 
@@ -191,10 +282,10 @@ class ExperimentState:
     """State returned by a completed benchmark run."""
 
     rounds: list[RoundState] = field(default_factory=list)
-    metrics_history: list[MetricRecord] = field(default_factory=list)
     # Append-only lists that summarise themselves: run.json is rewritten every
-    # round and its scale block would otherwise re-scan all of both, every
-    # round, for the whole run.
+    # round and its timing and scale blocks would otherwise re-scan all three,
+    # every round, for the whole run.
+    metrics_history: list[MetricRecord] = field(default_factory=RoundHistory)
     client_metrics_history: list[ClientEvaluationRecord] = field(
         default_factory=ClientEvaluationHistory
     )

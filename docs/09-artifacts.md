@@ -187,6 +187,13 @@ These are maintained as running totals by `ClientHistorySummary`
 round, and every helper here used to re-scan the whole history each time —
 O(records so far) per round, so quadratic over a run.
 
+The `timing` block is kept the same way, by `RoundTimingSummary` on the loop's
+round history: the totals, the extremes, an exact running `fsum` for the mean
+and two heaps for the median. It used to sum, sort and scan every round's
+timings since round 1 on every write, which took the write from 1.0 to 2.3 ms
+between 200 and 2000 rounds. Every value is the one the full computation
+gives, bit for bit; `tests/test_run_json_timing_is_running.py` checks it.
+
 ### 3.3 `reproducibility`
 
 Four to seven sub-blocks, whichever the run actually had. **Empty entries are
@@ -610,6 +617,7 @@ python -m pytest tests/test_run_provenance.py \
 | `tests/test_a_round_commits_its_checkpoint_last.py` | §2: a round's checkpoints are staged while its CSV rows and `run.json` are written, and a kill in either write is resumable. |
 | `tests/test_a_refused_resume_changes_nothing.py` | §5: a resume the history cannot back is refused with every file byte-identical, and names the ways forward. |
 | `tests/test_client_history_summary.py` | The running totals behind `scale`. |
+| `tests/test_run_json_timing_is_running.py` | §3: the running aggregates behind `timing` are the full computation's, bit for bit, and the per-round write does not scan the history. |
 | `tests/test_report_run_size.py`, `tests/test_report_run_status.py` | `fedbrew report`. |
 | `tests/test_cleanup_runtime_artifacts.py` | `fedbrew cleanup` preserves what it is told to. |
 | `tests/test_non_finite_aggregation.py` | Non-finite values reach disk as `null`. |

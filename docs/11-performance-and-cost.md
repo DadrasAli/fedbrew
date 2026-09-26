@@ -329,6 +329,7 @@ python tools/bench_compare_runs.py --help
 | `tests/test_checkpoint_no_duplicate_model.py` | A checkpoint stores the model once. |
 | `tests/test_checkpoint_size_is_constant_in_rounds.py` | A checkpoint does not grow with the round count. |
 | `tests/test_client_history_summary.py` | The running totals replace the re-scan. |
+| `tests/test_run_json_timing_is_running.py` | run.json's timing block is kept running too, bit for bit. |
 | `tests/test_aggregation_peak_memory.py` | §3's peak model memory, measured at three participation counts. |
 | `tests/test_shard_cache.py` | The cache is bounded, and serves without handing over what it keeps. |
 | `tests/test_data_staging.py` | An unresolvable root stages nothing. |

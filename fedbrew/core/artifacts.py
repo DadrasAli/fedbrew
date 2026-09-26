@@ -6,7 +6,6 @@ import csv
 import io
 import json
 import os
-import statistics
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -21,6 +20,7 @@ from fedbrew.core.state import (
     ClientMetricRecord,
     MetricRecord,
     RoundTimings,
+    RoundTimingSummary,
 )
 
 # client_metrics and client_update_metrics are CSV-only: the .jsonl twins held
@@ -923,23 +923,27 @@ def _timing_summary(
     """
 
     metadata = run_metadata or {}
-    timed = [record.timings for record in history if record.timings is not None]
+    running = getattr(history, "summary", None)
+    if not isinstance(running, RoundTimingSummary):
+        running = RoundTimingSummary()
+        for record in history:
+            if record.timings is not None:
+                running.add(record.timings)
     summary: dict[str, Any] = {
         "run_duration_sec": metadata.get("duration_sec"),
-        "timed_rounds": len(timed),
+        "timed_rounds": running.timed_rounds,
     }
-    if not timed:
+    if not running.timed_rounds:
         return summary
-    durations = [timings.total for timings in timed]
     summary.update(
         {
-            "total_round_sec": round(sum(durations), 3),
-            "mean_sec_per_round": round(statistics.fmean(durations), 3),
-            "median_sec_per_round": round(statistics.median(durations), 3),
-            "min_sec_per_round": round(min(durations), 3),
-            "max_sec_per_round": round(max(durations), 3),
+            "total_round_sec": round(running.total_sec, 3),
+            "mean_sec_per_round": round(running.mean_sec(), 3),
+            "median_sec_per_round": round(running.median_sec(), 3),
+            "min_sec_per_round": round(running.minimum_sec, 3),
+            "max_sec_per_round": round(running.maximum_sec, 3),
             "phase_sec": {
-                attribute: round(sum(getattr(timings, attribute) for timings in timed), 3)
+                attribute: round(running.phase_sec[attribute], 3)
                 for attribute in _ROUND_TIMING_FIELDS.values()
                 if attribute != "total"
             },
