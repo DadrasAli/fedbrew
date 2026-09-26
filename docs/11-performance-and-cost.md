@@ -67,7 +67,8 @@ every participation rate. Buffering client states before averaging would be one
 copy per participant, which is the cost `WeightedStateAccumulator` exists to
 avoid. On CPU the reference copy shares storage with the *first* client's
 state, so that one client's state does outlive its fold; the other N-1 do
-not.
+not. Beside them it keeps two scalars per client per tensor, the minimum and
+maximum it names a non-finite client from (chapter 07 §3.3).
 
 **Two model states, except in one dtype each.** The running sum is kept in
 float32 when the clients send bfloat16 or float16, so for those the sum is
@@ -347,6 +348,7 @@ python tools/bench_compare_runs.py --help
 | `tests/test_docs_performance.py` | The dataloader keys, their gates, the staging keys and the tool list here match the code. |
 | `tests/test_client_csv_append.py` | The per-client CSVs append rather than rewrite. |
 | `tests/test_round_metrics_are_appended.py` | `round_metrics.csv` appends rather than rewrites. |
+| `tests/test_finiteness_is_checked_on_the_aggregate.py` | One finiteness check per round on the average, still naming the client. |
 | `tests/test_optimizer_is_reused.py` | §2: one optimizer per worker, reset for each update, and the trajectory of one per update. |
 | `tests/test_evaluation_cadence.py` | `evaluation.fit.every` skips the post-fit forward pass and changes no training number. |
 | `tests/test_flush_cadence.py` | `runtime.flush_every` writes and fsyncs every N rounds and changes no number. |

@@ -176,14 +176,18 @@ class FedLALRServer(FedAvgServer):
 
         for result in results:
             weight = self._result_weight(result)
-            model_accumulator.add(self._compatible_model_state(result), weight)
+            model_accumulator.add(
+                self._compatible_model_state(result), weight, source=result.client_id
+            )
             momentum_accumulator.add(
                 _required_state(result, "momentum_state"),
                 weight,
+                source=result.client_id,
             )
             second_moment_accumulator.add(
                 _required_state(result, "second_moment_state"),
                 weight,
+                source=result.client_id,
             )
             metric_accumulator.add(result.metrics, result.num_examples)
             rate = result.metrics.get("effective_learning_rate_coordinate_mean")
@@ -194,9 +198,16 @@ class FedLALRServer(FedAvgServer):
         if not num_results:
             raise ValueError("FedLALR aggregate requires at least one result")
 
-        self._model_state = model_accumulator.result()
-        self._momentum = momentum_accumulator.result()
-        self._second_moment = second_moment_accumulator.result()
+        # All three are computed, and so checked for finiteness, before any is
+        # assigned: a refused round leaves the server as it was.
+        model_state = model_accumulator.result()
+        momentum = momentum_accumulator.result()
+        second_moment = second_moment_accumulator.result()
+        self._model_state, self._momentum, self._second_moment = (
+            model_state,
+            momentum,
+            second_moment,
+        )
 
         # Filter first, then add the server's own diagnostics, so server.metrics
         # governs the client-reported metrics and only those. Matches

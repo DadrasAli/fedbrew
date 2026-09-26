@@ -301,7 +301,7 @@ class FedAvgServer(ServerStrategy):
         num_results = 0
         for result in results:
             model_state = self._compatible_model_state(result)
-            accumulator.add(model_state, self._result_weight(result))
+            accumulator.add(model_state, self._result_weight(result), source=result.client_id)
             metric_accumulator.add(result.metrics, result.num_examples)
             num_results += 1
 

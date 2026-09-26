@@ -276,11 +276,10 @@ class NonFiniteStateError(ValueError):
 def refuse_non_finite_state(state: Mapping[str, Any], what: str) -> None:
     """Raise :class:`NonFiniteStateError` if a floating tensor in ``state`` is not finite.
 
-    The one finiteness check every aggregation path uses: the accumulator
-    applies it to each client state it folds, and a strategy applies it to
-    auxiliary state it sums outside the accumulator -- SCAFFOLD's control
-    deltas and the control variate they produce (FINDINGS.csv POST-F27).
-    Integer tensors are skipped, as the accumulator skips them.
+    For state a strategy sums outside WeightedStateAccumulator -- SCAFFOLD's
+    control deltas and the control variate they produce (FINDINGS.csv
+    POST-F27). The accumulator checks its own result once a round instead
+    (POST-F32). Integer tensors are skipped, as the accumulator skips them.
 
     Args:
         state: Name to tensor.
@@ -336,6 +335,15 @@ def _accumulation_dtype(dtype: torch.dtype) -> torch.dtype:
     return _PROMOTED_ACCUMULATION_DTYPES.get(dtype, dtype)
 
 
+def _extremes(tensor: Tensor) -> tuple[Tensor, Tensor]:
+    """(minimum, maximum), finite exactly when the tensor is; zeros for an empty one."""
+
+    if not tensor.numel():
+        zero = torch.zeros((), dtype=tensor.dtype)
+        return zero, zero
+    return torch.aminmax(tensor)
+
+
 class WeightedStateAccumulator:
     """Accumulate a running weighted mean of model states one client at a time.
 
@@ -346,6 +354,19 @@ class WeightedStateAccumulator:
     regardless of participation. Measured at 4, 16 and 64 clients by
     tests/test_aggregation_peak_memory.py, which is also what would catch a
     change back to buffering: the averaged result is identical either way.
+
+    Finiteness is checked once, on the averaged result (:meth:`result`), not on
+    every client state as it arrives: ``isfinite(t).all()`` per client was 14%
+    of an MNIST MLP round at 1000 clients, eight times the cost of the sum
+    itself (perf/report.txt). A NaN or an infinity in any client state reaches
+    the sum -- NaN and inf propagate, inf - inf is NaN, and a weight of 0 gives
+    0 * inf = NaN -- so the check on the result misses nothing the per-client
+    check caught. To still name the client and the tensor, each add records
+    the tensor's minimum and maximum (one ``aminmax`` pass, which propagates
+    NaN and shows an infinity at one end): 9 us against 133 for the check it
+    replaces on a 50,890-parameter state. The check on the result also refuses
+    what the per-client one let through: finite states whose weighted mean is
+    not representable. FINDINGS.csv POST-F32.
     """
 
     def __init__(self) -> None:
@@ -359,8 +380,11 @@ class WeightedStateAccumulator:
         self._reference: dict[str, Tensor] = {}
         self._total_weight = 0.0
         self._count = 0
+        #: Per state added, in order: who sent it, and each floating tensor's
+        #: (minimum, maximum), which are finite exactly when the tensor is.
+        self._extremes: list[tuple[str | None, dict[str, tuple[Tensor, Tensor]]]] = []
 
-    def add(self, state: Mapping[str, Any], weight: float) -> None:
+    def add(self, state: Mapping[str, Any], weight: float, source: str | None = None) -> None:
         """Add one weighted client state to the running sum.
 
         Args:
@@ -372,6 +396,8 @@ class WeightedStateAccumulator:
                 for ``uniform``). Must be finite. Only the ratio between
                 weights matters, since
                 :meth:`result` divides by their total.
+            source: Which client sent the state, named if :meth:`result`
+                refuses it.
 
         Raises:
             NonFiniteStateError: If ``weight`` is NaN or infinite. Caught here
@@ -389,6 +415,8 @@ class WeightedStateAccumulator:
         if self._count and set(state.keys()) != set(self._reference.keys()):
             raise ValueError("all states must have the same keys")
 
+        extremes: dict[str, tuple[Tensor, Tensor]] = {}
+        self._extremes.append((source, extremes))
         for key, value in state.items():
             if not isinstance(value, Tensor):
                 raise TypeError(f"state value for {key} is not a tensor")
@@ -406,14 +434,7 @@ class WeightedStateAccumulator:
                 )
 
             if value_cpu.is_floating_point():
-                # Caught here rather than downstream because downstream is
-                # forever: FedOpt's v <- b2*v + (1-b2)*d^2, FedLALR's second
-                # moment and SCAFFOLD's control variates all keep a NaN
-                # permanently (measured: still NaN after 20 clean rounds), and
-                # save_state writes it into latest.pt, so --resume-latest picks
-                # a dead run back up. One poisoned client would otherwise take
-                # the whole round's weighted mean with it.
-                refuse_non_finite_state({key: value_cpu}, "client state")
+                extremes[key] = _extremes(value_cpu)
                 self._totals[key].add_(value_cpu, alpha=weight)
             elif self._count and not torch.equal(value_cpu, self._reference[key]):
                 raise ValueError(f"non-floating state tensor {key!r} differs between clients")
@@ -435,6 +456,8 @@ class WeightedStateAccumulator:
                 # Back to the model's dtype: the accumulation dtype is this
                 # class's business and the state's is the model's contract.
                 averaged[key] = self._totals[key].div_(self._total_weight).to(reference.dtype)
+                if not torch.isfinite(averaged[key]).all():
+                    self._refuse(key)
             else:
                 averaged[key] = reference.clone()
 
@@ -442,7 +465,36 @@ class WeightedStateAccumulator:
         self._reference = {}
         self._total_weight = 0.0
         self._count = 0
+        self._extremes = []
         return averaged
+
+    def _refuse(self, key: str) -> None:
+        """Name what made the mean of ``key`` non-finite, and raise.
+
+        Refused here rather than downstream because downstream is forever:
+        FedOpt's v <- b2*v + (1-b2)*d^2, FedLALR's second moment and SCAFFOLD's
+        control variates all keep a NaN permanently (measured: still NaN after
+        20 clean rounds), and save_state writes it into latest.pt, so
+        --resume-latest picks a dead run back up. Raised before the caller
+        assigns the result, so the refused round changes nothing.
+
+        The client named is the one the per-client check named: the first
+        state, in the order added, with a non-finite tensor, and its first
+        such tensor. Only when every state is finite is the mean itself at
+        fault.
+        """
+
+        for source, extremes in self._extremes:
+            for name, (low, high) in extremes.items():
+                if not (torch.isfinite(low) and torch.isfinite(high)):
+                    what = (
+                        "client state" if source is None else f"client state from client {source!r}"
+                    )
+                    raise NonFiniteStateError(f"{what} tensor {name!r} contains non-finite values")
+        raise NonFiniteStateError(
+            f"the weighted mean of tensor {key!r} overflows {self._reference[key].dtype}: "
+            "every client state is finite, and their weighted mean is not representable"
+        )
 
 
 def subtract_model_states(a: Mapping[str, Any], b: Mapping[str, Any]) -> StateDict:

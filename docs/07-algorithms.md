@@ -244,14 +244,30 @@ added **after** `filter_metrics`, so they appear regardless of
 
 The control deltas are summed beside the model, not through
 `WeightedStateAccumulator`, so they are checked on their own: each client's
-`control_delta`, their sum and the updated `c` go through the same
-`refuse_non_finite_state` (`fedbrew/core/torch_utils.py`) the accumulator
-applies to model states, and the model and `c` are assigned together only
-after all three pass. A NaN or Inf anywhere refuses the round with both
+`control_delta`, their sum and the updated `c` go through
+`refuse_non_finite_state` (`fedbrew/core/torch_utils.py`), the model through
+the accumulator's own check on its result, and the model and `c` are assigned
+together only after all of them pass. A NaN or Inf anywhere refuses the round with both
 unchanged, and the loop records it as the `non_finite_client_state`
 divergence a non-finite model produces, so the last checkpoint is the last
 healthy one. Before this, a finite model beside a NaN delta aggregated and
 left NaN in `c` for the rest of the run (FINDINGS.csv `POST-F27`).
+
+**Every strategy's model state is checked once a round, on the average.**
+`WeightedStateAccumulator.result` refuses a non-finite averaged tensor with
+`NonFiniteStateError`, naming the first client, in the order the states
+arrived, whose state held a NaN or an infinity, and that tensor -- the client
+and tensor the per-client check it replaced named -- from the minimum and
+maximum it records of each state it folds. NaN and infinities reach the sum
+(inf − inf is NaN, and a weight of 0 gives 0 · inf = NaN), so nothing the
+per-client check caught gets past this one, and it costs one pass a round
+instead of one per client (`isfinite(t).all()` per client was 14% of an MNIST
+MLP round at 1000 clients). It also refuses a round whose client states are
+each finite but whose weighted mean overflows the model's dtype, which the
+per-client check let into the model; that refusal says it is an overflow and
+names no client (FINDINGS.csv `POST-F32`). `FedLALRServer` computes its model
+and both moments before assigning any, so a refused round leaves all three as
+they were. `tests/test_finiteness_is_checked_on_the_aggregate.py` pins it.
 
 ### 3.4 `fedlalr`
 

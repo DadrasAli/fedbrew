@@ -155,7 +155,7 @@ class ScaffoldServer(FedAvgServer):
             control_delta = result.payload.get("control_delta")
             if not isinstance(control_delta, dict):
                 raise ValueError("SCAFFOLD fit result payload must contain control_delta")
-            model_accumulator.add(model_state, self._result_weight(result))
+            model_accumulator.add(model_state, self._result_weight(result), source=result.client_id)
             # The model state is checked by the accumulator; the control delta
             # is summed outside it and was not checked at all, so a finite
             # model beside a NaN delta put NaN into server_control, where it

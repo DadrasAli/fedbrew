@@ -50,14 +50,16 @@ class AccumulatorRefusesNonFiniteTests(unittest.TestCase):
 
     def test_a_nan_tensor_is_refused_and_names_the_key(self) -> None:
         accumulator = WeightedStateAccumulator()
+        accumulator.add({"w": torch.tensor([float("nan"), 1.0])}, 100.0)
         with self.assertRaises(NonFiniteStateError) as caught:
-            accumulator.add({"w": torch.tensor([float("nan"), 1.0])}, 100.0)
+            accumulator.result()
         self.assertIn("'w'", str(caught.exception))
 
     def test_an_inf_tensor_is_refused(self) -> None:
         accumulator = WeightedStateAccumulator()
+        accumulator.add({"w": torch.tensor([1.0, float("inf")])}, 1.0)
         with self.assertRaises(NonFiniteStateError):
-            accumulator.add({"w": torch.tensor([1.0, float("inf")])}, 1.0)
+            accumulator.result()
 
     def test_a_non_finite_weight_is_refused(self) -> None:
         accumulator = WeightedStateAccumulator()
@@ -70,8 +72,10 @@ class AccumulatorRefusesNonFiniteTests(unittest.TestCase):
         """add(nan, 100) + add(1, 900) used to average to nan, silently."""
 
         accumulator = WeightedStateAccumulator()
+        accumulator.add({"w": torch.tensor([float("nan")])}, 100.0)
+        accumulator.add({"w": torch.tensor([1.0])}, 900.0)
         with self.assertRaises(NonFiniteStateError):
-            accumulator.add({"w": torch.tensor([float("nan")])}, 100.0)
+            accumulator.result()
         accumulator = WeightedStateAccumulator()
         accumulator.add({"w": torch.tensor([1.0, 3.0])}, 1.0)
         accumulator.add({"w": torch.tensor([3.0, 1.0])}, 3.0)

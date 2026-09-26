@@ -349,8 +349,11 @@ the true upload volume, as SCAFFOLD and FedLALR do in
 preflight notice stating the multiplier, so a user comparing arms on round
 count is told not to.
 
-State the server sums outside `WeightedStateAccumulator` is not checked by
-it. Pass each incoming piece, and the persistent state it would produce,
+State summed through `WeightedStateAccumulator` is checked when `result()`
+is called, so call `result()` on every accumulator before assigning any of
+them, as `FedLALRServer` does, and pass `add(..., source=result.client_id)`
+so a refusal names the client. State the server sums outside it is not checked
+by it. Pass each incoming piece, and the persistent state it would produce,
 through `refuse_non_finite_state` (`fedbrew/core/torch_utils.py`) before
 assigning anything, as `ScaffoldServer.aggregate_stream` does: the loop turns
 the `NonFiniteStateError` into a recorded divergence, but only if nothing was
