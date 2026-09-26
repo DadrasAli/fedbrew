@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import sys
+import threading
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -85,6 +86,67 @@ class DeltaSGDUpdateResult:
     #: Steps where the smoothness estimate was undefined because the parameter
     #: or gradient difference vanished, and only the growth term applied.
     undefined_curvature_steps: int = 0
+
+
+class _ReusedOptimizers(threading.local):
+    """Per thread, which is per worker: one optimizer per class, and whether it is out."""
+
+    def __init__(self) -> None:
+        self.by_class: dict[type, tuple[tuple[tuple[str, Any], ...], optim.Optimizer]] = {}
+        self.out: set[int] = set()
+
+
+_REUSED = _ReusedOptimizers()
+
+
+def reused_optimizer(
+    optimizer_class: type[optim.Optimizer],
+    parameters: Iterable[Tensor],
+    **hyperparameters: Any,
+) -> optim.Optimizer:
+    """An optimizer over ``parameters``, built once per worker rather than once per client.
+
+    Every local update used to construct its own torch.optim optimizer: 86 us
+    per client per round, 86 ms a round at 1000 clients (perf/report.txt).
+    Each worker now keeps one per class and hands it out reset: bound to this
+    update's parameters, with no state -- no momentum buffer or moment carried
+    from any earlier client or round -- and so steps exactly as a new one
+    would. It is rebuilt whenever the hyperparameters differ from the ones it
+    was built with, a cosine-scheduled learning rate included, so torch still
+    validates every value it runs with. release_optimizer hands it back.
+
+    A second request while it is out gets a fresh optimizer, as does an empty
+    parameter list, which torch then refuses as it always did.
+    """
+
+    params = list(parameters)
+    settings = tuple(sorted(hyperparameters.items()))
+    cached = _REUSED.by_class.get(optimizer_class)
+    if not params or (cached is not None and id(cached[1]) in _REUSED.out):
+        return optimizer_class(params, **hyperparameters)
+    if cached is None or cached[0] != settings:
+        optimizer = optimizer_class(params, **hyperparameters)
+        _REUSED.by_class[optimizer_class] = (settings, optimizer)
+    else:
+        optimizer = cached[1]
+        optimizer.param_groups[0]["params"] = params
+    _REUSED.out.add(id(optimizer))
+    return optimizer
+
+
+def release_optimizer(optimizer: optim.Optimizer) -> None:
+    """Hand back a reused_optimizer: its state goes, and so do its references to the model.
+
+    Dropping both now rather than at the next update keeps a worker's memory
+    what it was when every optimizer was garbage once its update returned: an
+    AdamW's two moments are model-sized. A fresh optimizer is left alone.
+    """
+
+    if id(optimizer) not in _REUSED.out:
+        return
+    _REUSED.out.discard(id(optimizer))
+    optimizer.state.clear()
+    optimizer.param_groups[0]["params"] = []
 
 
 def run_sgd_update_mode(
@@ -518,17 +580,21 @@ def _run_single_batch(
     client_id: str,
     max_grad_norm: float | None = None,
 ) -> LocalUpdateResult:
-    optimizer = _clipped(optim.SGD(model.parameters(), lr=learning_rate), model, max_grad_norm)
+    sgd = reused_optimizer(optim.SGD, model.parameters(), lr=learning_rate)
+    optimizer = _clipped(sgd, model, max_grad_norm)
     batch_iterator = iter(train_loader)
     outputs: list[Mapping[str, float]] = []
 
-    for _ in range(local_iterations):
-        batch, batch_iterator = _next_batch(
-            train_loader,
-            batch_iterator,
-            client_id=client_id,
-        )
-        outputs.append(task.train_step(model, batch, optimizer))
+    try:
+        for _ in range(local_iterations):
+            batch, batch_iterator = _next_batch(
+                train_loader,
+                batch_iterator,
+                client_id=client_id,
+            )
+            outputs.append(task.train_step(model, batch, optimizer))
+    finally:
+        release_optimizer(sgd)
 
     return LocalUpdateResult(outputs, optimizer_steps=local_iterations)
 
@@ -543,18 +609,22 @@ def _run_sequential_epochs(
     client_id: str,
     max_grad_norm: float | None = None,
 ) -> LocalUpdateResult:
-    optimizer = _clipped(optim.SGD(model.parameters(), lr=learning_rate), model, max_grad_norm)
+    sgd = reused_optimizer(optim.SGD, model.parameters(), lr=learning_rate)
+    optimizer = _clipped(sgd, model, max_grad_norm)
     outputs: list[Mapping[str, float]] = []
     optimizer_steps = 0
 
-    for _ in range(local_iterations):
-        epoch_had_batch = False
-        for batch in train_loader:
-            epoch_had_batch = True
-            outputs.append(task.train_step(model, batch, optimizer))
-            optimizer_steps += 1
-        if not epoch_had_batch:
-            raise ValueError(f"client {client_id!r} has no training batches")
+    try:
+        for _ in range(local_iterations):
+            epoch_had_batch = False
+            for batch in train_loader:
+                epoch_had_batch = True
+                outputs.append(task.train_step(model, batch, optimizer))
+                optimizer_steps += 1
+            if not epoch_had_batch:
+                raise ValueError(f"client {client_id!r} has no training batches")
+    finally:
+        release_optimizer(sgd)
 
     return LocalUpdateResult(outputs, optimizer_steps=optimizer_steps)
 

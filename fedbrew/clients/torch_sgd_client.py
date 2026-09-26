@@ -15,6 +15,8 @@ from fedbrew.clients.local_update_modes import (
     MIN_POSITIVE_LEARNING_RATE,
     full_gradient_into_grad,
     own_loop_update_mode,
+    release_optimizer,
+    reused_optimizer,
 )
 from fedbrew.core.checkpointing import (
     refuse_a_pre_rename_client_state,
@@ -232,22 +234,31 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
 
         training_outputs: list[Mapping[str, float]] = []
         optimizer_steps = 0
-        for _ in range(self.local_iterations):
-            if self.update_mode == FULL_GRADIENT_UPDATE_MODE:
-                training_outputs += full_gradient_into_grad(
-                    task=self.task, model=model, train_loader=train_loader, client_id=self.client_id
-                )
-                optimizer.step()
-                optimizer_steps += 1
-            else:
-                for batch in train_loader:
-                    output = self.task.train_step(model, batch, optimizer)
-                    training_outputs.append(output)
+        try:
+            for _ in range(self.local_iterations):
+                if self.update_mode == FULL_GRADIENT_UPDATE_MODE:
+                    training_outputs += full_gradient_into_grad(
+                        task=self.task,
+                        model=model,
+                        train_loader=train_loader,
+                        client_id=self.client_id,
+                    )
+                    optimizer.step()
                     optimizer_steps += 1
-                    if self.max_local_steps is not None and optimizer_steps >= self.max_local_steps:
-                        break
-            if self.max_local_steps is not None and optimizer_steps >= self.max_local_steps:
-                break
+                else:
+                    for batch in train_loader:
+                        output = self.task.train_step(model, batch, optimizer)
+                        training_outputs.append(output)
+                        optimizer_steps += 1
+                        if (
+                            self.max_local_steps is not None
+                            and optimizer_steps >= self.max_local_steps
+                        ):
+                            break
+                if self.max_local_steps is not None and optimizer_steps >= self.max_local_steps:
+                    break
+        finally:
+            release_optimizer(optimizer)
 
         self._require_training_batches(optimizer_steps)
 
@@ -625,7 +636,8 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
     ) -> optim.Optimizer:
         if self.momentum is None or self.weight_decay is None or self.nesterov is None:
             raise ValueError("local_sgd requires optimizer settings from configuration")
-        return optim.SGD(
+        return reused_optimizer(
+            optim.SGD,
             model.parameters(),
             lr=self._round_learning_rate(round_id),
             momentum=self.momentum,

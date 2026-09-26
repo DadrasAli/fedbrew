@@ -12,6 +12,8 @@ from fedbrew.clients.local_update_modes import (
     FULL_GRADIENT_UPDATE_MODE,
     full_gradient_into_grad,
     own_loop_update_mode,
+    release_optimizer,
+    reused_optimizer,
 )
 from fedbrew.clients.torch_sgd_client import TorchSGDClient, _get_train_data
 from fedbrew.core.checkpointing import refuse_a_reconfigured_resume
@@ -125,8 +127,9 @@ class TorchScaffoldClient(TorchSGDClient[TaskAdapter]):
         model = self.task.build_model(self.model_config)
         refuse_adapter_state(self, "scaffold", model)
         load_model_state(model, clone_model_state(global_state))
+        sgd = reused_optimizer(optim.SGD, model.parameters(), lr=self.learning_rate)
         optimizer = _ScaffoldCorrectingOptimizer(
-            optim.SGD(model.parameters(), lr=self.learning_rate),
+            sgd,
             model,
             old_client_control,
             server_control,
@@ -137,17 +140,23 @@ class TorchScaffoldClient(TorchSGDClient[TaskAdapter]):
         )
 
         local_steps = 0
-        for _ in range(self.local_iterations):
-            if self.update_mode == FULL_GRADIENT_UPDATE_MODE:
-                full_gradient_into_grad(
-                    task=self.task, model=model, train_loader=train_loader, client_id=self.client_id
-                )
-                optimizer.step()
-                local_steps += 1
-                continue
-            for batch in train_loader:
-                self.task.train_step(model, batch, optimizer)
-                local_steps += 1
+        try:
+            for _ in range(self.local_iterations):
+                if self.update_mode == FULL_GRADIENT_UPDATE_MODE:
+                    full_gradient_into_grad(
+                        task=self.task,
+                        model=model,
+                        train_loader=train_loader,
+                        client_id=self.client_id,
+                    )
+                    optimizer.step()
+                    local_steps += 1
+                    continue
+                for batch in train_loader:
+                    self.task.train_step(model, batch, optimizer)
+                    local_steps += 1
+        finally:
+            release_optimizer(sgd)
 
         if local_steps == 0:
             raise ValueError("SCAFFOLD local_steps must be positive")

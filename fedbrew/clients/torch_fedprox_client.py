@@ -12,6 +12,8 @@ from fedbrew.clients.local_update_modes import (
     FULL_GRADIENT_UPDATE_MODE,
     full_gradient_into_grad,
     own_loop_update_mode,
+    release_optimizer,
+    reused_optimizer,
 )
 from fedbrew.clients.torch_sgd_client import TorchSGDClient, _get_train_data
 from fedbrew.core.checkpointing import refuse_a_reconfigured_resume
@@ -107,8 +109,9 @@ class TorchFedProxClient(TorchSGDClient[TaskAdapter]):
         refuse_adapter_state(self, "fedprox", model)
         load_model_state(model, clone_model_state(global_state))
         reference_parameters = _reference_parameters(model)
+        sgd = reused_optimizer(optim.SGD, model.parameters(), lr=self.learning_rate)
         optimizer = _FedProxCorrectingOptimizer(
-            optim.SGD(model.parameters(), lr=self.learning_rate),
+            sgd,
             model,
             reference_parameters,
             self.proximal_mu,
@@ -119,17 +122,23 @@ class TorchFedProxClient(TorchSGDClient[TaskAdapter]):
         )
 
         optimizer_steps = 0
-        for _ in range(self.local_iterations):
-            if self.update_mode == FULL_GRADIENT_UPDATE_MODE:
-                full_gradient_into_grad(
-                    task=self.task, model=model, train_loader=train_loader, client_id=self.client_id
-                )
-                optimizer.step()
-                optimizer_steps += 1
-                continue
-            for batch in train_loader:
-                self.task.train_step(model, batch, optimizer)
-                optimizer_steps += 1
+        try:
+            for _ in range(self.local_iterations):
+                if self.update_mode == FULL_GRADIENT_UPDATE_MODE:
+                    full_gradient_into_grad(
+                        task=self.task,
+                        model=model,
+                        train_loader=train_loader,
+                        client_id=self.client_id,
+                    )
+                    optimizer.step()
+                    optimizer_steps += 1
+                    continue
+                for batch in train_loader:
+                    self.task.train_step(model, batch, optimizer)
+                    optimizer_steps += 1
+        finally:
+            release_optimizer(sgd)
         self._require_training_batches(optimizer_steps)
 
         base_metrics, num_examples = self._post_fit_evaluation(

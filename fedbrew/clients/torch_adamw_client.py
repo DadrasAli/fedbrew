@@ -8,6 +8,7 @@ from typing import Any
 import torch
 from torch import optim
 
+from fedbrew.clients.local_update_modes import reused_optimizer
 from fedbrew.clients.torch_sgd_client import TorchSGDClient
 from fedbrew.core.checkpointing import refuse_a_reconfigured_resume
 from fedbrew.tasks.base import TaskAdapter
@@ -163,7 +164,8 @@ class TorchAdamWClient(TorchSGDClient[TaskAdapter]):
         ]
         if not trainable_parameters:
             raise ValueError("local_adamw cannot train a model with no trainable parameters")
-        return optim.AdamW(
+        return reused_optimizer(
+            optim.AdamW,
             trainable_parameters,
             lr=self._round_learning_rate(round_id),
             betas=(self.beta1, self.beta2),

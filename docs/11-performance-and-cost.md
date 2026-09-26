@@ -42,6 +42,15 @@ Python overhead, not by matrix multiplication. Settings that reduce the number
 of client visits help; settings that make each visit's arithmetic faster mostly
 do not.
 
+**Each worker builds its optimizer once.** Every local update used to construct
+its own `torch.optim` optimizer, 86 µs per client per round, 86 ms a round at
+1000 clients. `reused_optimizer` (`fedbrew/clients/local_update_modes.py`)
+keeps one per class per worker and hands it out bound to the update's
+parameters with no state, so it steps exactly as a new one would; it is
+rebuilt when the hyperparameters change, once a round under a cosine rate.
+`tests/test_optimizer_is_reused.py` pins the trajectory against one optimizer
+per update, for every rule that steps one.
+
 ## 3. Memory
 
 **Peak model memory does not scale with participation rate.**
@@ -181,6 +190,18 @@ default `true`, and both are throughput-only. `fast_batching` reproduces
 the `DataLoader` RNG protocol exactly, so a seeded run yields the same batch
 order epoch for epoch — `tests/test_fast_batching.py` pins that against the
 real `DataLoader`. Chapter 10.
+
+### 4.7 `runtime.flush_every` and `evaluation.fit.every`
+
+Both default to 1, every round, and neither changes a number.
+`runtime.flush_every: N` writes the CSV rows, `run.json` and `latest.pt`, each
+with one `fsync`, every N rounds instead of every round; an `fsync` on `/proj`'s
+NFS costs ~7 ms against ~0.7 on `/tmp`, and a round does five. A kill loses at
+most the rounds since the last flush. Chapter 09 §2.
+`evaluation.fit.every: n` runs the post-fit pass behind the `fit_` metrics on
+scheduled rounds only; it was 18% of an MNIST MLP round at 1000 clients. The
+divergence monitor watching `fit_loss` then reacts up to *n* − 1 rounds later.
+Chapter 04 §8.
 
 ## 5. Data staging
 
@@ -326,6 +347,7 @@ python tools/bench_compare_runs.py --help
 | `tests/test_docs_performance.py` | The dataloader keys, their gates, the staging keys and the tool list here match the code. |
 | `tests/test_client_csv_append.py` | The per-client CSVs append rather than rewrite. |
 | `tests/test_round_metrics_are_appended.py` | `round_metrics.csv` appends rather than rewrites. |
+| `tests/test_optimizer_is_reused.py` | §2: one optimizer per worker, reset for each update, and the trajectory of one per update. |
 | `tests/test_evaluation_cadence.py` | `evaluation.fit.every` skips the post-fit forward pass and changes no training number. |
 | `tests/test_flush_cadence.py` | `runtime.flush_every` writes and fsyncs every N rounds and changes no number. |
 | `tests/test_checkpoint_no_duplicate_model.py` | A checkpoint stores the model once. |
