@@ -6,7 +6,7 @@ import copy
 import math
 import random
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, cast
+from typing import Any
 
 from fedbrew.core.checkpointing import refuse_a_reconfigured_resume
 from fedbrew.core.federated_state import (
@@ -149,7 +149,6 @@ class FedAvgServer(ServerStrategy):
         self._model_state_scope: str | None = None
         self._model_state_metadata: dict[str, Any] | None = None
         self._state_validated = False
-        self._round_metrics: list[dict[str, float]] = []
 
     def initialize(self) -> dict[str, Any]:
         """Initialize a global model state from the configured task."""
@@ -280,7 +279,6 @@ class FedAvgServer(ServerStrategy):
         self._model_state = averaged_state
         metrics = filter_metrics(metrics, self.metrics)
         round_info.metrics.update(metrics)
-        self._round_metrics.append(metrics)
         return self._federated_payload(metrics=metrics)
 
     def _accumulate_fit_results(
@@ -410,7 +408,9 @@ class FedAvgServer(ServerStrategy):
             "model_state_metadata": copy.deepcopy(
                 self._model_state_metadata or {"model_state_scope": "full"}
             ),
-            "round_metrics": list(self._round_metrics),
+            # No per-round history: it made every checkpoint grow with the
+            # round count, and nothing restored from it read it. The run's
+            # history is round_metrics.csv, which a resume replays.
             "metrics": list(self.metrics),
             "aggregation_weighting": self.aggregation_weighting,
             # Compared on resume and restored by nothing. A setting absent here
@@ -459,10 +459,8 @@ class FedAvgServer(ServerStrategy):
                 copy.deepcopy(dict(metadata)) if isinstance(metadata, Mapping) else None
             )
             self._state_validated = False
-        self._round_metrics = cast(
-            list[dict[str, float]],
-            state.get("round_metrics", []),
-        )
+        # A checkpoint written before the history was dropped still carries
+        # it under "round_metrics"; it is ignored, as it always went unread.
         metrics = state.get("metrics", self.metrics)
         if isinstance(metrics, list):
             self.metrics = [str(metric) for metric in metrics]

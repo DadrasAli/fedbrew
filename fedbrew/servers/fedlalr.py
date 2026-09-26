@@ -213,7 +213,6 @@ class FedLALRServer(FedAvgServer):
         )
         metrics.update(_dispersion_metrics(effective_learning_rates))
         round_info.metrics.update(metrics)
-        self._round_metrics.append(metrics)
         return self._with_optimizer_state(self._federated_payload(metrics=metrics))
 
     def save_state(self) -> dict[str, Any]:

@@ -255,7 +255,6 @@ class FedOptServer(FedAvgServer):
 
         metrics = filter_metrics(raw_metrics, self.metrics)
         round_info.metrics.update(metrics)
-        self._round_metrics.append(metrics)
         return self._federated_payload(metrics=metrics)
 
     def save_state(self) -> dict[str, Any]:

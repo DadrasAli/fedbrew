@@ -304,6 +304,15 @@ roughly halves a checkpoint that carries no client states.
 `tests/test_checkpoint_no_duplicate_model.py`
 guards it.
 
+**A checkpoint no longer grows with the round count.** Every server kept each
+round's aggregated metrics in a list and wrote the whole list into its state,
+so `latest.pt`, rewritten every round under `save_last`, carried the run's
+metric history: one save cost about 1.6 + 0.0104·N ms at history length N,
+106 ms and 1.6 MB at N = 10,000. Nothing restored from it read the list. The
+run's history is `round_metrics.csv`, which a resume replays (§5), so the list
+is gone, and a checkpoint that still carries it resumes with it ignored.
+`tests/test_checkpoint_size_is_constant_in_rounds.py` guards it.
+
 A checkpoint carries enough to continue, not just to evaluate:
 
 | Contents | Why |
@@ -312,7 +321,7 @@ A checkpoint carries enough to continue, not just to evaluate:
 | server state | optimizer moments, control variates — otherwise a resumed FedAdam restarts its second moment |
 | client states | per-client state for the rules that keep one |
 | RNG state | Python, numpy, torch and per-device CUDA — §5 |
-| round metrics | so the resumed run's history is continuous |
+| this round's metrics | the broadcast payload a resumed round starts from; earlier rounds come from `round_metrics.csv` |
 
 `best.pt` is selected on `checkpointing.best_metric`, which must be a `val_` or
 `personal_val_` metric — selecting on a test metric makes the reported test
@@ -535,6 +544,7 @@ python -m pytest tests/test_run_provenance.py \
                  tests/test_client_csv_append.py \
                  tests/test_round_metrics_are_appended.py \
                  tests/test_checkpoint_no_duplicate_model.py \
+                 tests/test_checkpoint_size_is_constant_in_rounds.py \
                  tests/test_resume_is_all_or_nothing.py \
                  tests/test_best_checkpoint_selection_is_not_frozen.py \
                  tests/test_resume_refuses_a_changed_hyperparameter.py \
@@ -591,6 +601,7 @@ python -m pytest tests/test_run_provenance.py \
 | `tests/test_client_csv_append.py` | The per-client CSVs append rather than rewrite. |
 | `tests/test_round_metrics_are_appended.py` | §2: `round_metrics.csv` appends rather than rewrites, byte-for-byte what a rewrite writes; a row cut short is dropped, and a kill inside the append is resumable. |
 | `tests/test_checkpoint_no_duplicate_model.py` | The model is stored once. |
+| `tests/test_checkpoint_size_is_constant_in_rounds.py` | §4: `latest.pt` is the same size after 3 rounds and 30 for every server family; a checkpoint carrying the old history still resumes. |
 | `tests/test_resume_is_all_or_nothing.py` | §5: a SCAFFOLD resume that would strand the control variate is refused, and the narrower cases are not. |
 | `tests/test_best_checkpoint_selection_is_not_frozen.py` | §4: a non-finite selection metric is skipped rather than made the run's best. |
 | `tests/test_resume_refuses_a_changed_hyperparameter.py` | §5: a resume that would change a restored hyperparameter is refused, and learned state still restores. |

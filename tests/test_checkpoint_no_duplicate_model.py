@@ -101,7 +101,6 @@ class PayloadTest(unittest.TestCase):
 
         scaffold = _payload(_server("scaffold"))["server_state"]
         self.assertTrue(torch.equal(scaffold["server_control"]["w"], torch.ones(8)))
-        self.assertIn("round_metrics", scaffold)
         self.assertIn("aggregation_weighting", scaffold)
 
         fedopt = _payload(_server("fedopt"))["server_state"]

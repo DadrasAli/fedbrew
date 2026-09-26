@@ -327,6 +327,7 @@ python tools/bench_compare_runs.py --help
 | `tests/test_client_csv_append.py` | The per-client CSVs append rather than rewrite. |
 | `tests/test_round_metrics_are_appended.py` | `round_metrics.csv` appends rather than rewrites. |
 | `tests/test_checkpoint_no_duplicate_model.py` | A checkpoint stores the model once. |
+| `tests/test_checkpoint_size_is_constant_in_rounds.py` | A checkpoint does not grow with the round count. |
 | `tests/test_client_history_summary.py` | The running totals replace the re-scan. |
 | `tests/test_aggregation_peak_memory.py` | §3's peak model memory, measured at three participation counts. |
 | `tests/test_shard_cache.py` | The cache is bounded, and serves without handing over what it keeps. |

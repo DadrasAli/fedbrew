@@ -98,7 +98,6 @@ def _persistent(server: FedAvgServer) -> dict[str, Any]:
         "model": raw(server._model_state),
         "scope": server._model_state_scope,
         "metadata": dict(server._model_state_metadata or {}),
-        "round_metrics": list(server._round_metrics),
     }
     if isinstance(server, ScaffoldServer):
         snapshot["control"] = raw(server._server_control)

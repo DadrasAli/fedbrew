@@ -219,7 +219,6 @@ class ScaffoldServer(FedAvgServer):
             }
         )
         round_info.metrics.update(metrics)
-        self._round_metrics.append(metrics)
         # Go through _federated_payload so adapter-scoped runs keep
         # model_state_scope / model_state_metadata, then add the control variate
         # that SCAFFOLD clients additionally need.

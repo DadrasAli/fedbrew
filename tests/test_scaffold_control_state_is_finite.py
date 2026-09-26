@@ -82,7 +82,6 @@ class TheServerRefusesBeforeItChangesAnythingTest(unittest.TestCase):
             server.aggregate_stream(round_info, results)
         self.assertEqual(_snapshot(server), before, "a refused round changed the model or c")
         self.assertEqual(round_info.metrics, {})
-        self.assertEqual(server._round_metrics, [])
         return str(caught.exception)
 
     def test_a_non_finite_control_delta_is_refused_and_both_states_are_kept(self) -> None:
