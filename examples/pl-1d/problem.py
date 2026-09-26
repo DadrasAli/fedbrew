@@ -557,6 +557,12 @@ class PL1DTask(TaskAdapter):
         optimizer.step()
         return {"loss": float(loss.detach())}
 
+    def evaluation_total(self, batch: Any) -> float | None:
+        """eval_step's "total", the batch's shifts, without evaluating (evaluation.fit.every)."""
+
+        shifts, _ = self._move_batch(batch)
+        return float(shifts.numel())
+
     def eval_step(self, model: PLScalarModel, batch: Any) -> dict[str, float]:
         """Measure the batch's mean objective, and the iterate it was measured at."""
 

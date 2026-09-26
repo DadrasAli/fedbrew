@@ -132,12 +132,8 @@ class TorchFedProxClient(TorchSGDClient[TaskAdapter]):
                 optimizer_steps += 1
         self._require_training_batches(optimizer_steps)
 
-        base_metrics, num_examples = self._evaluate_model(
-            model,
-            train_data,
-            metrics=[],
-            round_id=request.round_id,
-            prefix="fit_",
+        base_metrics, num_examples = self._post_fit_evaluation(
+            model, train_data, request, metrics=[]
         )
         proximal_loss = _proximal_loss_value(
             model,
@@ -153,7 +149,10 @@ class TorchFedProxClient(TorchSGDClient[TaskAdapter]):
 
         all_metrics = dict(base_metrics)
         all_metrics["fit_proximal_loss"] = proximal_loss
-        all_metrics["fit_total_loss"] = float(all_metrics.get("fit_loss", 0.0)) + proximal_loss
+        # Only beside the fit_loss it adds to: on a round evaluation.fit.every
+        # skips there is none, and the proximal term alone is not a total.
+        if "fit_loss" in all_metrics:
+            all_metrics["fit_total_loss"] = float(all_metrics["fit_loss"]) + proximal_loss
         all_metrics["communicated_parameters"] = float(communicated_parameters)
         all_metrics["communicated_bytes"] = float(communicated_bytes)
         metrics = filter_metrics(all_metrics, self.metrics)

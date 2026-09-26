@@ -16,6 +16,10 @@ class FitRequest:
     #: T, the rounds in the run, copied from ``RoundInfo.total_rounds`` by the
     #: server that builds the request. None for a request built outside a run.
     total_rounds: int | None = None
+    #: Whether the client measures its trained model this round (the fit_
+    #: metrics). Set by the loop from evaluation.fit.every; a client that skips
+    #: the pass still reports the example count it would have counted.
+    post_fit_evaluation: bool = True
 
 
 @dataclass(slots=True)

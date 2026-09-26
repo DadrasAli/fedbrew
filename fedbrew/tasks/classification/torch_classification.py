@@ -283,6 +283,12 @@ class TorchClassificationTask(TaskAdapter):
             "total": float(total),
         }
 
+    def evaluation_total(self, batch: Any) -> float | None:
+        """eval_step's "total": how many targets the batch holds."""
+
+        _, targets = _extract_tensors(batch)
+        return float(int(targets.numel()))
+
     def compute_metrics(
         self,
         outputs: Sequence[Any] | Tensor,

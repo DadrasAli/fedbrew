@@ -251,12 +251,7 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
 
         self._require_training_batches(optimizer_steps)
 
-        metrics, evaluated_num_examples = self._evaluate_model(
-            model,
-            train_data,
-            round_id=request.round_id,
-            prefix="fit_",
-        )
+        metrics, evaluated_num_examples = self._post_fit_evaluation(model, train_data, request)
         num_examples = self.task.federated_aggregation_weight(
             training_outputs,
             evaluated_num_examples,
@@ -685,6 +680,51 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
         else:
             num_examples = _infer_split_num_examples(data)
         return filtered_metrics, num_examples
+
+    def _post_fit_evaluation(
+        self,
+        model: torch.nn.Module,
+        train_data: Any,
+        request: FitRequest,
+        metrics: list[str] | None = None,
+    ) -> tuple[dict[str, float], int]:
+        """The trained model's fit_ metrics on its train split, and the split's example count.
+
+        The count is the aggregation weight's input, so every fit needs it; the
+        metrics only on the rounds evaluation.fit.every schedules. On the
+        others the forward pass is skipped and the count is taken the way the
+        pass would take it (_evaluated_example_count), so the weight, and every
+        number that follows from it, is the same.
+        """
+
+        if request.post_fit_evaluation:
+            return self._evaluate_model(
+                model, train_data, metrics=metrics, round_id=request.round_id, prefix="fit_"
+            )
+        return {}, self._evaluated_example_count(model, train_data, request.round_id)
+
+    def _evaluated_example_count(self, model: torch.nn.Module, data: Any, round_id: int) -> int:
+        """The example count _evaluate_model returns, without its forward pass where it can.
+
+        The same loader, built the same way and iterated in full, so the
+        batches are the pass's and so is any draw a loader makes as it starts.
+        Each batch's "total" comes from the task's evaluation_total, which
+        reads it off the batch; a task that returns None there has its
+        eval_step run for that batch instead, so the count is exact for any
+        task and only the saving depends on the hook.
+        """
+
+        eval_loader = self.task.build_dataloader(data, self._eval_loader_config(round_id or 0))
+        from_batch = getattr(self.task, "evaluation_total", lambda batch: None)
+        totals: list[Any] = []
+        for batch in eval_loader:
+            total = from_batch(batch)
+            if total is None:
+                total = self.task.eval_step(model, batch).get("total")
+            totals.append(total)
+        if totals and all(total is not None for total in totals):
+            return int(sum(float(total) for total in totals))
+        return _infer_split_num_examples(data)
 
     def _eval_request_metrics(self, request: EvalRequest) -> list[str] | None:
         raw_metrics = request.payload.get("metrics")

@@ -326,6 +326,7 @@ python tools/bench_compare_runs.py --help
 | `tests/test_docs_performance.py` | The dataloader keys, their gates, the staging keys and the tool list here match the code. |
 | `tests/test_client_csv_append.py` | The per-client CSVs append rather than rewrite. |
 | `tests/test_round_metrics_are_appended.py` | `round_metrics.csv` appends rather than rewrites. |
+| `tests/test_evaluation_cadence.py` | `evaluation.fit.every` skips the post-fit forward pass and changes no training number. |
 | `tests/test_flush_cadence.py` | `runtime.flush_every` writes and fsyncs every N rounds and changes no number. |
 | `tests/test_checkpoint_no_duplicate_model.py` | A checkpoint stores the model once. |
 | `tests/test_checkpoint_size_is_constant_in_rounds.py` | A checkpoint does not grow with the round count. |

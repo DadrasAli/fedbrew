@@ -178,6 +178,31 @@ class CentralTestConfig:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class FitEvaluationConfig:
+    """When each training client measures its trained model: the fit_ metrics.
+
+    After its local update every client evaluates the model it just trained on
+    its own train split, which is where fit_loss and fit_accuracy come from.
+    That pass is a forward over the whole split, per client per round: 18% of
+    an MNIST MLP round at 1000 clients (perf/report.txt). On the rounds this
+    schedule skips, the round carries no fit_ metrics, and nothing else
+    changes: the client still counts the split's examples the pass would have
+    counted, which is its aggregation weight, over the same loader.
+
+    The divergence monitor watches fit_loss by default, so it sees the metric
+    on scheduled rounds only: a blow-up is noticed up to ``every - 1`` rounds
+    later, and ``patience`` counts evaluated rounds, not rounds. The refusal of
+    a non-finite client state at aggregation does not read a metric and still
+    runs every round.
+    """
+
+    #: The schedule SplitEvaluationConfig.every takes, but defaulting to 1:
+    #: every round, which is what every run did before this existed.
+    every: int | str = 1
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
 #: Which model each evaluation pass measures.
 #:   global    the aggregated server model, as every non-personalized arm does
 #:   personal  each client's own model, which for a personalized update rule is
@@ -211,6 +236,7 @@ class EvaluationConfig:
         default_factory=lambda: SplitEvaluationConfig(every=10, clients="all")
     )
     central_test: CentralTestConfig = field(default_factory=lambda: CentralTestConfig(every=10))
+    fit: FitEvaluationConfig = field(default_factory=FitEvaluationConfig)
     #: Which model the client passes measure. "global" keeps every existing
     #: config evaluating exactly what it evaluated before this field existed.
     model_scope: str = "global"
@@ -653,6 +679,7 @@ _KNOWN_EXTRA_KEYS: dict[str, frozenset[str]] = {
     "evaluation.val": frozenset(),
     "evaluation.test": frozenset(),
     "evaluation.central_test": frozenset(),
+    "evaluation.fit": frozenset(),
     "client_statistics": frozenset(),
     "divergence": frozenset(),
     # data.extra is forwarded as keyword arguments only to
@@ -898,7 +925,7 @@ def _validate_unknown_keys(config: FullConfig) -> None:
             declared.get(section, frozenset()),
         )
     _validate_known_keys("evaluation", config.evaluation.extra)
-    for split in ("train", "val", "test", "central_test"):
+    for split in ("train", "val", "test", "central_test", "fit"):
         _validate_known_keys(f"evaluation.{split}", getattr(config.evaluation, split).extra)
     _validate_known_keys("client_statistics", config.client_statistics.extra)
     _validate_known_keys("divergence", config.divergence.extra)
@@ -1327,14 +1354,20 @@ def _build_evaluation_config(values: object) -> EvaluationConfig:
         every=central_known.get("every", defaults.central_test.every),
         extra=central_extra,
     )
+    fit_values = values.get("fit", {})
+    if not isinstance(fit_values, Mapping):
+        raise RunRefused("evaluation.fit must be a mapping")
+    fit_known, fit_extra = _split_extra(fit_values, FitEvaluationConfig)
+    fit = FitEvaluationConfig(every=fit_known.get("every", defaults.fit.every), extra=fit_extra)
     extra = {
         key: value
         for key, value in values.items()
-        if key not in {"train", "val", "test", "central_test", "model_scope"}
+        if key not in {"train", "val", "test", "central_test", "fit", "model_scope"}
     }
     return EvaluationConfig(
         **splits,
         central_test=central_test,
+        fit=fit,
         model_scope=values.get("model_scope", defaults.model_scope),
         extra=extra,
     )
@@ -1467,10 +1500,36 @@ def parse_evaluation_client_scope(scope: object) -> tuple[str, int | None]:
     )
 
 
+def _validate_fit_evaluation(config: FullConfig) -> None:
+    """evaluation.fit.every parses, and a monitor on a fit_ metric has one to read.
+
+    With the pass never run no round carries a fit_ metric, so a divergence
+    monitor watching one -- fit_loss is its default -- would be silenced for
+    the whole run, non_finite included, with only a warning after the last
+    round. Refused here instead, on the run path, like the client.metrics
+    filter that would drop the name (_validate_divergence).
+    """
+
+    schedule = parse_evaluation_schedule(config.evaluation.fit.every, "evaluation.fit")
+    divergence = config.divergence
+    if (
+        schedule is None
+        and divergence is not None
+        and divergence.active
+        and divergence.metric.startswith("fit_")
+    ):
+        raise RunRefused(
+            f"evaluation.fit.every is 'never', so no round carries {divergence.metric} and "
+            f"the divergence monitor watching it (divergence.metric) would never run. "
+            "Evaluate fit on a schedule, or watch another metric."
+        )
+
+
 def _validate_evaluation(config: FullConfig) -> None:
     """Check every split's schedule and client scope, and the split roles."""
 
     parse_evaluation_schedule(config.evaluation.central_test.every, "evaluation.central_test")
+    _validate_fit_evaluation(config)
     for split in ("train", "val", "test"):
         block = getattr(config.evaluation, split)
         parse_evaluation_schedule(block.every, f"evaluation.{split}")

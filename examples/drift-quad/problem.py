@@ -742,6 +742,12 @@ class DriftQuadTask(TaskAdapter):
         optimizer.step()
         return {"loss": float(loss.detach())}
 
+    def evaluation_total(self, batch: Any) -> float | None:
+        """eval_step's "total", the batch's offsets, without evaluating (evaluation.fit.every)."""
+
+        offsets, _ = self._move_batch(batch)
+        return float(len(offsets))
+
     def eval_step(self, model: QuadraticModel, batch: Any) -> dict[str, float]:
         """Measure the batch's mean objective, and the iterate it was measured at."""
 

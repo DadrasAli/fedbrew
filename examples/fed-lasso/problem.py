@@ -1022,6 +1022,12 @@ class FedLassoTask(TaskAdapter):
         optimizer.step()
         return {"loss": float(loss.detach())}
 
+    def evaluation_total(self, batch: Any) -> float | None:
+        """eval_step's "total", the batch's rows, without evaluating (evaluation.fit.every)."""
+
+        _, targets = self._move_batch(batch)
+        return float(len(targets))
+
     def eval_step(self, model: LassoModel, batch: Any) -> dict[str, float]:
         """Measure the batch's objective, and six properties of the iterate."""
 

@@ -164,12 +164,8 @@ class TorchScaffoldClient(TorchSGDClient[TaskAdapter]):
         control_delta = subtract_model_states(new_client_control, old_client_control)
         self._client_control = new_client_control
 
-        base_metrics, num_examples = self._evaluate_model(
-            model,
-            train_data,
-            metrics=[],
-            round_id=request.round_id,
-            prefix="fit_",
+        base_metrics, num_examples = self._post_fit_evaluation(
+            model, train_data, request, metrics=[]
         )
         communicated_parameters, communicated_bytes = model_state_size(local_state)
         # SCAFFOLD uploads the model and the control-variate delta together,

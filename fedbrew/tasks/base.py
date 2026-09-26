@@ -145,6 +145,19 @@ class TaskAdapter(ABC):
             metadata["group_norm_reductions"] = reductions
         return metadata
 
+    def evaluation_total(self, batch: Any) -> float | None:
+        """The "total" eval_step reports for ``batch``, read off the batch; None if it cannot be.
+
+        A client whose post-fit pass is skipped (evaluation.fit.every) still
+        needs the pass's example count, its aggregation weight. A task whose
+        count depends on the batch alone returns it here, and the forward pass
+        is saved; None, the default, has eval_step run for the batch, so the
+        count is the same either way.
+        """
+
+        del batch
+        return None
+
     def federated_aggregation_weight(
         self,
         training_outputs: Sequence[Mapping[str, float]],

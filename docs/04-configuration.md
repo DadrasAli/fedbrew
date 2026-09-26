@@ -508,6 +508,7 @@ when staging is worth it.
 | `test.every` | int \| `final` \| `never` | `10` | |
 | `test.clients` | scope | `"all"` | `participating` is **rejected** for test. |
 | `central_test.every` | int \| `final` \| `never` | `10` | |
+| `fit.every` | int \| `final` \| `never` | `1` | The pass each training client makes over its own train split after its update: the `fit_` metrics. See below. |
 | `model_scope` | `global` \| `personal` \| `both` | `"global"` | |
 
 **Schedule grammar** — `parse_evaluation_schedule` (`fedbrew/core/config.py`):
@@ -521,6 +522,22 @@ when staging is worth it.
 An interval pins round 1 as well as its own multiples, so a 500-round run at
 `every: 10` both starts from a measured baseline and ends on a measured round.
 `0` and negatives are rejected with a message naming `final` and `never`.
+
+**`fit.every` schedules the post-fit pass.** After its local update each
+training client measures the model it just trained on its own train split,
+which is where `fit_loss` and `fit_accuracy` come from; on an MNIST MLP round
+with 1000 clients that pass was 18% of the round. On a round the schedule skips,
+the round and the per-client rows carry no `fit_` metrics and nothing else
+changes: the client still takes the example count the pass would have taken,
+which is its aggregation weight, over the same loader, reading each batch's
+count off the batch (`TaskAdapter.evaluation_total`; a task that does not
+define it has `eval_step` run instead, so the count is exact either way). The
+default, 1, is every round. The divergence monitor watches `fit_loss` by
+default, so under `every: n` it sees the metric on scheduled rounds only: a
+blow-up is caught up to *n* − 1 rounds later, and `divergence.patience` counts
+evaluated rounds. The refusal of a non-finite client state at aggregation reads
+no metric and still runs every round. `never` is refused while the monitor
+watches a `fit_` metric. `tests/test_evaluation_cadence.py` pins all of it.
 
 **Client scope grammar** — `parse_evaluation_client_scope` (`fedbrew/core/config.py`):
 
@@ -701,6 +718,8 @@ python -m pytest tests/test_unknown_config_keys.py \
                  tests/test_evaluation_config.py \
                  tests/test_evaluation_schedule.py \
                  tests/test_evaluation_draw_is_per_split.py \
+                 tests/test_evaluation_cadence.py \
+                 tests/test_flush_cadence.py \
                  tests/test_client_rule_sets_are_shared.py \
                  tests/test_no_dead_or_shadowing_paths.py \
                  tests/test_shipped_config_explicitness.py \
@@ -736,6 +755,8 @@ python -m pytest tests/test_unknown_config_keys.py \
 | `tests/test_shipped_config_explicitness.py` | `matmul_precision` and `deterministic` are stated by every shipped config. |
 | `tests/test_evaluation_schedule.py` | The `every` grammar, including `final` and `never`. |
 | `tests/test_evaluation_config.py` | Split roles and client-scope parsing. |
+| `tests/test_evaluation_cadence.py` | §8: `fit.every` and the split schedules at *c* leave the training trajectory bit-identical and the evaluated cells the every-round run's; a skipped pass counts without evaluating; a blow-up is caught within *c* rounds. |
+| `tests/test_flush_cadence.py` | §7: `runtime.flush_every` is a positive integer, changes no number, and a resume may change it. |
 | `tests/test_evaluation_draw_is_per_split.py` | §8: two splits sampled at one *N* draw independently, and every other property of the draw is unchanged. |
 | `tests/test_client_rule_sets_are_shared.py` | §5: the client-rule sets have one definition, and `fedavg_ft` is validated like the other two. |
 | `tests/test_no_dead_or_shadowing_paths.py` | §4: each FedOpt alias names its own optimizer, an unread `server_optimizer` is refused, and an extension cannot shadow a built-in name. |

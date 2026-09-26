@@ -160,6 +160,7 @@ def run_fl_loop(
     central_schedule = parse_evaluation_schedule(
         evaluation.central_test.every, "evaluation.central_test"
     )
+    fit_schedule = parse_evaluation_schedule(evaluation.fit.every, "evaluation.fit")
 
     # Decided before anything is written: a resume that cannot be taken is
     # refused with the directory exactly as it was. POST-F25.
@@ -218,7 +219,12 @@ def run_fl_loop(
     for round_id in range(start_round, global_rounds + 1):
         round_started = time.perf_counter()
         round_info = RoundInfo(round_id=round_id, total_rounds=global_rounds)
-        requests = list(server.configure_round(round_info, client_infos))
+        requests = _fit_requests(
+            server,
+            round_info,
+            client_infos,
+            post_fit_evaluation=evaluates_round(fit_schedule, round_id, global_rounds),
+        )
         selected_clients = [request.client_id for request in requests]
 
         # Announced before the first client trains: under participation_probability
@@ -669,6 +675,20 @@ def _restore_client_states(
         if not isinstance(client_state, Mapping):
             raise RunRefused("checkpoint client state must be a mapping")
         client[str(client_id)].load_state(client_state)
+
+
+def _fit_requests(
+    server: ServerStrategy,
+    round_info: RoundInfo,
+    client_infos: list[ClientInfo],
+    post_fit_evaluation: bool,
+) -> list[FitRequest]:
+    """The round's fit requests, each told whether its client measures the trained model."""
+
+    requests = list(server.configure_round(round_info, client_infos))
+    for request in requests:
+        request.post_fit_evaluation = post_fit_evaluation
+    return requests
 
 
 def _setup_clients(client: ClientPool, client_infos: list[ClientInfo]) -> None:

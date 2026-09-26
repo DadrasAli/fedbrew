@@ -716,6 +716,12 @@ class NonconvexSimplexTask(TaskAdapter):
         optimizer.step()
         return {"loss": float(loss.detach())}
 
+    def evaluation_total(self, batch: Any) -> float | None:
+        """eval_step's "total", the batch's graphs, without evaluating (evaluation.fit.every)."""
+
+        graphs, _ = self._move_batch(batch)
+        return float(len(graphs))
+
     def eval_step(self, model: SimplexPointModel, batch: Any) -> dict[str, float]:
         """Measure the batch's objective, and seven properties of the iterate."""
 

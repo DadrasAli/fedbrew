@@ -118,12 +118,7 @@ class FedAvgClient(TorchSGDClient):
             max_grad_norm=self.max_grad_norm,
         )
 
-        metrics, evaluated_num_examples = self._evaluate_model(
-            model,
-            train_data,
-            round_id=request.round_id,
-            prefix="fit_",
-        )
+        metrics, evaluated_num_examples = self._post_fit_evaluation(model, train_data, request)
         num_examples = self.task.federated_aggregation_weight(
             update_result.training_outputs,
             evaluated_num_examples,
