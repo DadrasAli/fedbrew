@@ -143,3 +143,25 @@ class CentralEvaluationTest(ExecutorRuns):
         evaluator._global_data(dataset)["x"].add_(1.0)
         with self.assertRaisesRegex(RuntimeError, "edited in place"):
             evaluator._global_data(dataset)
+
+
+class KeptRowsTest(ExecutorRuns):
+    def test_a_split_not_due_keeps_its_rows(self) -> None:
+        """Test is due at rounds 1 and 4, val every round: nothing is stacked twice."""
+
+        from fedbrew.core import batched_executor
+
+        config = evaluation_config()
+        config["evaluation"]["train"] = {"every": "never"}
+        config["evaluation"]["test"] = {"every": 3, "clients": "all"}
+        real = batched_executor._Rows.__init__
+        built: list[int] = []
+
+        def counted(self: Any, task: Any, sources: list[Any]) -> None:
+            built.append(len(sources))
+            real(self, task, sources)
+
+        with mock.patch.object(batched_executor._Rows, "__init__", counted):
+            self.run_config(config, "batched")
+        # Round 1 stacks the training rows, val's and test's, once each.
+        self.assertEqual(built, [8, 8, 8])

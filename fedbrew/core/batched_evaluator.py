@@ -78,10 +78,11 @@ class BatchedEvaluator:
             raise ValueError("chunk_bytes must be a positive integer")
         self.chunk_bytes = int(chunk_bytes)
         self._reference = SequentialEvaluator()
-        #: The stacked rows of the last evaluation's buckets, kept while it
-        #: was one chunk: the same clients' unchanged splits, every round
-        #: their evaluation is due.
-        self._rows: dict[tuple[Any, ...], _Rows] = {}
+        #: Per split name, the stacked rows its last evaluation used, kept
+        #: while every split's fit ``chunk_bytes`` together: the same clients'
+        #: unchanged splits, every round their evaluation is due, whichever
+        #: splits are due in between.
+        self._rows: dict[str, dict[tuple[Any, ...], _Rows]] = {}
         self._executor = executor
         #: The central pass's model, built once, and the global test shard.
         self._central_model: nn.Module | None = None
@@ -155,28 +156,29 @@ class BatchedEvaluator:
             member.batched_evaluation_plan(request)
             for member, request in zip(members, requests, strict=True)
         ]
-        planned, keep = self._plan(task, plans, requests[0].round_id)
-        kept_rows = self._rows
-        self._rows = {}
+        planned = self._plan(task, plans, requests[0].round_id)
+        kept = self._rows
+        used: dict[str, dict[tuple[Any, ...], _Rows]] = {}
         executor_rows = getattr(self._executor, "_rows", None) or {}
         dtype = next(iter(params.values())).dtype
         done: list[tuple[list[tuple[int, int]], Any, bool]] = []
-        for entries, orders, split_chunks in planned:
+        for split, entries, orders, split_chunks in planned:
+            held = kept.get(split, {})
             slot_of = {entry: slot for slot, entry in enumerate(entries)}
             step_counts = orders.steps.tolist()
             for chunk in split_chunks:
                 sources = [plans[index].data[position] for index, position in chunk]
                 key = tuple(id(source) for source in sources)
-                rows = kept_rows.get(key) or executor_rows.get(key)
+                rows = held.get(key) or executor_rows.get(key)
                 if rows is None or not rows.holds(sources):
                     rows = _Rows(task, sources)
-                if keep:
-                    self._rows[key] = rows
+                used.setdefault(split, {})[key] = rows
                 slots = [slot_of[entry] for entry in chunk]
                 counts = [step_counts[slot] for slot in slots]
                 steps = _Steps(rows, orders, slots, dtype)
                 outputs = measure_splits(task, template, buffers, params, None, steps, counts)
                 done.append((chunk, *folded_part(task, outputs, counts)))
+        self._rows = self._kept(kept, used)
         # Every chunk's outputs cross to the host together, once for the round.
         measured: list[list[Any]] = [[None] * len(plan.data) for plan in plans]
         floats = host_floats([part for _, part, _ in done])
@@ -187,12 +189,10 @@ class BatchedEvaluator:
 
     def _plan(
         self, task: Any, plans: list[Any], round_id: int
-    ) -> tuple[list[tuple[list[tuple[int, int]], Any, list[list[tuple[int, int]]]]], bool]:
+    ) -> list[tuple[str, list[tuple[int, int]], Any, list[list[tuple[int, int]]]]]:
         """Per split name: its entries, their orders planned together, and its chunks.
 
-        An entry is (client position, split position). Also whether the
-        whole evaluation fits one chunk's budget, which is when its rows are
-        kept for the next evaluation round.
+        An entry is (client position, split position).
         """
 
         segments: dict[str, list[tuple[int, int]]] = {}
@@ -201,8 +201,7 @@ class BatchedEvaluator:
                 if data is not None:
                     segments.setdefault(plan.splits[position], []).append((index, position))
         planned = []
-        cost = 0
-        for entries in segments.values():
+        for split, entries in segments.items():
             declared = [plans[index].orders[position] for index, position in entries]
             orders = round_orders(
                 declared,
@@ -217,19 +216,36 @@ class BatchedEvaluator:
                     [batch] for batch in _replayed(plans, entries[slot])
                 ],
             )
-            split_chunks, split_cost = self._chunks(task, plans, entries)
-            planned.append((entries, orders, split_chunks))
-            cost += split_cost
-        return planned, cost <= self.chunk_bytes
+            planned.append((split, entries, orders, self._chunks(task, plans, entries)))
+        return planned
+
+    def _kept(
+        self,
+        before: dict[str, dict[tuple[Any, ...], _Rows]],
+        used: dict[str, dict[tuple[Any, ...], _Rows]],
+    ) -> dict[str, dict[tuple[Any, ...], _Rows]]:
+        """The rows to keep: this round's, and other splits' from before, while they fit the budget.
+
+        Bounded by ``chunk_bytes`` as one chunk is, so what is held between
+        rounds is what one chunk may hold anyway; this round's are kept first.
+        """
+
+        def size(held: dict[str, dict[tuple[Any, ...], _Rows]]) -> int:
+            return sum(rows.bytes for split in held.values() for rows in split.values())
+
+        merged = {**{split: rows for split, rows in before.items() if split not in used}, **used}
+        if size(merged) <= self.chunk_bytes:
+            return merged
+        return used if size(used) <= self.chunk_bytes else {}
 
     def _chunks(
         self, task: Any, plans: list[Any], entries: list[tuple[int, int]]
-    ) -> tuple[list[list[tuple[int, int]]], int]:
-        """Consecutive runs of splits whose rows fit ``chunk_bytes``, and their total cost."""
+    ) -> list[list[tuple[int, int]]]:
+        """Consecutive runs of splits whose rows fit ``chunk_bytes``."""
 
         chunks: list[list[tuple[int, int]]] = []
         current: list[tuple[int, int]] = []
-        used = total = 0
+        used = 0
         row_bytes: int | None = None
         for index, position in entries:
             data = plans[index].data[position]
@@ -243,10 +259,9 @@ class BatchedEvaluator:
                 current, used = [], 0
             current.append((index, position))
             used += cost
-            total += cost
         if current:
             chunks.append(current)
-        return chunks, total
+        return chunks
 
     # -- the central pass ----------------------------------------------------
 
