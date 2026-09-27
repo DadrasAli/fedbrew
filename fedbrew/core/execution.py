@@ -1,19 +1,21 @@
 """The seam between what a round computes and how its clients are run.
 
 An algorithm -- a ServerStrategy and a ClientUpdate rule -- decides what the
-server and the clients compute. Two parts decide how a round gets it done,
+server and the clients compute. Three parts decide how a round gets it done,
 and each can be replaced on its own:
 
 - a ``ClientExecutor`` runs the round's sampled clients: it yields their
   ``FitResult``s, one per request, in request order, and reports each to a
   ``FitObserver``;
-- an ``Aggregator`` folds those results into the server's new state.
+- an ``Aggregator`` folds those results into the server's new state;
+- an ``Evaluator`` measures the new model on clients and on the central test
+  set.
 
-The references are ``SequentialExecutor`` (``fedbrew/core/loop.py``) and
-``StreamingAggregator`` below, and the loop runs and folds through nothing
-else. They are what every run used before the seam existed, call for call. A
-batched executor is held to them by tolerance and never replaces them as the
-reference.
+The references are ``SequentialExecutor`` and ``SequentialEvaluator``
+(``fedbrew/core/loop.py``) and ``StreamingAggregator`` below, and the loop
+runs, folds and measures through nothing else. They are what every run used
+before the seam existed, call for call. A batched executor is held to them by
+tolerance and never replaces them as the reference.
 """
 
 from __future__ import annotations
@@ -22,7 +24,8 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from typing import Any, Protocol
 
 from fedbrew.clients.base import ClientUpdate
-from fedbrew.core.protocol import FitRequest, FitResult, RoundInfo
+from fedbrew.core.protocol import ClientInfo, EvalResult, FitRequest, FitResult, RoundInfo
+from fedbrew.data.dataset import FederatedDataset
 from fedbrew.servers.base import ServerStrategy
 
 #: One client update for every client, or a mapping from client id to each
@@ -79,6 +82,28 @@ class Aggregator(Protocol):
             NonFiniteStateError: If the round's aggregate is not finite; the
                 server's state is left as it was.
         """
+
+
+class Evaluator(Protocol):
+    """How the aggregated model is measured."""
+
+    def evaluate_clients(
+        self,
+        clients: ClientPool,
+        round_id: int,
+        work: list[tuple[ClientInfo, list[str]]],
+        server_payload: Mapping[str, Any],
+        model_scope: str,
+        on_progress: ProgressCallback | None,
+    ) -> list[tuple[EvalResult, list[str]]]:
+        """Evaluate each client on its splits, in ``work``'s order."""
+
+    def evaluate_central(
+        self,
+        server: ServerStrategy,
+        dataset: FederatedDataset,
+    ) -> dict[str, float]:
+        """The ``central_test_*`` metrics of the server's model."""
 
 
 class StreamingAggregator:

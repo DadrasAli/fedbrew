@@ -43,7 +43,9 @@ from fedbrew.core.execution import (
     Aggregator,
     ClientExecutor,
     ClientPool,
+    Evaluator,
     FitObserver,
+    ProgressCallback,
     StreamingAggregator,
 )
 from fedbrew.core.protocol import (
@@ -167,6 +169,7 @@ def run_fl_loop(
     fit_schedule = parse_evaluation_schedule(evaluation.fit.every, "evaluation.fit")
     executor: ClientExecutor = SequentialExecutor()
     aggregator: Aggregator = StreamingAggregator()
+    evaluator: Evaluator = SequentialEvaluator()
 
     # Decided before anything is written: a resume that cannot be taken is
     # refused with the directory exactly as it was. POST-F25.
@@ -294,7 +297,7 @@ def run_fl_loop(
             selected_clients,
         )
         client_eval_started = time.perf_counter()
-        evaluated = _evaluate_models_on_clients(
+        evaluated = evaluator.evaluate_clients(
             client,
             round_id,
             [
@@ -328,7 +331,7 @@ def run_fl_loop(
                 )
         global_eval_started = time.perf_counter()
         if evaluates_round(central_schedule, round_id, global_rounds):
-            round_info.metrics.update(_evaluate_central_test_set(server, dataset))
+            round_info.metrics.update(evaluator.evaluate_central(server, dataset))
         global_eval_seconds = time.perf_counter() - global_eval_started
 
         num_examples = fit_totals.num_examples
@@ -940,6 +943,34 @@ def _round_evaluation_plan(
             splits_by_client.setdefault(client_info.client_id, []).append(split)
             infos_by_client[client_info.client_id] = client_info
     return splits_by_client, infos_by_client
+
+
+class SequentialEvaluator:
+    """The reference Evaluator: each due client evaluated alone, then the central pass.
+
+    Every run used this before the evaluator seam existed, and it stays the
+    default and the reference.
+    """
+
+    def evaluate_clients(
+        self,
+        clients: ClientPool,
+        round_id: int,
+        work: list[tuple[ClientInfo, list[str]]],
+        server_payload: Mapping[str, Any],
+        model_scope: str,
+        on_progress: ProgressCallback | None,
+    ) -> list[tuple[EvalResult, list[str]]]:
+        return _evaluate_models_on_clients(
+            clients, round_id, work, server_payload, model_scope, on_progress
+        )
+
+    def evaluate_central(
+        self,
+        server: ServerStrategy,
+        dataset: FederatedDataset,
+    ) -> dict[str, float]:
+        return _evaluate_central_test_set(server, dataset)
 
 
 def _evaluate_models_on_clients(
