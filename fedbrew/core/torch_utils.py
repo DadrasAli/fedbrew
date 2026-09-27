@@ -358,7 +358,7 @@ class WeightedStateAccumulator:
     Finiteness is checked once, on the averaged result (:meth:`result`), not on
     every client state as it arrives: ``isfinite(t).all()`` per client was 14%
     of an MNIST MLP round at 1000 clients, eight times the cost of the sum
-    itself (perf/report.txt). A NaN or an infinity in any client state reaches
+    itself (measured on 2026-09-26). A NaN or an infinity in any client state reaches
     the sum -- NaN and inf propagate, inf - inf is NaN, and a weight of 0 gives
     0 * inf = NaN -- so the check on the result misses nothing the per-client
     check caught. To still name the client and the tensor, each add records

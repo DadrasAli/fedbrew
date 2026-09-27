@@ -132,7 +132,7 @@ class LazyClientPool(Mapping[str, ClientUpdate]):
         Every client used to be evicted here after each evaluation and rebuilt
         for its next fit: the constructor, its setup and a load_state of its own
         snapshot, per client per round -- 20% of an MNIST MLP round at 1000
-        clients (perf/report.txt). A client whose shard is in the shard cache
+        clients (measured on 2026-09-26). A client whose shard is in the shard cache
         now stays built; it holds nothing the cache does not already hold, so
         memory stays under the cache's budget.
         """

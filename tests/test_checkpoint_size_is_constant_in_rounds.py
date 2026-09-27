@@ -4,7 +4,7 @@ Every server kept a list of each round's aggregated metrics and wrote the
 whole list into its save_state(), so latest.pt -- rewritten and fsynced every
 round under save_last -- carried the run's full metric history. One save
 cost about 1.6 + 0.0104 N ms at history length N, 106 ms and 1.6 MB at
-N = 10,000 (perf/report.txt). Nothing restored from the list ever read it:
+N = 10,000 (measured on 2026-09-26). Nothing restored from the list ever read it:
 the run's history is round_metrics.csv, which a resume already replays. The
 list is gone. What is pinned here:
 

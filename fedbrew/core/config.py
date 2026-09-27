@@ -185,7 +185,7 @@ class FitEvaluationConfig:
     After its local update every client evaluates the model it just trained on
     its own train split, which is where fit_loss and fit_accuracy come from.
     That pass is a forward over the whole split, per client per round: 18% of
-    an MNIST MLP round at 1000 clients (perf/report.txt). On the rounds this
+    an MNIST MLP round at 1000 clients (measured on 2026-09-26). On the rounds this
     schedule skips, the round carries no fit_ metrics, and nothing else
     changes: the client still counts the split's examples the pass would have
     counted, which is its aggregation weight, over the same loader.

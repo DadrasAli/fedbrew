@@ -4,7 +4,7 @@ The client splits and the central test set already had schedules
 (evaluation.<split>.every); the pass each training client makes over its own
 train split after its local update, which is where fit_loss and fit_accuracy
 come from, ran every round, and was 18% of an MNIST MLP round
-(perf/report.txt). evaluation.fit.every schedules it too. On a skipped round
+(measured on 2026-09-26). evaluation.fit.every schedules it too. On a skipped round
 the client still takes the example count the pass would have taken -- its
 aggregation weight -- by iterating the same loader and reading each batch's
 count off the batch (TaskAdapter.evaluation_total). What is pinned here, with

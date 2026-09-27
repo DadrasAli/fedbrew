@@ -2,7 +2,7 @@
 
 WeightedStateAccumulator checked every client state as it arrived,
 ``isfinite(t).all()`` per tensor: 14% of an MNIST MLP round at 1000 clients
-(perf/report.txt). It now checks the averaged result once, and names the
+(measured on 2026-09-26). It now checks the averaged result once, and names the
 offending client and tensor from the per-state minima and maxima it records.
 What is pinned here, through the real runner:
 

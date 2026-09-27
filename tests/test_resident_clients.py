@@ -2,7 +2,7 @@
 
 LazyClientPool released every client after its evaluation and rebuilt it for
 its next fit -- constructor, setup and a load_state of its own snapshot, per
-client per round, 20% of an MNIST MLP round at 1000 clients (perf/report.txt).
+client per round, 20% of an MNIST MLP round at 1000 clients (measured on 2026-09-26).
 A client now stays built while its shard is in the shard cache, and the
 cache's eviction releases it, so the cache's budget is still the bound on
 client data in memory. What is pinned here:

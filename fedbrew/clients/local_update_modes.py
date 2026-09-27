@@ -107,7 +107,7 @@ def reused_optimizer(
     """An optimizer over ``parameters``, built once per worker rather than once per client.
 
     Every local update used to construct its own torch.optim optimizer: 86 us
-    per client per round, 86 ms a round at 1000 clients (perf/report.txt).
+    per client per round, 86 ms a round at 1000 clients (measured on 2026-09-26).
     Each worker now keeps one per class and hands it out reset: bound to this
     update's parameters, with no state -- no momentum buffer or moment carried
     from any earlier client or round -- and so steps exactly as a new one

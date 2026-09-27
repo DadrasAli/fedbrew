@@ -2,7 +2,7 @@
 
 Every round wrote its CSV rows, run.json and latest.pt, each fsynced: about
 7 ms an fsync on /proj's NFS against 0.7 on /tmp, five a round
-(perf/report.txt). flush_every N writes them on rounds N, 2N, ... and the
+(measured on 2026-09-26). flush_every N writes them on rounds N, 2N, ... and the
 final one instead; between flushes the rows wait in memory and the numbered
 and best checkpoints wait staged. What is pinned here:
 

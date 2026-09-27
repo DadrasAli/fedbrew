@@ -1,7 +1,7 @@
 """Each worker builds its optimizer once and resets it for every local update.
 
 Every local update constructed its own torch.optim optimizer: 86 us per
-client per round (perf/report.txt). reused_optimizer keeps one per class per
+client per round (measured on 2026-09-26). reused_optimizer keeps one per class per
 worker, bound to each update's parameters with no state, and rebuilds it only
 when the hyperparameters change. What is pinned here:
 
