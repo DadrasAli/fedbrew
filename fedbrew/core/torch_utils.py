@@ -364,7 +364,7 @@ class StateStack:
     of (:class:`StackedRow`).
     """
 
-    __slots__ = ("tensors", "size", "foldable", "__weakref__")
+    __slots__ = ("tensors", "size", "foldable", "row_size", "__weakref__")
 
     def __init__(self, tensors: Mapping[str, Tensor]) -> None:
         self.tensors = dict(tensors)
@@ -375,6 +375,9 @@ class StateStack:
         #: Whether WeightedStateAccumulator may fold its rows together: it
         #: does so for floating tensors only, as its sum is only of those.
         self.foldable = all(tensor.is_floating_point() for tensor in self.tensors.values())
+        #: A row's (parameters, bytes), the same for every row; set by the
+        #: first reader (``TorchSGDClient._fit_result``).
+        self.row_size: tuple[int, int] | None = None
 
     def row(self, index: int) -> StackedRow:
         """One client's state: a dict of views into this stack."""
@@ -426,8 +429,10 @@ class WeightedStateAccumulator:
     executor yields -- are folded together: their weights are held until the
     stack's last row arrives (or a state from elsewhere, or :meth:`result`),
     and the stack is then reduced over its client dimension in one weighted
-    sum on its own device, with each row's minimum and maximum from one
-    reduction each over the same dimension. The mean, the check and the client it
+    sum on its own device. Its rows' minima and maxima are read only if that
+    sum is not finite, which it is not whenever a row is not; reading them for
+    every row, as each add does, was 45 ms of an MNIST MLP round at 1000
+    clients (measured on 2026-09-27). The mean, the check and the client it
     names are those of adding the rows one by one; the sum differs from that
     only in its order and rounding, and a single row is added exactly as a
     state is.
@@ -549,13 +554,22 @@ class WeightedStateAccumulator:
             self._fold_pending()
 
     def _fold_pending(self) -> None:
-        """Fold the held rows of one stack into the sums: one weighted reduction per tensor."""
+        """Fold the held rows of one stack into the sums: one weighted reduction per tensor.
+
+        Each row's extremes are read only when they can matter. A non-finite
+        element of any row reaches the stack's weighted sum -- NaN and inf
+        propagate, and a weight of 0 gives 0 * inf = NaN -- so while that sum
+        is finite in every tensor, every row is, and the entries stay empty;
+        when it is not, each row's minimum and maximum are read, as they are
+        for a state added alone, before the stack is let go.
+        """
 
         if self._pending is None:
             return
         stack, rows, weights, entries = self._pending
         self._pending = None
         every_row = rows == list(range(stack.size))
+        folded: dict[str, tuple[Tensor, Tensor]] = {}
         for key, tensor in stack.tensors.items():
             selected = (
                 tensor
@@ -563,22 +577,30 @@ class WeightedStateAccumulator:
                 else tensor.index_select(0, torch.tensor(rows, device=tensor.device))
             )
             flat = selected.reshape(len(rows), -1)
-            if flat.shape[1]:
-                # amin and amax, not aminmax: along this dimension aminmax was
-                # 137 ms on a 1000 x 50,176 stack against 20 ms for the two
-                # (measured 2026-09-27), and the values are the same.
-                lows, highs = flat.amin(dim=1), flat.amax(dim=1)
-                for entry, low, high in zip(entries, lows, highs, strict=True):
-                    entry[key] = (low, high)
             total = self._totals[key]
             if len(rows) == 1:
                 # One row is added as add() adds a state -- one fused
-                # multiply-add into the sum -- so a stack of one is folded
-                # bit for bit as the state alone would be.
-                total.add_(selected[0].detach().cpu(), alpha=weights[0])
+                # multiply-add into the sum, its extremes read -- so a stack of
+                # one is folded bit for bit as the state alone would be.
+                row = selected[0].detach().cpu()
+                entries[0][key] = _extremes(row)
+                total.add_(row, alpha=weights[0])
                 continue
             scale = torch.tensor(weights, dtype=total.dtype, device=tensor.device)
-            total.add_((scale @ flat.to(total.dtype)).reshape(total.shape).cpu())
+            folded[key] = (scale @ flat.to(total.dtype), flat)
+        if not folded:
+            return
+        finite = torch.stack([torch.isfinite(part).all() for part, _ in folded.values()])
+        if not bool(finite.all()):
+            for key, (_, flat) in folded.items():
+                if flat.shape[1]:
+                    lows = flat.amin(dim=1).cpu().unbind()
+                    highs = flat.amax(dim=1).cpu().unbind()
+                    for entry, low, high in zip(entries, lows, highs, strict=True):
+                        entry[key] = (low, high)
+        for key, (part, _) in folded.items():
+            total = self._totals[key]
+            total.add_(part.reshape(total.shape).cpu())
 
     def result(self) -> StateDict:
         """Return the weighted mean and reset the accumulator."""

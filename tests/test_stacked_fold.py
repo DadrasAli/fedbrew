@@ -120,6 +120,19 @@ class TheRefusalsAreTheRowsRefusalsTest(unittest.TestCase):
         self.assertIn("client_2", folded_message)
         self.assertIn("'bias'", folded_message)
 
+    def test_a_non_finite_row_of_weight_zero_is_named(self) -> None:
+        """Its extremes are read only when the stack's sum is not finite; 0 * inf is NaN."""
+
+        stack = _stack(5)
+        stack.tensors["weight"][3, 1, 2] = float("-inf")
+        weights = [1.0, 2.0, 1.0, 0.0, 1.0]
+        rows = [(stack.row(i), weights[i], f"client_{i}") for i in range(5)]
+        plain = [(_plain(state), w, s) for state, w, s in rows]
+        folded_message = self._refusal(rows)
+        self.assertEqual(folded_message, self._refusal(plain))
+        self.assertIn("client_3", folded_message)
+        self.assertIn("'weight'", folded_message)
+
     def test_finite_rows_whose_mean_overflows_are_refused(self) -> None:
         stack = StateStack({"w": torch.full((2, 3), 3.0e38, dtype=torch.float32)})
         message = self._refusal([(stack.row(0), 1.0, "a"), (stack.row(1), 1.0, "b")])

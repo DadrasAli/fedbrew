@@ -311,7 +311,14 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
         if num_examples < 0:
             raise ValueError("task federated aggregation weight must be non-negative")
         model_state_scope = str(model_state_metadata["model_state_scope"])
-        communicated_parameters, communicated_bytes = model_state_size(model_state)
+        stack = getattr(model_state, "stack", None)
+        if stack is None:
+            communicated_parameters, communicated_bytes = model_state_size(model_state)
+        else:
+            # Every row of a stack has the same size, so it is measured once.
+            if stack.row_size is None:
+                stack.row_size = model_state_size(model_state)
+            communicated_parameters, communicated_bytes = stack.row_size
         active_target_tokens = sum(float(output.get("total", 0.0)) for output in training_outputs)
         metrics.update(
             {
@@ -542,10 +549,16 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
         self,
         request: EvalRequest,
         plan: ClientEvalPlan,
-        outputs: list[list[dict[str, float]] | None],
+        outputs: list[Any],
         model_state_metadata: dict[str, Any],
     ) -> EvalResult:
-        """The EvalResult ``evaluate`` returns, from this client's share of the batched pass."""
+        """The EvalResult ``evaluate`` returns, from this client's share of the batched pass.
+
+        ``outputs`` has, per requested split, its eval-step outputs, or
+        ``compute_metrics`` of them and their example count as the task
+        folded them for a whole chunk (``stacked_metrics``), or None for a
+        split the client does not have.
+        """
 
         if plan.refusal is not None:
             raise plan.refusal
@@ -557,9 +570,17 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
                 num_examples_by_split[split] = 0
                 continue
             assert split_outputs is not None
-            split_metrics, num_examples = self._evaluation_metrics(
-                split_outputs, split_data, metrics=requested_metrics
-            )
+            if isinstance(split_outputs, tuple):
+                # compute_metrics of the split's outputs, and their examples,
+                # folded by the task for the whole chunk (stacked_metrics).
+                computed, num_examples = split_outputs
+                split_metrics = filter_metrics(
+                    computed, self.metrics if requested_metrics is None else requested_metrics
+                )
+            else:
+                split_metrics, num_examples = self._evaluation_metrics(
+                    split_outputs, split_data, metrics=requested_metrics
+                )
             self._record_split(
                 metrics, num_examples_by_split, split, split, split_metrics, num_examples
             )
@@ -595,6 +616,12 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
     ) -> tuple[dict[str, float], int]:
         """``_post_fit_evaluation``'s result, from the executor's pass over the same batches."""
 
+        if plan.evaluate and fit.eval_metrics is not None:
+            computed, num_examples = fit.eval_metrics
+            computed = {f"fit_{name}": value for name, value in computed.items()}
+            return filter_metrics(
+                computed, self.metrics if metrics is None else metrics
+            ), num_examples
         if plan.evaluate:
             assert fit.eval_outputs is not None
             return self._evaluation_metrics(

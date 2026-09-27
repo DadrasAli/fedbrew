@@ -436,6 +436,20 @@ and `tests/test_batched_evaluator.py` adds splits of different lengths, a
 shuffled evaluation loader, a client without a `val` or a `test` split, and
 the central pass's kept model and shard.
 
+**Records.** Per client, what reaches the host is floats: every bucket's
+training and post-fit outputs, widened to float64 on the device, cross to the
+host in one copy per chunk (`host_floats`), and every evaluation round's in
+one copy. Where the task folds eval-step outputs into its metrics for a whole
+stack at once (`stacked_metrics`, which the classification task implements),
+each client's post-fit and evaluation metrics are computed on the device, and
+what is copied is one dict of numbers per client and split rather than one
+per batch; `tests/test_batched_executor.py` holds it to `compute_metrics`
+split by split. A stack's rows are checked against the server's state once
+per aggregation rather than once per row, a row's communicated size is
+measured once per stack, and a client kept built checks its cached shard's
+tensors for in-place edits by their counters alone
+(`CachedPayload.check`), as it does on every access.
+
 **What it keeps.** The no-training-batches refusal comes before any client
 runs, in the rule's own words; the non-finite refusal names the client and
 tensor the sequential run names; permuting the sampled clients permutes the

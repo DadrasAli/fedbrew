@@ -41,8 +41,10 @@ from fedbrew.core.batched_executor import (
     _placed,
     _Rows,
     _Steps,
+    folded_part,
+    host_floats,
     measure_splits,
-    per_split_floats,
+    unfolded,
 )
 from fedbrew.core.execution import ClientPool, ProgressCallback
 from fedbrew.core.protocol import ClientInfo, EvalRequest, EvalResult
@@ -153,43 +155,12 @@ class BatchedEvaluator:
             member.batched_evaluation_plan(request)
             for member, request in zip(members, requests, strict=True)
         ]
-        # Each requested split is one entry: (client position, split position).
-        segments: dict[str, list[tuple[int, int]]] = {}
-        for index, plan in enumerate(plans):
-            for position, data in enumerate(plan.data):
-                if data is not None:
-                    segments.setdefault(plan.splits[position], []).append((index, position))
-
-        measured: list[list[list[dict[str, float]] | None]] = [
-            [None] * len(plan.data) for plan in plans
-        ]
+        planned, keep = self._plan(task, plans, requests[0].round_id)
         kept_rows = self._rows
         self._rows = {}
-        planned = []
-        cost = 0
-        for entries in segments.values():
-            declared = [plans[index].orders[position] for index, position in entries]
-            orders = round_orders(
-                declared,
-                loader_seeds(
-                    declared,
-                    [(plans[index].client_id, plans[index].seed) for index, _ in entries],
-                    requests[0].round_id,
-                    "eval",
-                ),
-                [LocalLoop(epochs=1)] * len(entries),
-                lambda slot, entries=entries: [
-                    [batch] for batch in _replayed(plans, entries[slot])
-                ],
-            )
-            split_chunks, split_cost = self._chunks(task, plans, entries)
-            planned.append((entries, orders, split_chunks))
-            cost += split_cost
-        # Kept between rounds only while the whole evaluation fits one
-        # chunk's budget, so what is held is what one chunk holds anyway.
-        keep = cost <= self.chunk_bytes
         executor_rows = getattr(self._executor, "_rows", None) or {}
         dtype = next(iter(params.values())).dtype
+        done: list[tuple[list[tuple[int, int]], Any, bool]] = []
         for entries, orders, split_chunks in planned:
             slot_of = {entry: slot for slot, entry in enumerate(entries)}
             step_counts = orders.steps.tolist()
@@ -205,11 +176,51 @@ class BatchedEvaluator:
                 counts = [step_counts[slot] for slot in slots]
                 steps = _Steps(rows, orders, slots, dtype)
                 outputs = measure_splits(task, template, buffers, params, None, steps, counts)
-                for (index, position), values in zip(
-                    chunk, per_split_floats(outputs, counts), strict=True
-                ):
-                    measured[index][position] = values
+                done.append((chunk, *folded_part(task, outputs, counts)))
+        # Every chunk's outputs cross to the host together, once for the round.
+        measured: list[list[Any]] = [[None] * len(plan.data) for plan in plans]
+        floats = host_floats([part for _, part, _ in done])
+        for (chunk, _, folded), values in zip(done, floats, strict=True):
+            for (index, position), split_values in zip(chunk, values, strict=True):
+                measured[index][position] = unfolded(split_values, folded)
         return list(zip(plans, measured, strict=True)), metadata
+
+    def _plan(
+        self, task: Any, plans: list[Any], round_id: int
+    ) -> tuple[list[tuple[list[tuple[int, int]], Any, list[list[tuple[int, int]]]]], bool]:
+        """Per split name: its entries, their orders planned together, and its chunks.
+
+        An entry is (client position, split position). Also whether the
+        whole evaluation fits one chunk's budget, which is when its rows are
+        kept for the next evaluation round.
+        """
+
+        segments: dict[str, list[tuple[int, int]]] = {}
+        for index, plan in enumerate(plans):
+            for position, data in enumerate(plan.data):
+                if data is not None:
+                    segments.setdefault(plan.splits[position], []).append((index, position))
+        planned = []
+        cost = 0
+        for entries in segments.values():
+            declared = [plans[index].orders[position] for index, position in entries]
+            orders = round_orders(
+                declared,
+                loader_seeds(
+                    declared,
+                    [(plans[index].client_id, plans[index].seed) for index, _ in entries],
+                    round_id,
+                    "eval",
+                ),
+                [LocalLoop(epochs=1)] * len(entries),
+                lambda slot, entries=entries: [
+                    [batch] for batch in _replayed(plans, entries[slot])
+                ],
+            )
+            split_chunks, split_cost = self._chunks(task, plans, entries)
+            planned.append((entries, orders, split_chunks))
+            cost += split_cost
+        return planned, cost <= self.chunk_bytes
 
     def _chunks(
         self, task: Any, plans: list[Any], entries: list[tuple[int, int]]

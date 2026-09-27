@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 
@@ -31,13 +31,17 @@ class CachedPayload:
     what the cache made possible.
     """
 
-    __slots__ = ("payload", "_versions")
+    __slots__ = ("payload", "_versions", "_tensors")
 
     def __init__(self, payload: dict[str, Any]) -> None:
         """Take ownership of a decoded payload and record its tensor versions."""
 
         self.payload = payload
         self._versions = _tensor_versions(payload)
+        # The tensors themselves, beside their recorded versions, so a check
+        # reads each one's counter without walking the payload again; the
+        # payload is ours, so its structure does not change under us.
+        self._tensors = _tensors(payload)
 
     def serve(self, label: str) -> dict[str, Any]:
         """Return a private view of the payload, refusing an edited one.
@@ -53,7 +57,7 @@ class CachedPayload:
         self.check(label)
         return _copy_containers(self.payload)
 
-    def check(self, label: str) -> None:
+    def check(self, label: str | Callable[[], str]) -> None:
         """Refuse a payload a tensor of which was edited in place since it was cached.
 
         What :meth:`serve` does before serving, on its own: a client kept built
@@ -61,10 +65,23 @@ class CachedPayload:
         here each time it is used instead, so an edit is refused as many rounds
         later as it was when the client was rebuilt and re-served every round.
 
+        Args:
+            label: What is checked, for the error message, or a function
+                returning it, called only when there is an error to report.
+
         Raises:
             RuntimeError: A tensor was edited in place since it was cached.
         """
 
+        # The counters alone first: this runs for every client every round
+        # (LazyClientPool), and only a changed one needs the label or a walk.
+        if all(
+            tensor._version == before
+            for tensor, (_, before) in zip(self._tensors, self._versions, strict=True)
+        ):
+            return
+        if callable(label):
+            label = label()
         # strict=True: nothing outside this object holds the cached structure,
         # so a differing length would mean the payload itself was restructured.
         current = _tensor_versions(self.payload)
@@ -103,6 +120,22 @@ def _tensor_versions(payload: Mapping[str, Any]) -> tuple[tuple[str, int], ...]:
     recorded: list[tuple[str, int]] = []
     _collect_versions(payload, "", recorded)
     return tuple(recorded)
+
+
+def _tensors(payload: Mapping[str, Any]) -> tuple[Any, ...]:
+    """The objects ``_tensor_versions`` reads a counter off, in its order."""
+
+    found: list[Any] = []
+
+    def collect(values: Mapping[str, Any]) -> None:
+        for value in values.values():
+            if isinstance(value, Mapping):
+                collect(value)
+            elif isinstance(getattr(value, "_version", None), int):
+                found.append(value)
+
+    collect(payload)
+    return tuple(found)
 
 
 def _collect_versions(

@@ -155,6 +155,10 @@ class ClientBatchFit:
     trainable_parameters: int
     #: The start state, for a rule whose result is measured against it.
     start: Mapping[str, Tensor] = field(default_factory=dict)
+    #: ``task.compute_metrics`` of the post-fit outputs and their example
+    #: count, when the task computed them for the whole stack at once
+    #: (``stacked_metrics``); ``eval_outputs`` is then None.
+    eval_metrics: tuple[dict[str, float], int] | None = None
 
 
 @dataclass(slots=True)

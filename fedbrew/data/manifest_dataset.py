@@ -104,7 +104,7 @@ class ManifestFederatedDataset(FederatedDataset):
         if cached is None:
             return False
         self._shard_cache.move_to_end(client_id)
-        cached.check(self._shard_label(client_id))
+        cached.check(lambda: self._shard_label(client_id))
         return True
 
     def _load_shard_cached(self, client_id: str, shard_path: Path) -> dict[str, Any]:

@@ -273,9 +273,13 @@ they were. `tests/test_finiteness_is_checked_on_the_aggregate.py` pins it.
 `StateStack` -- what an executor that trains clients together yields,
 `StackedRow` (`fedbrew/core/torch_utils.py`) -- is held until the stack's
 last row arrives, or a state from elsewhere, or `result`. The stack is then
-folded in one weighted reduction per tensor, on its own device, and every
-row's minimum and maximum come from one reduction each over the client dimension,
-so the refusal and the client it names are the ones above. The sum differs
+folded in one weighted reduction per tensor, on its own device. Its rows'
+minima and maxima are read only if that weighted sum is not finite in some
+tensor, which it is not whenever a row is not (the same propagation as above),
+so the refusal and the client it names are the ones above; a finite stack
+costs one finiteness check rather than two reductions and a Python pass over
+its rows per tensor, which was 45 ms of an MNIST MLP round at 1000 clients
+(measured on 2026-09-27). The sum differs
 from adding the rows one by one only in summation order, and a stack of one
 row is added exactly as a plain state is. `tests/test_stacked_fold.py` pins
 both.

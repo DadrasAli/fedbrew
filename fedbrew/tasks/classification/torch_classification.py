@@ -374,6 +374,47 @@ class TorchClassificationTask(TaskAdapter):
         features, targets = batch
         return self._measured(self._logits(model, params, buffers, features), targets, mask)
 
+    def stacked_metrics(
+        self, outputs: Sequence[Mapping[str, Tensor]], counts: Sequence[int]
+    ) -> tuple[dict[str, Tensor], Tensor]:
+        """``compute_metrics`` of many splits' eval outputs at once, and their example counts.
+
+        ``outputs[p][key]`` holds position ``p``'s value for every split, and
+        split ``k`` has ``counts[k]`` positions: what it returns, per split, is
+        ``compute_metrics`` of that split's own outputs -- the same sums, in
+        float64, over the same batches -- and the sum of their ``total``.
+        """
+
+        device = outputs[0]["loss"].device
+        values = {
+            key: torch.stack([output[key] for output in outputs]).to(torch.float64)
+            for key in ("loss", "correct", "total")
+        }
+        positions = torch.arange(len(outputs), device=device).unsqueeze(1)
+        counts_tensor = torch.tensor(list(counts), device=device)
+        # Selected, not multiplied: a split's padding positions are empty
+        # batches whose mean loss is NaN, and NaN * 0 is NaN.
+        real = positions < counts_tensor.unsqueeze(0)
+        loss, correct, total = (
+            torch.where(real, values[key], 0.0) for key in ("loss", "correct", "total")
+        )
+        examples = total.sum(dim=0)
+        batches = counts_tensor.to(torch.float64)
+        counted = examples != 0.0
+        safe = torch.where(counted, examples, 1.0)
+        weighted = torch.where(
+            counted, (loss * total).sum(dim=0) / safe, loss.sum(dim=0) / batches.clamp(min=1.0)
+        )
+        accuracy = torch.where(counted, correct.sum(dim=0) / safe, 0.0)
+        empty = counts_tensor == 0
+        return (
+            {
+                "loss": torch.where(empty, 0.0, weighted),
+                "accuracy": torch.where(empty, 0.0, accuracy),
+            },
+            examples,
+        )
+
     def _logits(
         self,
         model: nn.Module,

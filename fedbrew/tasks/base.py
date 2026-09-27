@@ -85,6 +85,15 @@ class BatchableTask(Protocol):
     ``mask`` is None for a batch whose rows are all real. For a batch padded to
     a longer one it holds 1.0 for each real row and 0.0 for each padded row,
     and the result is the unpadded batch's, up to summation order.
+
+    Two more are optional. ``loader_order(data, config)`` declares what the
+    loader yields (:class:`LoaderOrder`), so a round's orders are planned
+    together rather than replayed per client. ``stacked_metrics(outputs,
+    counts)`` folds many splits' ``functional_eval`` outputs -- per position,
+    a tensor per key over the splits, of which split ``k`` has ``counts[k]``
+    -- into each split's ``compute_metrics`` and example count, as tensors,
+    so a stack's metrics are computed on its device; its padding positions
+    hold empty batches' outputs and must be ignored.
     """
 
     def split_rows(self, data: Any) -> tuple[Tensor, ...]:

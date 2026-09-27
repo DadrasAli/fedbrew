@@ -294,3 +294,49 @@ def _client_cost(components: Any, template: Any, plan: Any, train: Any) -> int:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StackedMetricsTest(unittest.TestCase):
+    """The classification task's stacked post-fit metrics are compute_metrics, split by split."""
+
+    def test_each_split_gets_its_own_compute_metrics(self) -> None:
+        from fedbrew.tasks.classification.torch_classification import TorchClassificationTask
+
+        task = TorchClassificationTask({"name": "mlp"})
+        generator = torch.Generator().manual_seed(3)
+        counts = [4, 1, 3, 0, 4, 2]
+        positions = max(counts)
+        outputs = []
+        for position in range(positions):
+            total = torch.randint(0, 5, (len(counts),), generator=generator).to(torch.float64)
+            past = torch.tensor([position >= count for count in counts])
+            if position == 0:
+                total[1] = 0.0  # a split whose only batch holds no example
+            outputs.append(
+                {
+                    # A split's positions past its count are padding: an
+                    # empty batch's mean loss, NaN.
+                    "loss": torch.where(
+                        past,
+                        float("nan"),
+                        torch.rand(len(counts), generator=generator, dtype=torch.float32),
+                    ),
+                    "correct": torch.minimum(
+                        torch.randint(0, 5, (len(counts),), generator=generator),
+                        total.long(),
+                    ),
+                    "total": total,
+                }
+            )
+        folded, examples = task.stacked_metrics(outputs, counts)
+        for split, count in enumerate(counts):
+            records = [
+                {key: float(outputs[p][key][split]) for key in ("loss", "correct", "total")}
+                for p in range(count)
+            ]
+            expected = task.compute_metrics(records)
+            for name, value in expected.items():
+                self.assertAlmostEqual(
+                    float(folded[name][split]), value, places=12, msg=(split, name)
+                )
+            self.assertEqual(int(examples[split]), int(sum(r["total"] for r in records)))

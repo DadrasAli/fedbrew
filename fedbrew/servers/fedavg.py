@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import math
 import random
+import weakref
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
@@ -19,6 +20,7 @@ from fedbrew.core.protocol import ClientInfo, EvalResult, FitRequest, FitResult,
 from fedbrew.core.refusal import RunRefused
 from fedbrew.core.seeding import derive_seed
 from fedbrew.core.torch_utils import (
+    StackedRow,
     WeightedStateAccumulator,
     clone_model_state,
     copy_state_into,
@@ -150,6 +152,9 @@ class FedAvgServer(ServerStrategy):
         self._model_state_scope: str | None = None
         self._model_state_metadata: dict[str, Any] | None = None
         self._state_validated = False
+        #: The stack whose rows this aggregation has checked against the
+        #: state (_compatible_model_state).
+        self._matched: weakref.ref[Any] | None = None
 
     def initialize(self) -> dict[str, Any]:
         """Initialize a global model state from the configured task."""
@@ -300,6 +305,7 @@ class FedAvgServer(ServerStrategy):
         accumulator = WeightedStateAccumulator()
         metric_accumulator = WeightedMetricAccumulator()
         num_results = 0
+        self._matched = None
         for result in results:
             model_state = self._compatible_model_state(result)
             accumulator.add(model_state, self._result_weight(result), source=result.client_id)
@@ -340,7 +346,13 @@ class FedAvgServer(ServerStrategy):
             received_scope=payload_model_state_scope(result.payload, context=context),
             context=context,
         )
-        validate_state_matches(self._model_state, model_state, context=context)
+        # Rows of one stack share their keys and shapes, so within one
+        # aggregation the first row checked is every row's check.
+        stack = model_state.stack if isinstance(model_state, StackedRow) else None
+        if stack is None or self._matched is None or self._matched() is not stack:
+            validate_state_matches(self._model_state, model_state, context=context)
+            if stack is not None:
+                self._matched = weakref.ref(stack)
         return model_state
 
     def _result_weight(self, result: FitResult) -> float:

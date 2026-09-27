@@ -238,29 +238,69 @@ def _train_chunk(
     for index, plan in enumerate(plans):
         buckets.setdefault(plan.bucket, []).append(index)
 
+    trained = [
+        (
+            members,
+            *_run_bucket(task, template, buffers, [plans[i] for i in members], orders, kept, keep),
+        )
+        for members in buckets.values()
+    ]
+    # Every bucket's outputs cross to the host together, once for the chunk,
+    # a stacked bucket's post-fit outputs folded into metrics first.
+    parts: list[Any] = []
+    kinds: list[bool | None] = []
+    for _, _, training, evaluated in trained:
+        parts.append(training)
+        if evaluated is None:
+            kinds.append(None)
+            continue
+        part, folded = folded_part(task, *evaluated)
+        parts.append(part)
+        kinds.append(folded)
+    floats = iter(host_floats(parts))
     fits: list[ClientBatchFit | None] = [None] * len(plans)
-    for members in buckets.values():
-        sources = [plans[i].train_data for i in members]
-        key = tuple(id(source) for source in sources)
-        rows = (kept or {}).get(key)
-        if rows is None or not rows.holds(sources):
-            rows = _Rows(task, sources)
-        if keep is not None:
-            keep[key] = rows
-        bucket = _Bucket(task, template, buffers, [plans[i] for i in members], rows, orders)
-        stack, training_outputs, eval_outputs = bucket.run()
+    for (members, stack, _, _), folded in zip(trained, kinds, strict=True):
+        training_outputs = next(floats)
+        evaluated_values = next(floats) if folded is not None else None
         states = StateStack({key: stack[key] for key in state_keys})
         for position, index in enumerate(members):
+            evaluation = (
+                None
+                if evaluated_values is None
+                else unfolded(evaluated_values[position], bool(folded))
+            )
             fits[index] = ClientBatchFit(
                 model_state=states.row(position),
                 training_outputs=training_outputs[position],
-                eval_outputs=None if eval_outputs is None else eval_outputs[position],
+                eval_outputs=evaluation if isinstance(evaluation, list) else None,
                 optimizer_steps=len(plans[index].structure),
                 model_state_metadata=dict(metadata),
                 trainable_parameters=trainable,
                 start=plans[index].start,
+                eval_metrics=evaluation if isinstance(evaluation, tuple) else None,
             )
     return [fit for fit in fits if fit is not None]
+
+
+def _run_bucket(
+    task: Any,
+    template: nn.Module,
+    buffers: Mapping[str, Tensor],
+    plans: list[ClientBatchPlan],
+    orders: tuple[RoundOrders, RoundOrders],
+    kept: Mapping[tuple[int, ...], _Rows] | None,
+    keep: dict[tuple[int, ...], _Rows] | None,
+) -> tuple[dict[str, Tensor], Any, Any]:
+    """One bucket's clients trained on their stacked rows, kept rows reused."""
+
+    sources = [plan.train_data for plan in plans]
+    key = tuple(id(source) for source in sources)
+    rows = (kept or {}).get(key)
+    if rows is None or not rows.holds(sources):
+        rows = _Rows(task, sources)
+    if keep is not None:
+        keep[key] = rows
+    return _Bucket(task, template, buffers, plans, rows, orders).run()
 
 
 class _Rows:
@@ -421,20 +461,75 @@ def measure_splits(
 def per_split_floats(
     outputs: list[dict[str, Tensor]], counts: Sequence[int]
 ) -> list[list[dict[str, float]]]:
-    """Per-position outputs as each split's list of float dicts, one host copy per key."""
+    """Per-position outputs as each split's list of float dicts, in one host copy."""
 
-    if not outputs:
-        return [[] for _ in counts]
-    keys = list(outputs[0])
-    size = len(counts)
-    values = {
-        key: torch.stack([output[key] for output in outputs]).reshape(len(outputs), size).tolist()
-        for key in keys
-    }
-    return [
-        [{key: float(values[key][step][position]) for key in keys} for step in range(count)]
-        for position, count in enumerate(counts)
-    ]
+    return host_floats([(outputs, counts)])[0]
+
+
+def folded_part(
+    task: Any, outputs: list[dict[str, Tensor]], counts: Sequence[int]
+) -> tuple[tuple[list[dict[str, Tensor]], Sequence[int]], bool]:
+    """A stack's eval outputs, ready for the host copy: folded by the task where it can.
+
+    With ``stacked_metrics`` and more than one split, each split's
+    ``compute_metrics`` and example count are computed on the device and the
+    part is one dict per split; otherwise it is the outputs themselves.
+    Returns the part and whether it was folded (``unfolded`` reads it back).
+    """
+
+    stacked_metrics = getattr(task, "stacked_metrics", None)
+    if callable(stacked_metrics) and len(counts) > 1 and outputs:
+        metrics, examples = stacked_metrics(outputs, counts)
+        return ([{**metrics, "examples": examples}], [1] * len(counts)), True
+    return (outputs, counts), False
+
+
+def unfolded(values: list[dict[str, float]], folded: bool) -> Any:
+    """One split's share of a host copy: its outputs, or its (metrics, examples)."""
+
+    if not folded:
+        return values
+    metrics = dict(values[0])
+    return metrics, int(metrics.pop("examples"))
+
+
+def host_floats(
+    parts: Sequence[tuple[list[dict[str, Tensor]], Sequence[int]]],
+) -> list[list[list[dict[str, float]]]]:
+    """Several groups' per-position outputs as float dicts, in one host copy for all.
+
+    ``parts[g]`` is a group's outputs -- per position, a tensor per key over
+    its splits -- and each split's count of positions; each group becomes, per
+    split, its list of float dicts. Every value is widened to float64 on its
+    device and all of them cross to the host together: a float32 value and a
+    count below 2**53 are exact in float64, so each float is the one its own
+    ``float()`` would give.
+    """
+
+    pieces: list[Tensor] = []
+    layout: list[tuple[list[str], int, int]] = []
+    for outputs, counts in parts:
+        keys = list(outputs[0]) if outputs else []
+        for key in keys:
+            pieces.append(
+                torch.stack([output[key] for output in outputs]).reshape(-1).to(torch.float64)
+            )
+        layout.append((keys, len(outputs), len(counts)))
+    values = torch.cat([piece.to("cpu") for piece in pieces]).tolist() if pieces else []
+    groups: list[list[list[dict[str, float]]]] = []
+    offset = 0
+    for (keys, positions, size), (_, counts) in zip(layout, parts, strict=True):
+        columns = {}
+        for key in keys:
+            columns[key] = values[offset : offset + positions * size]
+            offset += positions * size
+        groups.append(
+            [
+                [{key: columns[key][step * size + split] for key in keys} for step in range(count)]
+                for split, count in enumerate(counts)
+            ]
+        )
+    return groups
 
 
 class _Bucket:
@@ -549,7 +644,13 @@ class _Bucket:
 
     # -- the round ------------------------------------------------------------
 
-    def run(self) -> tuple[dict[str, Tensor], list[list[dict[str, float]]], Any]:
+    def run(self) -> tuple[dict[str, Tensor], Any, Any]:
+        """Every step, then the post-fit pass: the trained stack, and both passes' outputs.
+
+        The outputs stay on the device, per position a tensor per key over
+        the clients, with each client's count, for the chunk's one host copy.
+        """
+
         program = self.program
         task, model, buffers = self.task, self.model, self.buffers
 
@@ -638,13 +739,13 @@ class _Bucket:
                 ],
             )
 
-        training_outputs = self._per_client(outputs, [step] * self.size)
-        eval_outputs = self._evaluate(params) if self.plans[0].evaluate else None
+        training = (outputs, [step] * self.size)
+        evaluated = self._evaluate(params) if self.plans[0].evaluate else None
         if not self.stacked:
             params = {name: value.unsqueeze(0) for name, value in params.items()}
-        return params, training_outputs, eval_outputs
+        return params, training, evaluated
 
-    def _evaluate(self, params: dict[str, Tensor]) -> list[list[dict[str, float]]]:
+    def _evaluate(self, params: dict[str, Tensor]) -> tuple[list[dict[str, Tensor]], list[int]]:
         """The post-fit pass: ``functional_eval`` over each client's eval batches."""
 
         outputs = measure_splits(
@@ -656,16 +757,7 @@ class _Bucket:
             self.eval_steps,
             self.eval_counts,
         )
-        return per_split_floats(outputs, self.eval_counts)
-
-    def _per_client(
-        self, outputs: list[dict[str, Tensor]], counts: Sequence[int]
-    ) -> list[list[dict[str, float]]]:
-        """Step outputs as each client's list of float dicts, one host copy per key."""
-
-        if not outputs:
-            return [[] for _ in self.plans]
-        return per_split_floats(outputs, counts)
+        return outputs, self.eval_counts
 
 
 def _placed(value: Tensor, like: Tensor) -> Tensor:
