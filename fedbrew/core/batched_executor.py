@@ -338,6 +338,11 @@ class _Rows:
         )
 
 
+#: At most this many elements of a stack's rows are gathered for every step
+#: at once (``_Steps._gathered``); more are gathered a step at a time.
+_GATHER_AT_ONCE = 1 << 22
+
+
 class _Steps:
     """A group's batches, one step at a time, gathered from its rows.
 
@@ -371,6 +376,34 @@ class _Steps:
         self.first_lengths = lengths[0].tolist() if len(lengths) else []
         self.sliced = bool(orders.contiguous[where].all())
         self._on_device: tuple[Tensor, Tensor] | None = None
+        self._every: tuple[Tensor, ...] | None = None
+
+    def _small(self) -> bool:
+        """Whether every step's batches together are few enough elements to gather at once."""
+
+        steps, widest = self._indices.shape[1], self._indices.shape[2]
+        per_row = sum(tensor[0, :1].numel() for tensor in self.rows.tensors)
+        return self.size * steps * widest * per_row <= _GATHER_AT_ONCE
+
+    def _gathered(self) -> tuple[Tensor, ...]:
+        """Every step's batches of every split, gathered in one index_select per tensor.
+
+        What a step reads is then a view: for a small stack stepped many
+        times -- fed-lasso's eight clients over twelve steps -- one gather a
+        round rather than one a step.
+        """
+
+        if self._every is None:
+            indices, _ = self._device()
+            flat = indices.reshape(-1)
+            shape = indices.shape
+            self._every = tuple(
+                tensor.reshape(-1, *tensor.shape[2:])
+                .index_select(0, flat)
+                .reshape(*shape, *tensor.shape[2:])
+                for tensor in self.rows.tensors
+            )
+        return self._every
 
     def _device(self) -> tuple[Tensor, Tensor]:
         """The indices, as rows of the flattened stack, and the lengths, on the rows' device."""
@@ -400,6 +433,8 @@ class _Steps:
         if self.sliced and self.aligned[step]:
             first = self.first_starts[step]
             batch = tuple(tensor[:, first : first + width] for tensor in rows.tensors)
+        elif self._every is not None or self._small():
+            batch = tuple(gathered[:, step, :width] for gathered in self._gathered())
         else:
             indices, _ = self._device()
             index = indices[:, step, :width].reshape(-1)
@@ -515,7 +550,11 @@ def host_floats(
                 torch.stack([output[key] for output in outputs]).reshape(-1).to(torch.float64)
             )
         layout.append((keys, len(outputs), len(counts)))
-    values = torch.cat([piece.to("cpu") for piece in pieces]).tolist() if pieces else []
+    values: list[float] = []
+    if pieces:
+        # Joined where they are, so a GPU round is one device-to-host copy.
+        device = pieces[0].device
+        values = torch.cat([piece.to(device) for piece in pieces]).cpu().tolist()
     groups: list[list[list[dict[str, float]]]] = []
     offset = 0
     for (keys, positions, size), (_, counts) in zip(layout, parts, strict=True):
