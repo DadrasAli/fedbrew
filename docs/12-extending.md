@@ -542,7 +542,11 @@ epoch or one permutation when it is built -- and then every client's batches
 for a round are computed together instead of each loader being replayed
 through `row_batches`. `listed_loader_order` is the linear examples'
 declaration; add your task to `tests/test_batch_orders.py`, which iterates
-your loader and compares.
+your loader and compares. Two more are optional: `stacked_metrics`, your
+`compute_metrics` for many splits' eval outputs at once, on the device; and
+the class attribute `batched_gradient`, `"vmap_grad"` by default or
+`"summed"`, the form of a stacked step's gradient -- time both on your model
+(chapter 11 §9 has the shipped tasks' numbers) and declare the faster.
 
 Override `train_loss_denominator(batch, output)` if your training loss is not
 a mean over the batch's examples. It returns the count `train_step`'s loss

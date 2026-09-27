@@ -639,6 +639,13 @@ class SimplexLSQTask(TaskAdapter):
     manifest's ``reference``, written by the generator.
     """
 
+    #: The batched executor's form of a stacked step's gradients: one backward
+    #: through the per-client losses' sum, which is faster for this problem's
+    #: few, tiny parameters than vmap(grad) -- 5.21 against 6.81 ms a round
+    #: (the shipped FedAvg arm evaluating only the central pass, 150 rounds,
+    #: one CPU thread, measured on 2026-09-27).
+    batched_gradient = "summed"
+
     def __init__(
         self,
         model_config: Mapping[str, Any] | None = None,

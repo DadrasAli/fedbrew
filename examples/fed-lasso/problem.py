@@ -905,6 +905,13 @@ class FedLassoTask(TaskAdapter):
     rebuilds the spec from the dials recorded there.
     """
 
+    #: The batched executor's form of a stacked step's gradients: one backward
+    #: through the per-client losses' sum, which is faster for this problem's
+    #: few, tiny parameters than vmap(grad) -- 5.98 against 7.82 ms a round
+    #: (the shipped FedAvg arm evaluating only the central pass, 150 rounds,
+    #: one CPU thread, measured on 2026-09-27).
+    batched_gradient = "summed"
+
     def __init__(
         self,
         model_config: Mapping[str, Any] | None = None,

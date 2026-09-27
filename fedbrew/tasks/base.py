@@ -93,7 +93,12 @@ class BatchableTask(Protocol):
     a tensor per key over the splits, of which split ``k`` has ``counts[k]``
     -- into each split's ``compute_metrics`` and example count, as tensors,
     so a stack's metrics are computed on its device; its padding positions
-    hold empty batches' outputs and must be ignored.
+    hold empty batches' outputs and must be ignored. And a class attribute,
+    ``batched_gradient``: ``"vmap_grad"`` (the default) takes a stack's
+    gradients as ``vmap(grad(functional_loss))``, ``"summed"`` as one vmapped
+    forward and one backward through the per-client losses' sum. Both give
+    each client its own gradient; which is faster depends on the model, so a
+    task declares the one it measured.
     """
 
     def split_rows(self, data: Any) -> tuple[Tensor, ...]:

@@ -659,6 +659,41 @@ class ClassificationFloat32Test(ExecutorRuns):
                 self.assertAgree(batched, sequential, tolerance=FLOAT32_TOLERANCE)
 
 
+class BothGradientFormsTest(ExecutorRuns):
+    """Either form of a stacked step's gradient, whichever a task declares, is held to TOLERANCE.
+
+    ``vmap(grad)`` and one backward through the per-client losses' sum
+    (``batched_gradient``) give every client its own gradient; they differ in
+    how the stack is walked. Each form is forced here over the rules, FedAvg's
+    combining modes with clipping, ragged clients, and the float64 MLP.
+    """
+
+    def forced(self, form: str) -> Any:
+        from fedbrew.core import batched_executor
+
+        return mock.patch.object(batched_executor, "gradient_form", lambda task: form)
+
+    def test_each_form_over_the_rules_and_modes(self) -> None:
+        cases = [(label, rule_config(client)) for label, client in rule_arms()]
+        for mode, client in fedavg_modes():
+            if "clip=None" not in mode:
+                cases.append(
+                    (f"fedavg/{mode}", with_client(example_config("fed-lasso-l2"), **client))
+                )
+        for form in ("vmap_grad", "summed"):
+            for label, config in cases:
+                with self.subTest(form=form, case=label), self.forced(form):
+                    self.assertAgree(*self.both(config, data=ragged_clients))
+
+    def test_each_form_on_the_mlp(self) -> None:
+        for form in ("vmap_grad", "summed"):
+            for label, client in classification_arms():
+                with self.subTest(form=form, rule=label), self.forced(form):
+                    with float64_classification():
+                        batched, sequential = self.both(classification_rule_config(client))
+                    self.assertAgree(batched, sequential)
+
+
 class BatchedRunsAreDeterministicTest(ExecutorRuns):
     def test_two_batched_runs_are_identical(self) -> None:
         config = with_client(example_config("fed-lasso"), update_mode="single_batch")

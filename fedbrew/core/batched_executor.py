@@ -606,6 +606,11 @@ class _Bucket:
         self.eval_counts = evaluation.steps[torch.tensor(slots, dtype=torch.long)].tolist()
         self.weights = update_weights(self.steps.lengths, self.structure, self.program)
         self._weights_on_device: Tensor | None = None
+        #: Whether a step's gradients are taken as one backward through the
+        #: stacked losses' sum rather than vmap(grad): the form the task
+        #: declares, by measurement (``batched_gradient``); one client is
+        #: never vmapped, and takes the sequential gradient either way.
+        self.summed = self.stacked and gradient_form(task) == "summed"
 
     # -- the tensors every client starts from --------------------------------
 
@@ -734,6 +739,8 @@ class _Bucket:
         outputs: list[dict[str, Tensor]] = []
 
         model.train()
+        if self.summed:
+            return self._run_summed(params, state, corrections, outputs)
         step = 0
         for number, count in enumerate(self.structure, start=1):
             if program.combine == "batch":
@@ -778,11 +785,119 @@ class _Bucket:
                 ],
             )
 
+        return self._finish(params, outputs, step)
+
+    def _finish(
+        self, params: dict[str, Tensor], outputs: list[dict[str, Tensor]], step: int
+    ) -> tuple[dict[str, Tensor], Any, Any]:
+        """The trained stack, the step outputs, and the post-fit pass's."""
+
         training = (outputs, [step] * self.size)
         evaluated = self._evaluate(params) if self.plans[0].evaluate else None
         if not self.stacked:
             params = {name: value.unsqueeze(0) for name, value in params.items()}
         return params, training, evaluated
+
+    # -- the summed form of a step's gradient ---------------------------------
+
+    def _run_summed(
+        self,
+        params: dict[str, Tensor],
+        state: Any,
+        corrections: list[tuple[Any, int | None]],
+        outputs: list[dict[str, Tensor]],
+    ) -> tuple[dict[str, Tensor], Any, Any]:
+        """``run``'s steps with each gradient taken as ``_summed_gradients`` takes it.
+
+        The rule's step -- correction, clipping, optimizer -- and the
+        combination of a pass's gradients are ``run``'s, vmapped over the
+        clients as there.
+        """
+
+        program = self.program
+
+        def update(  # type: ignore[no-untyped-def]
+            params, grads, state, reference, client_control, server_control, *, step
+        ):
+            return apply_update(
+                program, params, grads, state, step, reference, client_control, server_control
+            )
+
+        def combine(total, grads, weight):  # type: ignore[no-untyped-def]
+            return accumulate(total, grads, weight)
+
+        def full_update(  # type: ignore[no-untyped-def]
+            params, total, state, denominator, reference, client_control, server_control, *, step
+        ):
+            if program.combine == "full":
+                total = divide(total, denominator)
+            return apply_update(
+                program, params, total, state, step, reference, client_control, server_control
+            )
+
+        step = 0
+        for number, count in enumerate(self.structure, start=1):
+            if program.combine == "batch":
+                grads, step_outputs = self._summed_gradients(params, *self._gather(step))
+                step += 1
+                if program.max_grad_norm is None:
+                    # Unclipped, a step is elementwise -- every operand a
+                    # client's tensor, one shared by all, or a Python number --
+                    # so on the stacked tensors it is the vmapped arithmetic.
+                    params, state = apply_update(
+                        program, params, grads, state, number, *(value for value, _ in corrections)
+                    )
+                else:
+                    params, state = self._call(
+                        partial(update, step=number),
+                        [(params, 0), (grads, 0), (state, 0), *corrections],
+                    )
+                outputs.append(step_outputs)
+                continue
+            total: Any = None
+            first = step
+            for _ in range(count):
+                grads, step_outputs = self._summed_gradients(params, *self._gather(step))
+                total = self._call(combine, [(total, 0), (grads, 0), self._weights(step)])
+                outputs.append(step_outputs)
+                step += 1
+            params, state = self._call(
+                partial(full_update, step=number),
+                [
+                    (params, 0),
+                    (total, 0),
+                    (state, 0),
+                    self._denominators(first, count),
+                    *corrections,
+                ],
+            )
+        return self._finish(params, outputs, step)
+
+    def _summed_gradients(
+        self, params: dict[str, Tensor], batch: tuple[Tensor, ...], mask: Tensor | None
+    ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+        """Every client's gradient: one vmapped forward, one backward through the losses' sum.
+
+        Client ``c``'s loss is a function of its own parameters alone, so the
+        derivative of the sum with respect to client ``c``'s parameters is the
+        derivative of its loss: every other term's is exactly zero. What
+        differs from ``vmap(grad)`` is how many times the stack is walked, not
+        what each client's gradient is; its arithmetic is the batched kernels'
+        either way, to summation order.
+        """
+
+        task, model, buffers = self.task, self.model, self.buffers
+
+        def loss(params: Any, batch: Any, mask: Any) -> Any:
+            return task.functional_loss(model, params, buffers, batch, mask)
+
+        leaves = {name: value.detach().requires_grad_() for name, value in params.items()}
+        with torch.enable_grad():
+            losses, outputs = torch.func.vmap(loss, in_dims=(0, 0, None if mask is None else 0))(
+                leaves, batch, mask
+            )
+            grads = torch.autograd.grad(losses.sum(), tuple(leaves.values()))
+        return dict(zip(leaves, grads, strict=True)), outputs
 
     def _evaluate(self, params: dict[str, Tensor]) -> tuple[list[dict[str, Tensor]], list[int]]:
         """The post-fit pass: ``functional_eval`` over each client's eval batches."""
@@ -797,6 +912,19 @@ class _Bucket:
             self.eval_counts,
         )
         return outputs, self.eval_counts
+
+
+#: The two forms a stacked step's gradient can be taken in (``batched_gradient``).
+GRADIENT_FORMS = ("vmap_grad", "summed")
+
+
+def gradient_form(task: Any) -> str:
+    """The form a task declares its stacked gradients are fastest in; ``vmap_grad`` by default."""
+
+    form = getattr(task, "batched_gradient", "vmap_grad")
+    if form not in GRADIENT_FORMS:
+        raise ValueError(f"batched_gradient must be one of {GRADIENT_FORMS}, got {form!r}")
+    return form
 
 
 def _placed(value: Tensor, like: Tensor) -> Tensor:

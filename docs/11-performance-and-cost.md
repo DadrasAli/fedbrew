@@ -414,6 +414,32 @@ round and reused for the same clients' data, the same objects unedited; at
 full participation that is every round, and what is held between rounds is
 what the chunk holds anyway.
 
+**The gradient.** A stack's gradients are taken in one of two forms, the
+one the task declares (`batched_gradient`): `vmap(grad(functional_loss))`,
+or one vmapped forward and one backward through the sum of the per-client
+losses. Client `c`'s loss depends on client `c`'s parameters alone, so the
+derivative of the sum with respect to them is its own gradient -- every other
+term's is exactly zero -- and the two forms differ in how the stack is walked,
+not in what each client gets, to summation order. In the summed form an
+unclipped per-batch step is applied to the stacked tensors directly: it is
+elementwise, so that is the vmapped arithmetic. Which is faster depends on the
+model, so it is chosen per task by measurement (one CPU thread, 2026-09-27):
+
+| Task | `vmap_grad`, ms a round | `summed`, ms a round | Declared |
+| --- | ---: | ---: | --- |
+| fed-lasso (FedAvg arm, central pass only, 150 rounds) | 7.82 | 5.98 | `summed` |
+| drift-quad | 10.66 | 8.54 | `summed` |
+| simplex-lsq | 6.81 | 5.21 | `summed` |
+| nonconvex-simplex | 4.53 | 3.84 | `summed` |
+| pl-1d | 5.90 | 4.86 | `summed` |
+| classification, MNIST MLP at 1000 clients (local steps only) | 101 | 141 | `vmap_grad` |
+
+On an A100 the MLP's local steps took 2.7 and 2.6 ms, no reason to change.
+`tests/test_batched_executor_tolerance.py` holds each form, forced, to the
+tolerance over every rule, the combining modes, ragged clients and the
+float64 MLP; a stack of one client is not vmapped and takes the sequential
+gradient either way.
+
 **Evaluation.** A batched run is measured by the batched evaluator
 (`fedbrew/core/batched_evaluator.py`), on the cadences of `evaluation.*`,
 which it does not change. The clients due for evaluation in a round are

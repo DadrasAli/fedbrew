@@ -465,6 +465,13 @@ class PL1DTask(TaskAdapter):
     used to read them off the task directly, and one still does.
     """
 
+    #: The batched executor's form of a stacked step's gradients: one backward
+    #: through the per-client losses' sum, which is faster for this problem's
+    #: few, tiny parameters than vmap(grad) -- 4.86 against 5.90 ms a round
+    #: (the shipped FedAvg arm evaluating only the central pass, 150 rounds,
+    #: one CPU thread, measured on 2026-09-27).
+    batched_gradient = "summed"
+
     def __init__(
         self,
         model_config: Mapping[str, Any] | None = None,

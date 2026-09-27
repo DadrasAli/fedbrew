@@ -24,6 +24,13 @@ from fedbrew.tasks.base import (
 class TorchClassificationTask(TaskAdapter):
     """Task-specific PyTorch helpers for classification."""
 
+    #: The batched executor's form of a stacked step's gradients: vmap(grad).
+    #: One backward through the per-client losses' sum was slower on the CPU
+    #: -- 141 against 101 ms of local steps a round for the MNIST MLP at 1000
+    #: clients, one thread -- and no faster on an A100, 2.6 against 2.7 ms
+    #: (measured on 2026-09-27).
+    batched_gradient = "vmap_grad"
+
     def __init__(
         self,
         model_config: Mapping[str, Any] | None = None,
