@@ -29,7 +29,7 @@ guard that came with its fix — is carried in the CSV.
 | `summary` | The finding's own heading, verbatim except that markdown backticks are stripped. Not a paraphrase, except for the rows named under *Rows removed with a component* and *Summaries edited before publication*. |
 | `confidence` | The leading token of the finding's confidence note: `certain` (102), `likely` (1), `needs-runtime-check` (1), empty (5). Qualifiers after that token are dropped. |
 | `fix_commit` | Empty on every row. It held the short hashes of the commits that named each finding as fixed; *Why `fix_commit` is empty* below says why it no longer does. |
-| `regression_test` | Space-separated `tests/` paths for the guard that came with the fix. Empty for 38 of the 141 rows. |
+| `regression_test` | Space-separated `tests/` paths for the guard that came with the fix. Empty for 38 of the 142 rows. |
 | `status` | One of three values, counted and defined in *Coverage* below. The file's only record of whether a finding was fixed. |
 
 ## How an id is formed
@@ -96,14 +96,14 @@ census's own 5 open rows carry, and an empty `regression_test` with it.
 
 The census tables in this file — the per-pass split, *Coverage* and its status
 table — describe the **109**, and `tests/test_findings_manifest.py` computes
-them over the census rows alone; the empty-cell counts describe all 141 rows.
+them over the census rows alone; the empty-cell counts describe all 142 rows.
 The two numbers a reader might want:
 
 | | Rows |
 |---|---:|
 | Census (passes 01–13) | 109 |
-| Post-census (`pass: post`) | 32 |
-| **File** | **141** |
+| Post-census (`pass: post`) | 33 |
+| **File** | **142** |
 
 The post-census rows, in full:
 
@@ -141,6 +141,7 @@ The post-census rows, in full:
 | `POST-F30` | `silent-degradation` | `fedbrew/core/config.py` | `model.active_target_weighting` decides a causal-LM client's aggregation weight, and its only reader is `TorchCausalLMTask.federated_aggregation_weight`. `fedprox` (`fedbrew/clients/torch_fedprox_client.py`) and `scaffold` never call that hook: both report the count of their post-fit evaluation pass, which for the causal-LM task is the active target tokens of the whole train split. So `active_target_weighting: true`, or the `causal_lm_sft` default that turns it on, loaded under either rule, was copied into `run.json` with the config, and changed nothing. No shipped config pairs either rule with a causal-LM model. Found on 2026-09-21 while defining the aggregation weight for chapter 07 §3.1, which first recorded it as a caveat. Fixed on 2026-09-21 by refusing the combination: the key at config load, through `fedbrew run` and `--validate-only`, and the SFT default where each path reads the manifest, `factory._model_config` and preflight's `data` check (`active_target_weighting_refusal`, `fedbrew/core/federated_state.py`). The message names the rules that honour it and says `false` gives these two the weight they already use. `AGGREGATION_WEIGHT_HOOK_CLIENT_RULES` and `AGGREGATION_WEIGHT_HOOK_BYPASS_RULES` partition the built-in rules, and the guard checks each against what the rule's `fit` does with a task whose hook returns a sentinel. | fixed, guarded by `tests/test_active_target_weighting_is_honoured_or_refused.py` |
 | `POST-F31` | `silent-degradation` | `fedbrew/core/artifacts.py` | `flush_round_artifacts` rewrote `round_metrics.csv` in full at the end of every round -- the per-client CSVs had been moved to appends, this file had not -- so round r wrote the rows of every round before it and the bytes written grew with the square of the round count. Profiled over 2000 rounds of a fed-logistic-l1 point, `save_round_metrics_csv` was 44% of the run. Measured on 2026-09-21, the same 10,000-round point (K = 1, p = 0.01) side by side on one compute node without the fix and with it: 2707 s against 919 s of wall clock, 2165 s against 357 s of it outside the rounds, and 37.9 GB against 5.5 GB written, with every non-timing cell of all three CSVs identical. Late in a long run the rewrite was most of each round, which is why a time limit's kill landed between a checkpoint and its CSV row almost every time (`POST-F24`). Fixed on 2026-09-21: `flush_round_metrics_csv` appends each round's row, one buffered write plus `fsync`, and falls back to the full atomic rewrite whenever appending cannot be trusted -- the first flush of every attempt, which drops the rows a resume recomputes, a header that does not match, a shorter history, or a metric first reported mid-run -- and extends the metric names from the new rounds only, rather than collecting them from the whole history every round. An append is not atomic, so the readers changed with it: all three drop a final row with no line break after it, which also catches a cut inside the last field that the field-count check let through -- a `checkpoint_sec` read short, or a per-client `5e-05` cut to `5e-`, which no float parses, so the resume was refused -- and `load_round_metrics_csv`, which read a short row anywhere as a round of zeros, now refuses one before the last. | fixed, guarded by `tests/test_round_metrics_are_appended.py` |
 | `POST-F32` | `silent-degradation` | `fedbrew/core/torch_utils.py` | `WeightedStateAccumulator.add` checked every client state for finiteness as it arrived (`refuse_non_finite_state`, `isfinite(t).all()` per tensor) and `result` never checked the weighted mean it returned. A round whose client states were each finite but whose weighted mean overflowed the model's dtype therefore went into the global model with an infinity in it, and into FedOpt's, FedLALR's and SCAFFOLD's persistent state, without a refusal; the run carried on until the divergence monitor, if it watched a metric the infinity reached, stopped it a round later. Found on 2026-09-26 while moving the check off the per-client path, where it was 14% of an MNIST MLP round at 1000 clients (measured on 2026-09-26): 133 us per 50,890-parameter state against 13 us for the sum itself. Fixed on 2026-09-26, a strengthened guarantee: `result` checks the averaged tensors once a round and refuses a non-finite one with `NonFiniteStateError`, which the loop records as the `non_finite_client_state` divergence. NaN and infinities in a client state reach the sum, so everything the per-client check refused is still refused, at the same round; the client and tensor are named from the minimum and maximum `add` records of each state (`aminmax`, 9 us), as the first client in arrival order with a non-finite tensor, which is the one the per-client check named. When every client state is finite the refusal says the weighted mean overflowed and names no client. `FedLALRServer` computes all three of its means before assigning any, so a refused round leaves it unchanged. | fixed, guarded by `tests/test_finiteness_is_checked_on_the_aggregate.py` |
+| `POST-F33` | `fragile` | `examples/fed-lasso/problem.py` | `FedLassoTask.eval_step` measured the optimality gap through `ProblemSpec.objective_at`, which builds the design `H` and the client targets on the CPU from the spec and multiplies them by the model's iterate. Under `runtime.device: cuda` the iterate is on the GPU, so every evaluation of fed-lasso, fed-lasso-smooth and fed-lasso-l2 raised a device mismatch and no run of them on a GPU could complete. Loud, and CPU runs were unaffected; `fragile`, not `silent-degradation`. Found on 2026-09-27 while timing the batched executor on an A100. Fixed on 2026-09-27: the task builds the design, the targets and the true support's mask once, on its own device, and computes `F(x)` from them term by term in `objective_at`'s order, so a CPU run's gap is the same number as before. The guard makes the spec's `design` and `client_targets` raise and requires an evaluation to run and give `objective_at(x) - F*`, and, where a CUDA device is usable, runs a round of the shipped arm on it. | fixed, guarded by `tests/test_fed_lasso_evaluates_on_its_device.py` |
 
 ### Two corrections that are not rows
 
@@ -210,7 +211,7 @@ have cited a path, a guard or a subject nobody could open or interpret. The ids
 are retired: no later row reuses one. This is the one place the file does not
 keep what the audit filed, and every census count here — the per-pass split,
 *Coverage*, the locations — describes the 109; the empty-cell counts describe
-all 141 rows of the file.
+all 142 rows of the file.
 
 `P07-F05`'s fix did not depend on its row. It turned `save_best` on for the MNIST
 baseline, which is still what `configs/mnist/fedavg.yaml` ships and what
@@ -411,13 +412,13 @@ the counts above:
 
 An empty cell means the value could not be recovered, with one exception:
 `fix_commit` is empty by decision. None has been filled with a plausible
-substitute. These counts are over all 141 rows, census and post-census together,
+substitute. These counts are over all 142 rows, census and post-census together,
 because they describe the CSV's columns; *Coverage* above counts the 109 census
 rows alone.
 
 - `confidence` — 5 rows (`P10-F31` … `P10-F35`). Those findings carry no
   confidence note.
-- `fix_commit` — all 141 rows; see *Why `fix_commit` is empty*.
+- `fix_commit` — all 142 rows; see *Why `fix_commit` is empty*.
 - `regression_test` — 38 rows. Five are the open post-census rows
   (`POST-F03`, `POST-F11`, `POST-F15`, `POST-F18`, `POST-F20`), which have no fix and so no guard. The
   other 33 are census rows, and 26 of them had no fix commit to take a guard

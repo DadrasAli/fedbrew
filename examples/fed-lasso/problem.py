@@ -949,8 +949,10 @@ class FedLassoTask(TaskAdapter):
         self._optimum = spec.optimum().to(self.device)
         self._optimal_objective = spec.optimal_objective()
         self._truth_support = spec.truth_support()
-        # F(x) is measured on every eval batch, so its data is built once here
-        # rather than from the spec per call; the same values either way.
+        # F(x) is measured on every eval batch, so its data is built once here,
+        # on the task's device, rather than from the spec per call: the spec
+        # builds it on the CPU, which a CUDA iterate cannot be multiplied by
+        # (FINDINGS.csv POST-F33). The same values either way.
         self._design = spec.design().to(self.device)
         self._client_targets = spec.client_targets().to(self.device)
         self._truth_mask = torch.tensor(
