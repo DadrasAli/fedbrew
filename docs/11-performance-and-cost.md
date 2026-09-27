@@ -329,9 +329,22 @@ are folded in one weighted reduction per tensor (chapter 07 §3.3).
 
 **What it computes.** Per client, what the sequential executor computes:
 
-- the same batches in the same order, because each client's rule replays its
-  own loader iteration on the row numbers of its split to name them
-  (`sgd_mode_updates`, `own_loop_updates`), drawing what the loader draws;
+- the same batches in the same order. Each client's rule declares the loop
+  its update takes over its loader, and the task declares what that loader
+  yields (`LoaderOrder`: its batching, and how its generator draws the
+  order); every client's batches for the round are then planned together
+  (`fedbrew/clients/batch_orders.py`): the loaders' seeds derived as
+  `dataloader_seed` derives them, the hash of the fields all clients share
+  taken once; each shuffled loader's permutations drawn with the calls the
+  loader makes, on a generator seeded as it seeds its own, so they are its
+  permutations by construction; and every client's batch at every step cut
+  from them as row indices for all clients at once, where replaying each
+  loader collected them in Python. `tests/test_batch_orders.py` holds every order to the loader's
+  own, iterated as each rule's loop iterates it (`sgd_mode_updates`,
+  `own_loop_updates`), for every update mode, shuffled and not, with and
+  without `drop_last` and `max_local_steps`. A task that declares no order
+  has each client's loader replayed on the row numbers of its split
+  (`row_batches`), which draws what the loader draws;
 - the same records, weights and state, because each client's rule builds its
   `FitResult` from its share of the stack with the code its own `fit` ends
   with (`batched_result`);
@@ -376,7 +389,7 @@ back: <reason>` in amber, and `run.json` records the reason
 
 | Part | Requirement |
 | --- | --- |
-| Task | implements `BatchableTask` (`fedbrew/tasks/base.py`): `split_rows`, `row_batches`, `functional_loss`, `functional_eval`, with a loss that averages over rows. The classification task does (the MLP and the CNNs), and so do the five linear examples; the causal-LM task does not. |
+| Task | implements `BatchableTask` (`fedbrew/tasks/base.py`): `split_rows`, `row_batches`, `functional_loss`, `functional_eval`, with a loss that averages over rows; optionally `loader_order`, which lets the round's batch orders be computed together rather than each client's loader replayed. The classification task does all five (the MLP and the CNNs), and so do the five linear examples; the causal-LM task does not. |
 | Model | its federated state is exactly its parameters, all trainable; no dropout at `p > 0`, which draws from the process-wide generator; no batch normalisation, whose statistics are state |
 | Rule | declares a batched update on its own class: `fedavg` in every update mode, with or without `max_grad_norm`; `local_sgd` with momentum, Nesterov, weight decay and a cosine rate; `local_adamw`, its step cap included; `fedprox`; `scaffold`, whose `c_i` is gathered from each client and its new value kept there. The last four under both of their modes. `fedlalr`, `delta_sgd`, `fedavg_ft` and `centralized` run sequentially. |
 | Runtime | `experiment.seed` set, so every loader draws from its own generator; `use_amp: false`; CPU or CUDA; not the `centralized` strategy |
@@ -447,7 +460,8 @@ identical.
 | `fedbrew/data/manifest_dataset.py` | on-demand shard reads and the cache |
 | `fedbrew/clients/lazy_pool.py` | building clients on demand |
 | `fedbrew/core/batched_executor.py` | §9: `BatchedExecutor`, its buckets and chunks, and `select_executor`'s fallback |
-| `fedbrew/clients/batched_update.py` | §9: a rule's update as steps over a stack, and the batches its loop draws |
+| `fedbrew/clients/batched_update.py` | §9: a rule's update as steps over a stack, the plan a rule declares, and the round's planning |
+| `fedbrew/clients/batch_orders.py` | §9: every client's batch order for a round, from the loaders' declarations: seeds, permutations, batches |
 | `fedbrew/core/batched_evaluator.py` | §9: the due clients' splits measured together, and the central pass's kept model and shard |
 | `tools/` | the benchmark and profiling scripts |
 
@@ -513,6 +527,7 @@ python tools/bench_compare_runs.py --help
 | `tests/test_report_run_size.py` | Reported run size. |
 | `tests/test_batched_executor_tolerance.py` | §9: both executors agree on every model, client state and cell, to `1e-12`, and bit for bit with one client per chunk. |
 | `tests/test_batched_executor.py` | §9: the keys, the fallback and its record, client isolation, the refusals, the generator, and one chunk at a time. |
+| `tests/test_batch_orders.py` | §9: every planned order is its loader's own, for every task, update mode, shuffle, `drop_last` and `max_local_steps`, 520 clients at once included; the bulk seeds are `dataloader_seed`'s. |
 | `tests/test_batched_evaluator.py` | §9: ragged, shuffled and missing evaluation splits through both evaluators, the refusal's words, and the central pass's kept model and shard. |
 | `tests/test_stacked_fold.py` | A stack's rows fold to their mean, and one row exactly. |
 

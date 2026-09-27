@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader, Dataset, TensorDataset
 
 from fedbrew.core.torch_utils import OptimizerLike, SeedWorker, resolve_torch_device
 from fedbrew.tasks.base import (
+    LoaderOrder,
     TaskAdapter,
     batch_row_numbers,
     model_config_key,
@@ -319,6 +320,32 @@ class TorchClassificationTask(TaskAdapter):
             numbered = {"x": torch.zeros((rows, 1)), "y": row_numbers(rows).long()}
             loader = self.build_dataloader(numbered, {**(config or {}), "num_workers": 0})
         return _RowNumbers(loader)
+
+    def loader_order(
+        self, data: Any, config: Mapping[str, Any] | bool | None = None
+    ) -> LoaderOrder | None:
+        """What ``build_dataloader(data, config)`` yields, declared (``LoaderOrder``).
+
+        Both of its loaders draw a ``DataLoader``'s order per epoch --
+        ``_DeviceTensorBatches`` reproduces it -- from the generator seeded
+        with ``seed``. None for a loader handed a generator of its own.
+        """
+
+        if isinstance(config, bool):
+            config = {"shuffle": config}
+        values = {**self.dataloader_config, **(config or {})}
+        shuffle = bool(values.get("shuffle", False))
+        seed = values.get("seed")
+        if values.get("generator") is not None:
+            return None
+        return LoaderOrder(
+            rows=len(_raw_tensors(data)[1]),
+            batch_size=max(1, int(values.get("batch_size", self.batch_size))),
+            shuffle=shuffle,
+            drop_last=bool(values.get("drop_last", False)),
+            seed=None if seed is None else int(seed),
+            per_epoch=True,
+        )
 
     def functional_loss(
         self,

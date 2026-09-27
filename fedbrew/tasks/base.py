@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 import torch
@@ -115,6 +116,57 @@ class BatchableTask(Protocol):
         mask: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """What ``eval_step`` returns for the batch, key for key, as tensors."""
+
+
+@dataclass(frozen=True, slots=True)
+class LoaderOrder:
+    """What a task's loader yields for a split, declared so it can be computed without it.
+
+    Optional beside :class:`BatchableTask`: a task that returns one from
+    ``loader_order(data, config)`` has every client's batch order for a round
+    computed together (``fedbrew/clients/batch_orders.py``); one that does not
+    has each client's loader replayed through ``row_batches``. A declaration
+    is a claim about ``build_dataloader(data, config)``, and
+    ``tests/test_batch_orders.py`` holds each shipped task to it:
+
+    - it yields ``rows`` rows in batches of ``batch_size``, in order when
+      ``shuffle`` is off, the last batch short unless ``drop_last`` drops it
+      -- which a ``keep_single_batch`` loader does only when the split makes
+      more than one batch;
+    - shuffled, it permutes the rows with ``torch.randperm`` on a
+      ``torch.Generator`` seeded with ``seed``: once per epoch after one int64
+      base-seed draw, and once more after the last batch, when ``per_epoch``
+      (torch's ``DataLoader``); otherwise once, when it is built, and every
+      iteration yields that order.
+    """
+
+    rows: int
+    batch_size: int
+    shuffle: bool
+    drop_last: bool
+    seed: int | None
+    per_epoch: bool
+    keep_single_batch: bool = False
+
+
+def listed_loader_order(rows: int, config: Mapping[str, Any] | bool | None) -> LoaderOrder:
+    """The order of a loader that permutes once and cuts a list: the linear examples'.
+
+    ``batch_size`` defaults to the whole split, ``shuffle`` and ``drop_last``
+    to off, and a bool config is ``shuffle``.
+    """
+
+    values = {"shuffle": config} if isinstance(config, bool) else dict(config or {})
+    seed = values.get("seed")
+    return LoaderOrder(
+        rows=rows,
+        batch_size=max(1, int(values.get("batch_size", rows) or rows)),
+        shuffle=bool(values.get("shuffle", False)),
+        drop_last=bool(values.get("drop_last", False)),
+        seed=None if seed is None else int(seed),
+        per_epoch=False,
+        keep_single_batch=True,
+    )
 
 
 def row_mean(values: Tensor, mask: Tensor | None = None) -> Tensor:

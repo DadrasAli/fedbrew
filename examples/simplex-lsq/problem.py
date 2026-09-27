@@ -88,8 +88,10 @@ from fedbrew.data.writers.manifest import save_clients_jsonl, save_manifest
 from fedbrew.data.writers.torch_shards import save_client_shard, save_split_client_shard
 from fedbrew.models.config_keys import reject_unknown_model_keys
 from fedbrew.tasks.base import (
+    LoaderOrder,
     TaskAdapter,
     batch_row_numbers,
+    listed_loader_order,
     row_count,
     row_mean,
     row_numbers,
@@ -765,6 +767,13 @@ class SimplexLSQTask(TaskAdapter):
         return {name: float(value) for name, value in outputs.items()}
 
     # -- the batched executor (fedbrew.tasks.base.BatchableTask) --------------
+
+    def loader_order(
+        self, data: Any, config: Mapping[str, Any] | bool | None = None
+    ) -> LoaderOrder:
+        """What ``build_dataloader(data, config)`` yields, declared (``LoaderOrder``)."""
+
+        return listed_loader_order(len(_rows_of(data)[1]), config)
 
     def split_rows(self, data: Any) -> tuple[Tensor, Tensor]:
         """A split's design rows and targets, as ``build_dataloader`` slices them."""

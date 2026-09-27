@@ -34,10 +34,13 @@ from typing import Any
 
 from torch import nn
 
+from fedbrew.clients.batch_orders import LocalLoop
+from fedbrew.clients.batched_update import loader_seeds, round_orders
 from fedbrew.core.batched_executor import (
     DEFAULT_EXECUTOR_CHUNK_BYTES,
     _placed,
     _Rows,
+    _Steps,
     measure_splits,
     per_split_floats,
 )
@@ -162,37 +165,50 @@ class BatchedEvaluator:
         ]
         kept_rows = self._rows
         self._rows = {}
-        chunks: list[list[tuple[int, int]]] = []
+        planned = []
         cost = 0
         for entries in segments.values():
+            declared = [plans[index].orders[position] for index, position in entries]
+            orders = round_orders(
+                declared,
+                loader_seeds(
+                    declared,
+                    [(plans[index].client_id, plans[index].seed) for index, _ in entries],
+                    requests[0].round_id,
+                    "eval",
+                ),
+                [LocalLoop(epochs=1)] * len(entries),
+                lambda slot, entries=entries: [
+                    [batch] for batch in _replayed(plans, entries[slot])
+                ],
+            )
             split_chunks, split_cost = self._chunks(task, plans, entries)
-            chunks.extend(split_chunks)
+            planned.append((entries, orders, split_chunks))
             cost += split_cost
         # Kept between rounds only while the whole evaluation fits one
         # chunk's budget, so what is held is what one chunk holds anyway.
         keep = cost <= self.chunk_bytes
         executor_rows = getattr(self._executor, "_rows", None) or {}
-        for chunk in chunks:
-            sources = [plans[index].data[position] for index, position in chunk]
-            key = tuple(id(source) for source in sources)
-            rows = kept_rows.get(key) or executor_rows.get(key)
-            if rows is None or not rows.holds(sources):
-                rows = _Rows(task, sources)
-            if keep:
-                self._rows[key] = rows
-            outputs, counts = measure_splits(
-                task,
-                template,
-                buffers,
-                params,
-                None,
-                rows,
-                [plans[index].batches[position] for index, position in chunk],
-            )
-            for (index, position), values in zip(
-                chunk, per_split_floats(outputs, counts), strict=True
-            ):
-                measured[index][position] = values
+        dtype = next(iter(params.values())).dtype
+        for entries, orders, split_chunks in planned:
+            slot_of = {entry: slot for slot, entry in enumerate(entries)}
+            step_counts = orders.steps.tolist()
+            for chunk in split_chunks:
+                sources = [plans[index].data[position] for index, position in chunk]
+                key = tuple(id(source) for source in sources)
+                rows = kept_rows.get(key) or executor_rows.get(key)
+                if rows is None or not rows.holds(sources):
+                    rows = _Rows(task, sources)
+                if keep:
+                    self._rows[key] = rows
+                slots = [slot_of[entry] for entry in chunk]
+                counts = [step_counts[slot] for slot in slots]
+                steps = _Steps(rows, orders, slots, dtype)
+                outputs = measure_splits(task, template, buffers, params, None, steps, counts)
+                for (index, position), values in zip(
+                    chunk, per_split_floats(outputs, counts), strict=True
+                ):
+                    measured[index][position] = values
         return list(zip(plans, measured, strict=True)), metadata
 
     def _chunks(
@@ -256,6 +272,13 @@ class BatchedEvaluator:
         if cached is None:
             return None
         return cached.serve("the global test shard")
+
+
+def _replayed(plans: list[Any], entry: tuple[int, int]) -> list[Any]:
+    """The evaluation loader's batches of one split whose task declares no order."""
+
+    index, position = entry
+    return list(plans[index].batches[position])
 
 
 def _all_supported(members: list[Any]) -> bool:

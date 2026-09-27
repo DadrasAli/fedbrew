@@ -7,11 +7,13 @@ from typing import Any
 
 import torch
 
+from fedbrew.clients.batch_orders import LocalLoop
 from fedbrew.clients.batched_update import (
     ClientBatchFit,
     ClientBatchPlan,
     LocalProgram,
     OptimizerSpec,
+    no_training_batches,
     sgd_mode_updates,
 )
 from fedbrew.clients.local_update_modes import (
@@ -163,25 +165,39 @@ class FedAvgClient(TorchSGDClient):
             raise ValueError("local_iterations must be positive")
         if learning_rate <= 0.0:
             raise ValueError("learning_rate must be positive")
+        combine = _COMBINE_OF_MODE[self.update_mode]
         return LocalProgram(
             optimizer=OptimizerSpec("sgd", lr=learning_rate),
-            combine=_COMBINE_OF_MODE[self.update_mode],
+            combine=combine,
             max_grad_norm=self.max_grad_norm,
+            weighting=self.frozen_gradient_weighting if combine == "frozen" else None,
         )
 
-    def batched_plan(self, request: FitRequest, model: torch.nn.Module) -> ClientBatchPlan:
+    def batched_plan(
+        self,
+        request: FitRequest,
+        model: torch.nn.Module,
+        start: Mapping[str, Any] | None = None,
+    ) -> ClientBatchPlan:
         """This round's local update, as the batched executor runs it (``fit``)."""
 
-        train_data = _get_train_data(self.client_data)
-        start = self.batched_start(request, model)
-        program = self.batched_program(request)
-        updates = sgd_mode_updates(
-            self.task.row_batches(train_data, self._train_loader_config(request.round_id)),
-            local_iterations=self.local_iterations,
-            update_mode=self.update_mode,
-            client_id=self.client_id,
+        return self._batch_plan(
+            request,
+            self.batched_program(request),
+            self.batched_start(request, model) if start is None else start,
+            LocalLoop(
+                epochs=self.local_iterations,
+                per_update="batch" if _COMBINE_OF_MODE[self.update_mode] == "batch" else "epoch",
+                single_batch=self.update_mode == "single_batch",
+            ),
+            lambda: no_training_batches(self.client_id),
+            lambda loader: sgd_mode_updates(
+                loader,
+                local_iterations=self.local_iterations,
+                update_mode=self.update_mode,
+                client_id=self.client_id,
+            ),
         )
-        return self._batch_plan(request, program, train_data, updates, start)
 
     def batched_result(
         self, request: FitRequest, plan: ClientBatchPlan, fit: ClientBatchFit

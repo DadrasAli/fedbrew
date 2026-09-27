@@ -10,14 +10,15 @@ import torch
 from torch import optim
 
 from fedbrew.clients.base import ClientUpdate
+from fedbrew.clients.batch_orders import LocalLoop
 from fedbrew.clients.batched_update import (
     ClientBatchFit,
     ClientBatchPlan,
     ClientEvalPlan,
     LocalProgram,
     OptimizerSpec,
-    combine_weights,
     data_versions,
+    no_training_batches,
     own_loop_updates,
 )
 from fedbrew.clients.local_update_modes import (
@@ -380,25 +381,40 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
             combine="full" if self.update_mode == FULL_GRADIENT_UPDATE_MODE else "batch",
         )
 
-    def batched_plan(self, request: FitRequest, model: torch.nn.Module) -> ClientBatchPlan:
+    def batched_plan(
+        self,
+        request: FitRequest,
+        model: torch.nn.Module,
+        start: Mapping[str, Any] | None = None,
+    ) -> ClientBatchPlan:
         """This round's local update, as the batched executor runs it (``fit``'s loop).
 
         ``model`` is the architecture, for checking the broadcast against;
-        its values are not read.
+        its values are not read. ``start`` is the broadcast already checked
+        by ``batched_start`` for another client of the same class and payload.
         """
 
-        train_data = _get_train_data(self.client_data)
-        start = self.batched_start(request, model)
-        program = self.batched_program(request)
-        updates = own_loop_updates(
-            self.task.row_batches(train_data, self._train_loader_config(request.round_id)),
-            local_iterations=self.local_iterations,
-            update_mode=self.update_mode,
-            max_local_steps=self.max_local_steps,
-            client_id=self.client_id,
+        full = self.update_mode == FULL_GRADIENT_UPDATE_MODE
+        return self._batch_plan(
+            request,
+            self.batched_program(request),
+            self.batched_start(request, model) if start is None else start,
+            LocalLoop(
+                epochs=self.local_iterations,
+                per_update="epoch" if full else "batch",
+                max_updates=self.max_local_steps,
+            ),
+            (lambda: no_training_batches(self.client_id))
+            if full
+            else self._no_training_batches_refusal,
+            lambda loader: own_loop_updates(
+                loader,
+                local_iterations=self.local_iterations,
+                update_mode=self.update_mode,
+                max_local_steps=self.max_local_steps,
+                client_id=self.client_id,
+            ),
         )
-        self._require_training_batches(len(updates))
-        return self._batch_plan(request, program, train_data, updates, start)
 
     def batched_start(self, request: FitRequest, model: torch.nn.Module) -> Mapping[str, Any]:
         """The broadcast state the update starts from, checked as ``fit`` checks it."""
@@ -409,43 +425,76 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
         self,
         request: FitRequest,
         program: LocalProgram,
-        train_data: Any,
-        updates: list[list[Any]],
         start: Mapping[str, Any],
+        loop: LocalLoop,
+        refuse: Any,
+        draw: Any,
         **controls: Any,
     ) -> ClientBatchPlan:
+        """The plan: the loop and what the loaders yield, or how to replay them.
+
+        ``draw`` takes the training loader's batches as row indices and
+        returns each update's, as the rule's own loop takes them; it is used
+        only for a task that declares no ``loader_order``.
+        """
+
+        train_data = _get_train_data(self.client_data)
+        round_id = request.round_id
+        train_order = self._loader_order(
+            train_data, self._train_loader_config(round_id, seeded=False)
+        )
+        eval_order = self._loader_order(
+            train_data, self._eval_loader_config(round_id, seeded=False)
+        )
+        replay = None
+        if train_order is None or eval_order is None:
+
+            def replay() -> tuple[list[list[Any]], list[Any]]:
+                updates = draw(
+                    self.task.row_batches(train_data, self._train_loader_config(round_id))
+                )
+                evaluated = list(
+                    self.task.row_batches(train_data, self._eval_loader_config(round_id))
+                )
+                return updates, evaluated
+
+            train_order = eval_order = None
         return ClientBatchPlan(
             program=program,
             train_data=train_data,
-            updates=updates,
-            weights=combine_weights(
-                updates, program.combine, getattr(self, "frozen_gradient_weighting", None)
-            ),
-            eval_batches=self._batched_eval_batches(train_data, request.round_id),
+            loop=loop,
+            train_order=train_order,
+            eval_order=eval_order,
             evaluate=request.post_fit_evaluation,
             start=start,
+            client_id=self.client_id,
+            seed=self.base_seed,
+            refuse=refuse,
+            replay=replay,
             **controls,
         )
 
-    def _batched_eval_batches(self, data: Any, round_id: int) -> list[Any]:
-        """An evaluation pass's batches over ``data``, as row indices.
+    def _loader_order(self, data: Any, config: dict[str, Any]) -> Any:
+        """The task's declaration of what its loader yields, or None to replay the loader.
 
-        Unshuffled they are the same every round -- no generator is read --
-        so they are kept, per split, for the same unedited data at the same
-        batch size.
+        Unseeded, it is the same every round for the same unedited data and
+        configuration, so it is kept per split.
         """
 
-        key = (self.eval_batch_size, data_versions(data))
-        kept = getattr(self, "_kept_eval_batches", None)
+        declare = getattr(self.task, "loader_order", None)
+        if not callable(declare):
+            return None
+        kept = getattr(self, "_kept_orders", None)
         if kept is None:
-            kept = self._kept_eval_batches = {}
-        held = kept.get(id(data))
-        if not self.eval_shuffle and held is not None and held[0] is data and held[1] == key:
+            kept = self._kept_orders = {}
+        key = (id(data), tuple(config.items()))
+        versions = data_versions(data)
+        held = kept.get(key)
+        if held is not None and held[0] is data and held[1] == versions:
             return held[2]
-        batches = list(self.task.row_batches(data, self._eval_loader_config(round_id)))
-        if not self.eval_shuffle:
-            kept[id(data)] = (data, key, batches)
-        return batches
+        order = declare(data, config)
+        kept[key] = (data, versions, order)
+        return order
 
     def batched_evaluation_supported(self) -> bool:
         """Whether the batched evaluator may measure this client: its evaluate is this class's."""
@@ -464,7 +513,7 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
         splits = _eval_request_splits(request)
         if splits is None:
             raise ValueError("the batched evaluator measures requested splits")
-        plan = ClientEvalPlan(splits=list(splits), data=[], batches=[])
+        plan = ClientEvalPlan(splits=list(splits), client_id=self.client_id, seed=self.base_seed)
         for split in splits:
             split_data = _get_evaluation_split(self.client_data, split)
             if split_data is None:
@@ -472,10 +521,21 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
                     plan.refusal = self._missing_split_refusal(split)
                     break
                 plan.data.append(None)
-                plan.batches.append([])
+                plan.orders.append(None)
+                plan.batches.append(None)
                 continue
+            order = self._loader_order(
+                split_data, self._eval_loader_config(request.round_id, seeded=False)
+            )
             plan.data.append(split_data)
-            plan.batches.append(self._batched_eval_batches(split_data, request.round_id))
+            plan.orders.append(order)
+            plan.batches.append(
+                None
+                if order is not None
+                else list(
+                    self.task.row_batches(split_data, self._eval_loader_config(request.round_id))
+                )
+            )
         return plan
 
     def batched_evaluation_result(
@@ -540,8 +600,8 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
             return self._evaluation_metrics(
                 fit.eval_outputs, plan.train_data, metrics=metrics, prefix="fit_"
             )
-        if plan.eval_batches:
-            return {}, plan.eval_count
+        if plan.eval_rows:
+            return {}, plan.eval_rows
         return {}, _infer_split_num_examples(plan.train_data)
 
     def _require_training_batches(self, optimizer_steps: int) -> None:
@@ -561,7 +621,10 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
 
         if optimizer_steps > 0:
             return
-        raise ValueError(
+        raise self._no_training_batches_refusal()
+
+    def _no_training_batches_refusal(self) -> ValueError:
+        return ValueError(
             f"client {self.client_id!r} has no training batches "
             f"(train split {self._num_train_examples}, "
             f"batch_size {self.batch_size}, "
@@ -1050,7 +1113,9 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
             return list(raw_metrics)
         return None
 
-    def _train_loader_config(self, round_id: int, phase: str = "fit") -> dict[str, Any]:
+    def _train_loader_config(
+        self, round_id: int, phase: str = "fit", seeded: bool = True
+    ) -> dict[str, Any]:
         """Loader options for a training pass over the client's train split.
 
         ``phase`` names which pass, and the name reaches `dataloader_seed`, so
@@ -1065,17 +1130,19 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
             "shuffle": self.train_shuffle,
             "drop_last": self.drop_last,
         }
-        seed = self._loader_seed(round_id, phase)
+        # Unseeded for the batched planner, which derives every client's seed
+        # in one pass (fedbrew/clients/batch_orders.py).
+        seed = self._loader_seed(round_id, phase) if seeded else None
         if seed is not None:
             config["seed"] = seed
         return config
 
-    def _eval_loader_config(self, round_id: int) -> dict[str, Any]:
+    def _eval_loader_config(self, round_id: int, seeded: bool = True) -> dict[str, Any]:
         config: dict[str, Any] = {
             "batch_size": self.eval_batch_size,
             "shuffle": self.eval_shuffle,
         }
-        seed = self._loader_seed(round_id, "eval")
+        seed = self._loader_seed(round_id, "eval") if seeded else None
         if seed is not None:
             config["seed"] = seed
         return config

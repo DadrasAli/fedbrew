@@ -8,11 +8,13 @@ from typing import Any
 import torch
 from torch import optim
 
+from fedbrew.clients.batch_orders import LocalLoop
 from fedbrew.clients.batched_update import (
     ClientBatchFit,
     ClientBatchPlan,
     LocalProgram,
     OptimizerSpec,
+    no_training_batches,
     own_loop_updates,
 )
 from fedbrew.clients.local_update_modes import (
@@ -281,29 +283,34 @@ class TorchScaffoldClient(TorchSGDClient[TaskAdapter]):
         refuse_adapter_state(self, "scaffold", model)
         return global_state
 
-    def batched_plan(self, request: FitRequest, model: torch.nn.Module) -> ClientBatchPlan:
+    def batched_plan(
+        self,
+        request: FitRequest,
+        model: torch.nn.Module,
+        start: Mapping[str, Any] | None = None,
+    ) -> ClientBatchPlan:
         """This round's update, as the batched executor runs it, with both control variates."""
 
-        start = self.batched_start(request, model)
+        start = self.batched_start(request, model) if start is None else start
         program = self.batched_program(request)
         if self._client_control is None:
             self._client_control = zeros_like_model_state(start)
-        train_data = _get_train_data(self.client_data)
-        updates = own_loop_updates(
-            self.task.row_batches(train_data, self._train_loader_config(request.round_id)),
-            local_iterations=self.local_iterations,
-            update_mode=self.update_mode,
-            max_local_steps=None,
-            client_id=self.client_id,
-        )
-        if not updates:
-            raise ValueError("SCAFFOLD local_steps must be positive")
+        full = self.update_mode == FULL_GRADIENT_UPDATE_MODE
         return self._batch_plan(
             request,
             program,
-            train_data,
-            updates,
             start,
+            LocalLoop(epochs=self.local_iterations, per_update="epoch" if full else "batch"),
+            (lambda: no_training_batches(self.client_id))
+            if full
+            else (lambda: ValueError("SCAFFOLD local_steps must be positive")),
+            lambda loader: own_loop_updates(
+                loader,
+                local_iterations=self.local_iterations,
+                update_mode=self.update_mode,
+                max_local_steps=None,
+                client_id=self.client_id,
+            ),
             client_control=clone_model_state(self._client_control),
             server_control=request.payload["server_control"],
         )
@@ -315,14 +322,18 @@ class TorchScaffoldClient(TorchSGDClient[TaskAdapter]):
 
         assert plan.client_control is not None and plan.server_control is not None
         control_delta = self._update_client_control(
-            plan.start, fit.model_state, plan.client_control, plan.server_control, len(plan.updates)
+            plan.start,
+            fit.model_state,
+            plan.client_control,
+            plan.server_control,
+            len(plan.structure),
         )
         base_metrics, num_examples = self._batched_post_fit(plan, fit, metrics=[])
         return self._scaffold_result(
             request,
             local_state=fit.model_state,
             control_delta=control_delta,
-            local_steps=len(plan.updates),
+            local_steps=len(plan.structure),
             base_metrics=base_metrics,
             num_examples=num_examples,
         )

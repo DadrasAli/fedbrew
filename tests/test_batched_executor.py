@@ -34,6 +34,7 @@ import pytest
 import torch
 import yaml
 
+from fedbrew.clients.batched_update import plan_round
 from fedbrew.core import batched_executor
 from fedbrew.core.batched_executor import BatchedExecutor
 from fedbrew.core.config import load_config, validate_config
@@ -253,7 +254,8 @@ class OneChunkAtATimeTest(ExecutorRuns):
 
         template = components.task.build_model(components.clients["client_0"].model_config)
         plan = components.clients["client_0"].batched_plan(requests[0], template)
-        per_client = _client_cost(components, template, plan)
+        train, _ = plan_round([plan], 1)
+        per_client = _client_cost(components, template, plan, train)
         with mock.patch.object(StateStack, "__init__", recording):
             results = BatchedExecutor(chunk_bytes=per_client * chunk_clients).fit(
                 components.clients, requests, _Observer()
@@ -273,20 +275,21 @@ class OneChunkAtATimeTest(ExecutorRuns):
         components = _components(example_config("fed-lasso"), self.root)
         template = components.task.build_model(components.clients["client_0"].model_config)
         plan = components.clients["client_0"].batched_plan(_requests(components)[0], template)
-        budget = _client_cost(components, template, plan) * 3
+        train, _ = plan_round([plan], 1)
+        budget = _client_cost(components, template, plan, train) * 3
         self.assertAgree(*self.both(example_config("fed-lasso"), executor_chunk_bytes=budget))
 
 
-def _client_cost(components: Any, template: Any, plan: Any) -> int:
+def _client_cost(components: Any, template: Any, plan: Any, train: Any) -> int:
     """One client's estimate, as ``BatchedExecutor._chunks`` makes it."""
 
     parameter_bytes = sum(p.numel() * p.element_size() for p in template.parameters())
     row_bytes = sum(
         t[:1].numel() * t.element_size() for t in components.task.split_rows(plan.train_data)
     )
-    longest = max(len(b) for update in plan.updates for b in update)
+    longest = int(train.lengths[plan.slot].max())
     slots = batched_executor._WORKING_SLOTS + plan.program.optimizer.state_slots
-    return parameter_bytes * slots + row_bytes * (plan.eval_count + 2 * longest)
+    return parameter_bytes * slots + row_bytes * (plan.eval_rows + 2 * longest)
 
 
 if __name__ == "__main__":

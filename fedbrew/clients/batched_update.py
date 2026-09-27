@@ -30,14 +30,17 @@ batchable one runs sequentially.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 import torch
 from torch import Tensor
 
+from fedbrew.clients.batch_orders import LocalLoop, RoundOrders, plan_orders
 from fedbrew.clients.local_update_modes import FULL_GRADIENT_UPDATE_MODE, _next_batch
+from fedbrew.core.seeding import dataloader_seeds
+from fedbrew.tasks.base import LoaderOrder
 
 #: How the gradient of one applied update is formed.
 #: ``batch``: one batch's. ``frozen``: the pass's batch gradients at one
@@ -83,6 +86,7 @@ class LocalProgram:
     combined gradient once under the other two (``_clip_accumulated_update``).
     ``proximal_mu`` adds FedProx's ``mu (w - w0)`` to the gradient, and
     ``scaffold`` SCAFFOLD's ``c - c_i``, before the optimizer step.
+    ``weighting`` is ``frozen_gradient_weighting`` under ``combine: frozen``.
     """
 
     optimizer: OptimizerSpec
@@ -90,40 +94,48 @@ class LocalProgram:
     max_grad_norm: float | None = None
     proximal_mu: float = 0.0
     scaffold: bool = False
+    weighting: str | None = None
 
 
 @dataclass(slots=True)
 class ClientBatchPlan:
     """One client's local update of one round, as the batched executor runs it.
 
-    ``updates`` holds, per applied update, the batches it consumes as row
-    indices into ``task.split_rows(train_data)``; ``weights`` the combine
-    weight of each (empty for ``combine: batch``). ``eval_batches`` are the
-    post-fit pass's batches, taken whether or not the pass runs this round:
-    their row counts are the example count the pass reports.
+    What the rule declares: its program, the loop its update takes over its
+    loader (``loop``), what its training and post-fit loaders yield
+    (``train_order``, ``eval_order``; seeded when the round is planned), and
+    how it refuses a split that yields no batch (``refuse``). A task that
+    declares no order has its loaders replayed instead (``replay``: each
+    update's batches and the post-fit pass's, as row indices).
+
+    What the round's planning fills in (:func:`plan_round`): ``slot``, this
+    client's row in the round's orders; ``structure``, how many batches each
+    of its applied updates consumes; ``eval_rows``, the rows its post-fit
+    pass takes, which are the example count that pass reports.
     """
 
     program: LocalProgram
     train_data: Any
-    updates: list[list[Tensor]]
-    weights: list[list[float]]
-    eval_batches: list[Tensor]
+    loop: LocalLoop
+    train_order: LoaderOrder | None
+    eval_order: LoaderOrder | None
     evaluate: bool
     start: Mapping[str, Tensor]
+    client_id: str
+    seed: int | None
+    refuse: Callable[[], Exception]
+    replay: Callable[[], tuple[list[list[Tensor]], list[Tensor]]] | None = None
     client_control: Mapping[str, Tensor] | None = None
     server_control: Mapping[str, Tensor] | None = None
+    slot: int = -1
+    structure: tuple[int, ...] = ()
+    eval_rows: int = 0
 
     @property
-    def structure(self) -> tuple[Any, ...]:
+    def bucket(self) -> tuple[Any, ...]:
         """What two clients must share to be stepped together."""
 
-        return (self.program, tuple(len(update) for update in self.updates))
-
-    @property
-    def eval_count(self) -> int:
-        """The example count the post-fit pass takes: its batches' rows."""
-
-        return int(sum(float(len(batch)) for batch in self.eval_batches))
+        return (self.program, self.structure, self.evaluate)
 
 
 @dataclass(slots=True)
@@ -150,21 +162,28 @@ class ClientEvalPlan:
     """One client's evaluation of one round, as the batched evaluator runs it.
 
     Per requested split, in order: the split's data, or None for a ``val``
-    split the client does not have (reported as zero examples), and its
-    evaluation loader's batches as row indices into ``task.split_rows``.
-    ``refusal`` is what the client's own ``evaluate`` would raise, raised
-    when its result is built.
+    split the client does not have (reported as zero examples); what its
+    evaluation loader yields (``orders``, seeded when the round is planned),
+    or, for a task that declares no order, the loader's batches as row
+    indices (``batches``). ``refusal`` is what the client's own ``evaluate``
+    would raise, raised when its result is built.
     """
 
     splits: list[str]
-    data: list[Any]
-    batches: list[list[Tensor]]
+    client_id: str
+    seed: int | None
+    data: list[Any] = field(default_factory=list)
+    orders: list[LoaderOrder | None] = field(default_factory=list)
+    batches: list[list[Tensor] | None] = field(default_factory=list)
     refusal: Exception | None = None
 
     def row_count(self, position: int) -> int:
-        """The rows split ``position``'s batches hold."""
+        """The rows split ``position`` holds."""
 
-        return sum(len(batch) for batch in self.batches[position])
+        order = self.orders[position]
+        if order is not None:
+            return order.rows
+        return sum(len(batch) for batch in self.batches[position] or [])
 
 
 def data_versions(data: Any) -> tuple[int, ...]:
@@ -253,34 +272,152 @@ def own_loop_updates(
     return updates
 
 
-def combine_weights(
-    updates: Sequence[Sequence[Tensor]],
-    combine: str,
-    frozen_weighting: str | None = None,
-) -> list[list[float]]:
-    """Each batch's weight in its update's combined gradient.
+def no_training_batches(client_id: str) -> ValueError:
+    """The refusal ``sgd_mode_updates`` and a full-gradient pass raise for an empty loader."""
 
-    ``full``: the batch's loss denominator, its row count for a task whose loss
-    averages over examples (``_whole_split_gradient``); ``frozen``:
-    ``_gradient_weight`` under ``frozen_gradient_weighting``. The same Python
-    arithmetic in the same order, so the same floats.
+    return _no_training_batches(client_id)
+
+
+def update_weights(lengths: Tensor, structure: tuple[int, ...], program: LocalProgram) -> Tensor:
+    """Each batch's weight in its update's combined gradient, for clients sharing ``structure``.
+
+    ``lengths[c, t]`` is client ``c``'s ``t``-th batch's rows. ``full``: the
+    batch's loss denominator, its row count for a task whose loss averages over
+    examples (``_whole_split_gradient``); ``frozen``: ``_gradient_weight``
+    under ``frozen_gradient_weighting``. The same IEEE float64 arithmetic as
+    the Python floats there: sums of whole numbers, and one division.
     """
 
-    if combine == "batch":
-        return [[] for _ in updates]
-    weights: list[list[float]] = []
-    for batches in updates:
-        rows = [float(len(batch)) for batch in batches]
-        if combine == "full":
-            weights.append(rows)
-        elif frozen_weighting == "uniform":
-            weights.append([1.0 / float(len(batches))] * len(batches))
-        elif frozen_weighting == "sum":
-            weights.append([1.0] * len(batches))
+    rows = lengths.to(torch.float64)
+    weights = torch.zeros_like(rows)
+    if program.combine == "batch":
+        return weights
+    start = 0
+    for count in structure:
+        part = rows[:, start : start + count]
+        if program.combine == "full":
+            weights[:, start : start + count] = part
+        elif program.weighting == "uniform":
+            weights[:, start : start + count] = 1.0 / float(count)
+        elif program.weighting == "sum":
+            weights[:, start : start + count] = 1.0
         else:
-            epoch_examples = max(1.0, sum(rows))
-            weights.append([count / epoch_examples for count in rows])
+            epoch_examples = torch.clamp(part.sum(dim=1, keepdim=True), min=1.0)
+            weights[:, start : start + count] = part / epoch_examples
+        start += count
     return weights
+
+
+def plan_round(plans: Sequence[ClientBatchPlan], round_id: int) -> tuple[RoundOrders, RoundOrders]:
+    """Every client's training and post-fit batches for the round, planned together.
+
+    Fills each plan's ``slot``, ``structure`` and ``eval_rows``, and raises the
+    refusal of the first client, in request order, whose loader yields no
+    batch -- before any client runs, in its rule's words.
+    """
+
+    for slot, plan in enumerate(plans):
+        plan.slot = slot
+    train = _phase_orders(
+        plans,
+        round_id,
+        "fit",
+        [plan.train_order for plan in plans],
+        [plan.loop for plan in plans],
+        lambda replayed: replayed[0],
+    )
+    steps = train.steps.tolist()
+    for plan in plans:
+        if not steps[plan.slot]:
+            raise plan.refuse()
+        plan.structure = train.structure[plan.slot]
+    evaluation = _phase_orders(
+        plans,
+        round_id,
+        "eval",
+        [plan.eval_order for plan in plans],
+        [LocalLoop(epochs=1)] * len(plans),
+        lambda replayed: [[batch] for batch in replayed[1]],
+    )
+    rows = evaluation.lengths.sum(dim=1).tolist()
+    for plan in plans:
+        plan.eval_rows = rows[plan.slot]
+    return train, evaluation
+
+
+def _phase_orders(
+    plans: Sequence[ClientBatchPlan],
+    round_id: int,
+    phase: str,
+    orders: Sequence[LoaderOrder | None],
+    loops: Sequence[LocalLoop],
+    pick: Callable[[tuple[list[list[Tensor]], list[Tensor]]], list[list[Tensor]]],
+) -> RoundOrders:
+    """One phase's orders: the declared ones seeded in bulk and computed, the rest replayed."""
+
+    owners = [(plan.client_id, plan.seed) for plan in plans]
+    return round_orders(
+        orders,
+        loader_seeds(orders, owners, round_id, phase),
+        loops,
+        lambda index: pick(plans[index].replay()),  # type: ignore[misc]
+    )
+
+
+def loader_seeds(
+    orders: Sequence[LoaderOrder | None],
+    owners: Sequence[tuple[str, int | None]],
+    round_id: int,
+    phase: str,
+) -> list[int | None]:
+    """The seed of each shuffled order's loader, derived for every client in one pass.
+
+    ``owners[k]`` is the client whose loader ``orders[k]`` is, and its run
+    seed; the seed is ``dataloader_seed(seed, round_id, client, phase)``, as
+    the client's own loader configuration carries it. None where no seed is
+    drawn from.
+    """
+
+    seeds: list[int | None] = [None] * len(orders)
+    shuffled = [index for index, order in enumerate(orders) if order is not None and order.shuffle]
+    for base in {owners[index][1] for index in shuffled} - {None}:
+        group = [index for index in shuffled if owners[index][1] == base]
+        derived = dataloader_seeds(
+            int(base),  # type: ignore[arg-type]
+            int(round_id),
+            [owners[index][0] for index in group],
+            phase,
+        )
+        for index, seed in zip(group, derived, strict=True):
+            seeds[index] = seed
+    return seeds
+
+
+def round_orders(
+    orders: Sequence[LoaderOrder | None],
+    seeds: Sequence[int | None],
+    loops: Sequence[LocalLoop],
+    replay: Callable[[int], list[list[Tensor]]],
+) -> RoundOrders:
+    """The declared orders computed together, and each undeclared one replayed (``replay``)."""
+
+    declared = [index for index, order in enumerate(orders) if order is not None]
+    if len(declared) == len(orders):
+        return plan_orders(orders, loops, seeds)  # type: ignore[arg-type]
+    replayed = [index for index, order in enumerate(orders) if order is None]
+    parts, groups = [], []
+    if declared:
+        parts.append(
+            plan_orders(
+                [orders[index] for index in declared],  # type: ignore[misc]
+                [loops[index] for index in declared],
+                [seeds[index] for index in declared],
+            )
+        )
+        groups.append(declared)
+    parts.append(RoundOrders.from_updates([replay(index) for index in replayed]))
+    groups.append(replayed)
+    return RoundOrders.merge(parts, groups, len(orders))
 
 
 # ---------------------------------------------------------------------------

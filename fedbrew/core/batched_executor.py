@@ -8,8 +8,10 @@ each step one ``torch.func.vmap(torch.func.grad(...))`` of the task's
 (``fedbrew/clients/batched_update.py``) over the same dimension. It computes
 what the sequential executor computes, per client:
 
-- the same batches, in the same order: each client's rule replays its own
-  loader iteration to name them (``batched_plan``);
+- the same batches, in the same order: each client's rule declares the loop
+  its update takes (``batched_plan``), and every client's batches are
+  computed together from what the task declares its loaders yield
+  (``plan_round``, ``fedbrew/clients/batch_orders.py``);
 - the same per-client records, weights and state: each client's rule builds
   its FitResult from its share of the stack (``batched_result``), with the
   code its own ``fit`` ends with;
@@ -18,10 +20,12 @@ what the sequential executor computes, per client:
   (``tests/test_batched_executor_tolerance.py``).
 
 The data. Each client's train split is held as its rows
-(``task.split_rows``); the clients of a bucket are concatenated, and a step
-gathers each client's batch from that by index. A client whose batch at some
-step is shorter than the others' is padded with one of its own rows and
-masked, and the task's functions take the mean over its real rows.
+(``task.split_rows``); the clients of a bucket are stacked, padded to the
+longest, and a step gathers every client's batch from that in one
+``index_select`` (``_Steps``), or slices it where the order is unshuffled. A
+client whose batch at some step is shorter than the others' is padded with its
+own rows and masked, and the task's functions take the mean over its real
+rows.
 
 Buckets and chunks. Clients whose updates have the same shape -- the same
 number of updates, each over the same number of batches -- are stepped
@@ -48,6 +52,7 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 
+from fedbrew.clients.batch_orders import RoundOrders
 from fedbrew.clients.batched_update import (
     ClientBatchFit,
     ClientBatchPlan,
@@ -56,6 +61,8 @@ from fedbrew.clients.batched_update import (
     data_versions,
     divide,
     initial_optimizer_state,
+    plan_round,
+    update_weights,
 )
 from fedbrew.clients.torch_sgd_client import trainable_parameter_count
 from fedbrew.core.execution import ClientPool, FitObserver
@@ -124,12 +131,10 @@ class BatchedExecutor:
         ]
         task = members[0].task
         template = task.build_model(members[0].model_config)
-        plans: list[ClientBatchPlan] = [
-            member.batched_plan(request, template)
-            for member, request in zip(members, requests, strict=True)
-        ]
+        plans = _plans(members, requests, template)
+        train, evaluation = plan_round(plans, requests[0].round_id)
         done, total = 0, len(requests)
-        chunks = list(self._chunks(task, template, plans))
+        chunks = list(self._chunks(task, template, plans, train))
         # Kept only while a round is one chunk, so what is held between rounds
         # is what one chunk holds anyway.
         kept = self._rows if len(chunks) == 1 else None
@@ -139,7 +144,9 @@ class BatchedExecutor:
                 self.record["largest_chunk_clients"], stop - start
             )
             chunk_started = time.perf_counter()
-            fits = _train_chunk(task, template, plans[start:stop], kept, self._rows)
+            fits = _train_chunk(
+                task, template, plans[start:stop], (train, evaluation), kept, self._rows
+            )
             if kept is None:
                 self._rows = {}
             share = (time.perf_counter() - chunk_started) / (stop - start)
@@ -157,7 +164,7 @@ class BatchedExecutor:
                 result = None  # type: ignore[assignment]
 
     def _chunks(
-        self, task: Any, template: nn.Module, plans: list[ClientBatchPlan]
+        self, task: Any, template: nn.Module, plans: list[ClientBatchPlan], train: RoundOrders
     ) -> Iterator[tuple[int, int]]:
         """Consecutive runs of clients whose estimated memory fits ``chunk_bytes``."""
 
@@ -166,11 +173,13 @@ class BatchedExecutor:
             tensor[:1].numel() * tensor.element_size()
             for tensor in task.split_rows(plans[0].train_data)
         )
+        longest = (
+            train.lengths.amax(dim=1) if train.lengths.shape[1] else torch.zeros(len(plans))
+        ).tolist()
         start, used = 0, 0
         for index, plan in enumerate(plans):
-            longest = max((len(b) for update in plan.updates for b in update), default=0)
             slots = _WORKING_SLOTS + plan.program.optimizer.state_slots + int(plan.program.scaffold)
-            cost = parameter_bytes * slots + row_bytes * (plan.eval_count + 2 * longest)
+            cost = parameter_bytes * slots + row_bytes * (plan.eval_rows + 2 * int(longest[index]))
             if index > start and used + cost > self.chunk_bytes:
                 yield start, index
                 start, used = index, 0
@@ -178,18 +187,40 @@ class BatchedExecutor:
         yield start, len(plans)
 
 
+def _plans(
+    members: list[Any], requests: list[FitRequest], template: nn.Module
+) -> list[ClientBatchPlan]:
+    """Every client's plan, the broadcast checked once per rule and payload.
+
+    Every client of a rule checks the same payload against the same model the
+    same way (``batched_start``), so the first client's check is each one's.
+    """
+
+    starts: dict[tuple[Any, int], tuple[Any, Mapping[str, Any]]] = {}
+    plans = []
+    for member, request in zip(members, requests, strict=True):
+        key = (type(member).batched_start, id(request.payload))
+        held = starts.get(key)
+        if held is None or held[0] is not request.payload:
+            held = starts[key] = (request.payload, member.batched_start(request, template))
+        plans.append(member.batched_plan(request, template, start=held[1]))
+    return plans
+
+
 def _train_chunk(
     task: Any,
     template: nn.Module,
     plans: Sequence[ClientBatchPlan],
+    orders: tuple[RoundOrders, RoundOrders],
     kept: Mapping[tuple[int, ...], _Rows] | None = None,
     keep: dict[tuple[int, ...], _Rows] | None = None,
 ) -> list[ClientBatchFit]:
     """Train one chunk's clients, bucket by bucket, and return each one's share.
 
-    ``kept`` holds stacked rows from the last round, reused for a bucket of
-    the same clients whose data is the same objects, unedited; ``keep``
-    receives this chunk's.
+    ``orders`` are the round's training and post-fit batches
+    (``plan_round``); ``kept`` holds stacked rows from the last round, reused
+    for a bucket of the same clients whose data is the same objects, unedited;
+    ``keep`` receives this chunk's.
     """
 
     state_keys = list(task.get_federated_model_state(template))
@@ -205,7 +236,7 @@ def _train_chunk(
 
     buckets: dict[tuple[Any, ...], list[int]] = {}
     for index, plan in enumerate(plans):
-        buckets.setdefault((plan.structure, plan.evaluate), []).append(index)
+        buckets.setdefault(plan.bucket, []).append(index)
 
     fits: list[ClientBatchFit | None] = [None] * len(plans)
     for members in buckets.values():
@@ -216,7 +247,7 @@ def _train_chunk(
             rows = _Rows(task, sources)
         if keep is not None:
             keep[key] = rows
-        bucket = _Bucket(task, template, buffers, [plans[i] for i in members], rows)
+        bucket = _Bucket(task, template, buffers, [plans[i] for i in members], rows, orders)
         stack, training_outputs, eval_outputs = bucket.run()
         states = StateStack({key: stack[key] for key in state_keys})
         for position, index in enumerate(members):
@@ -224,7 +255,7 @@ def _train_chunk(
                 model_state=states.row(position),
                 training_outputs=training_outputs[position],
                 eval_outputs=None if eval_outputs is None else eval_outputs[position],
-                optimizer_steps=len(plans[index].updates),
+                optimizer_steps=len(plans[index].structure),
                 model_state_metadata=dict(metadata),
                 trainable_parameters=trainable,
                 start=plans[index].start,
@@ -266,36 +297,89 @@ class _Rows:
             for held, source, version in zip(self.sources, sources, self.versions, strict=True)
         )
 
-    def gather(
-        self, indices: Sequence[Tensor], mask_dtype: torch.dtype
-    ) -> tuple[tuple[Tensor, ...], Tensor | None]:
-        """Each split's batch, padded to the longest with its own first row, and the mask.
 
-        A batch that is every split's whole length in order is the stacked
-        rows themselves, and nothing is copied.
-        """
+class _Steps:
+    """A group's batches, one step at a time, gathered from its rows.
 
-        if not self.stacked:
-            index = indices[0].to(self.device)
-            return tuple(tensor.index_select(0, index) for tensor in self.tensors), None
-        lengths = [int(len(index)) for index in indices]
-        longest = max(lengths)
-        if longest == self.longest and all(
-            length == whole and bool((index == torch.arange(whole)).all())
-            for index, length, whole in zip(indices, lengths, self.lengths, strict=True)
-        ):
-            batch = self.tensors
+    ``orders`` are the round's (``RoundOrders``) and ``slots`` the group's rows
+    of them, in the order of ``rows``' splits. A batch shorter than the step's
+    widest is padded -- from the split's own rows, or its zero padding -- and
+    masked. Where every order is unshuffled and the step starts at the same
+    row for all, the batch is a slice of the stacked rows, not a copy.
+    """
+
+    def __init__(
+        self, rows: _Rows, orders: RoundOrders, slots: Sequence[int], mask_dtype: torch.dtype
+    ) -> None:
+        where = torch.tensor(list(slots), dtype=torch.long)
+        self.rows = rows
+        self.dtype = mask_dtype
+        self.size = len(slots)
+        lengths = orders.lengths[where]
+        starts = orders.starts[where]
+        self._lengths = lengths
+        self._indices = orders.indices[where]
+        # What each step needs to know on the host, read off once.
+        if lengths.shape[1]:
+            widths = lengths.amax(dim=0)
+            self.widths = widths.tolist()
+            self.full = (lengths == widths.unsqueeze(0)).all(dim=0).tolist()
+            self.aligned = (starts == starts[:1]).all(dim=0).tolist()
         else:
-            padded = torch.nn.utils.rnn.pad_sequence(list(indices), batch_first=True)
-            padded = padded.to(self.device)
-            splits = torch.arange(len(indices), device=self.device).unsqueeze(1)
-            batch = tuple(tensor[splits, padded] for tensor in self.tensors)
-        if min(lengths) == longest:
+            self.widths, self.full, self.aligned = [], [], []
+        self.first_starts = starts[0].tolist() if len(starts) else []
+        self.first_lengths = lengths[0].tolist() if len(lengths) else []
+        self.sliced = bool(orders.contiguous[where].all())
+        self._on_device: tuple[Tensor, Tensor] | None = None
+
+    def _device(self) -> tuple[Tensor, Tensor]:
+        """The indices, as rows of the flattened stack, and the lengths, on the rows' device."""
+
+        if self._on_device is None:
+            device = self.rows.device
+            # Split k's row r is row k * longest + r of the stack seen as one
+            # tensor, so a step's batches are one index_select, which is
+            # several times faster than indexing by (split, row) pairs.
+            offsets = torch.arange(self.size, dtype=torch.long) * self.rows.longest
+            flat = self._indices + offsets.view(-1, 1, 1)
+            self._on_device = (flat.to(device), self._lengths.to(device))
+        return self._on_device
+
+    def batch(self, step: int) -> tuple[tuple[Tensor, ...], Tensor | None]:
+        """Step ``step``'s batch of every split, and the mask of its real rows."""
+
+        rows = self.rows
+        width = self.widths[step]
+        if not rows.stacked:
+            length = self.first_lengths[step]
+            if self.sliced:
+                first = self.first_starts[step]
+                return tuple(tensor[first : first + length] for tensor in rows.tensors), None
+            index = self._indices[0, step, :length].to(rows.device)
+            return tuple(tensor.index_select(0, index) for tensor in rows.tensors), None
+        if self.sliced and self.aligned[step]:
+            first = self.first_starts[step]
+            batch = tuple(tensor[:, first : first + width] for tensor in rows.tensors)
+        else:
+            indices, _ = self._device()
+            index = indices[:, step, :width].reshape(-1)
+            batch = tuple(
+                tensor.reshape(-1, *tensor.shape[2:])
+                .index_select(0, index)
+                .reshape(self.size, width, *tensor.shape[2:])
+                for tensor in rows.tensors
+            )
+        if self.full[step]:
             return batch, None
-        mask = (torch.arange(longest).unsqueeze(0) < torch.tensor(lengths).unsqueeze(1)).to(
-            device=self.device, dtype=mask_dtype
-        )
-        return batch, mask
+        _, lengths = self._device()
+        positions = torch.arange(width, device=rows.device).unsqueeze(0)
+        return batch, (positions < lengths[:, step].unsqueeze(1)).to(self.dtype)
+
+    @property
+    def lengths(self) -> Tensor:
+        """Each split's batch lengths, ``(splits, steps)``, on the CPU."""
+
+        return self._lengths
 
 
 def measure_splits(
@@ -304,42 +388,34 @@ def measure_splits(
     buffers: Mapping[str, Tensor],
     params: Mapping[str, Tensor],
     params_dim: int | None,
-    rows: _Rows,
-    batches: Sequence[Sequence[Tensor]],
-) -> tuple[list[dict[str, Tensor]], list[int]]:
+    steps: _Steps,
+    counts: Sequence[int],
+) -> list[dict[str, Tensor]]:
     """``functional_eval`` over each split's batches, all splits together.
 
-    ``batches[k]`` are split ``k``'s batches as row indices into ``rows``;
-    ``params`` are every split's own (stacked, ``params_dim`` 0) or one model
-    all share (``params_dim`` None). Batch ``position`` of every split is
-    measured in one vmapped call, a split with fewer batches padded with an
-    empty one whose outputs are never read; with one split nothing is vmapped,
-    and the call is ``eval_step``'s arithmetic. Returns the outputs per
-    position, each a tensor per key over the splits, and each split's count.
+    ``steps`` gathers each split's batches from its rows; ``counts[k]`` is how
+    many split ``k`` has. ``params`` are every split's own (stacked,
+    ``params_dim`` 0) or one model all share (``params_dim`` None). Batch
+    ``position`` of every split is measured in one vmapped call, a split with
+    fewer batches padded with an empty one whose outputs are never read; with
+    one split nothing is vmapped, and the call is ``eval_step``'s arithmetic.
+    Returns the outputs per position, each a tensor per key over the splits.
     """
-
-    dtype = next(iter(params.values())).dtype
 
     def measure(params: Any, batch: Any, mask: Any) -> Any:
         return task.functional_eval(model, params, buffers, batch, mask)
 
-    counts = [len(split_batches) for split_batches in batches]
-    empty = torch.zeros(0, dtype=torch.long)
     outputs: list[dict[str, Tensor]] = []
     model.eval()
     with torch.no_grad():
         for position in range(max(counts, default=0)):
-            indices = [
-                split_batches[position] if position < count else empty
-                for split_batches, count in zip(batches, counts, strict=True)
-            ]
-            batch, mask = rows.gather(indices, dtype)
-            if not rows.stacked:
+            batch, mask = steps.batch(position)
+            if not steps.rows.stacked:
                 outputs.append(measure(params, batch, mask))
                 continue
             dims = (params_dim, 0, None if mask is None else 0)
             outputs.append(torch.func.vmap(measure, in_dims=dims)(params, batch, mask))
-    return outputs, counts
+    return outputs
 
 
 def per_split_floats(
@@ -375,18 +451,27 @@ class _Bucket:
         buffers: Mapping[str, Tensor],
         plans: list[ClientBatchPlan],
         rows: _Rows,
+        orders: tuple[RoundOrders, RoundOrders],
     ) -> None:
         self.task = task
         self.model = model
         self.buffers = buffers
         self.plans = plans
         self.program = plans[0].program
+        self.structure = plans[0].structure
         self.size = len(plans)
         self.stacked = self.size > 1
         first = next(model.parameters())
         self.device, self.dtype = first.device, first.dtype
         self.parameters = dict(model.named_parameters())
         self.rows = rows
+        slots = [plan.slot for plan in plans]
+        train, evaluation = orders
+        self.steps = _Steps(rows, train, slots, self.dtype)
+        self.eval_steps = _Steps(rows, evaluation, slots, self.dtype)
+        self.eval_counts = evaluation.steps[torch.tensor(slots, dtype=torch.long)].tolist()
+        self.weights = update_weights(self.steps.lengths, self.structure, self.program)
+        self._weights_on_device: Tensor | None = None
 
     # -- the tensors every client starts from --------------------------------
 
@@ -431,10 +516,10 @@ class _Bucket:
             return start[0]
         return {name: torch.stack([s[name] for s in start]) for name in self.parameters}
 
-    def _gather(self, indices: Sequence[Tensor]) -> tuple[tuple[Tensor, ...], Tensor | None]:
-        """Each client's batch, padded to the longest with its own first row, and the mask."""
+    def _gather(self, step: int) -> tuple[tuple[Tensor, ...], Tensor | None]:
+        """Each client's batch at ``step``, and the mask of its real rows."""
 
-        return self.rows.gather(indices, self.dtype)
+        return self.steps.batch(step)
 
     def _call(self, function: Callable[..., Any], arguments: list[tuple[Any, int | None]]) -> Any:
         """``function`` on each client's arguments: vmapped over the stack, or called as is."""
@@ -445,22 +530,22 @@ class _Bucket:
         dims = tuple(dim if value is not None else None for value, dim in arguments)
         return torch.func.vmap(function, in_dims=dims)(*values)
 
-    def _weights(self, update: int, batch: int) -> tuple[Any, int | None]:
-        values = [plan.weights[update][batch] for plan in self.plans]
-        if not self.stacked:
-            return values[0], None
-        return torch.tensor(values, dtype=torch.float64, device=self.device), 0
+    def _weights(self, step: int) -> tuple[Any, int | None]:
+        """Each client's weight of its ``step``-th batch in its update's combination."""
 
-    def _denominators(self, update: int) -> tuple[Any, int | None]:
-        values = []
-        for plan in self.plans:
-            denominator = 0.0
-            for weight in plan.weights[update]:
-                denominator += weight
-            values.append(denominator)
         if not self.stacked:
-            return values[0], None
-        return torch.tensor(values, dtype=torch.float64, device=self.device), 0
+            return float(self.weights[0, step]), None
+        if self._weights_on_device is None:
+            self._weights_on_device = self.weights.to(self.device)
+        return self._weights_on_device[:, step], 0
+
+    def _denominators(self, first: int, count: int) -> tuple[Any, int | None]:
+        """Each client's sum of the weights of the batches ``first`` on of one update."""
+
+        totals = self.weights[:, first : first + count].sum(dim=1)
+        if not self.stacked:
+            return float(totals[0]), None
+        return totals.to(self.device), 0
 
     # -- the round ------------------------------------------------------------
 
@@ -509,10 +594,11 @@ class _Bucket:
         outputs: list[dict[str, Tensor]] = []
 
         model.train()
-        updates = list(zip(*(plan.updates for plan in self.plans), strict=True))
-        for number, batches in enumerate(updates, start=1):
+        step = 0
+        for number, count in enumerate(self.structure, start=1):
             if program.combine == "batch":
-                batch, mask = self._gather([client_batches[0] for client_batches in batches])
+                batch, mask = self._gather(step)
+                step += 1
                 params, state, step_outputs = self._call(
                     partial(batch_update, step=number),
                     [
@@ -526,8 +612,9 @@ class _Bucket:
                 outputs.append(step_outputs)
                 continue
             total: Any = None
-            for position in range(len(batches[0])):
-                batch, mask = self._gather([client_batches[position] for client_batches in batches])
+            first = step
+            for _ in range(count):
+                batch, mask = self._gather(step)
                 total, step_outputs = self._call(
                     gradient_sum,
                     [
@@ -535,24 +622,23 @@ class _Bucket:
                         (params, client_dim),
                         (batch, client_dim),
                         (mask, client_dim),
-                        self._weights(number - 1, position),
+                        self._weights(step),
                     ],
                 )
                 outputs.append(step_outputs)
+                step += 1
             params, state = self._call(
                 partial(combined_update, step=number),
                 [
                     (params, client_dim),
                     (state, client_dim),
                     (total, client_dim),
-                    self._denominators(number - 1),
+                    self._denominators(first, count),
                     *corrections,
                 ],
             )
 
-        training_outputs = self._per_client(
-            outputs, [sum(len(update) for update in plan.updates) for plan in self.plans]
-        )
+        training_outputs = self._per_client(outputs, [step] * self.size)
         eval_outputs = self._evaluate(params) if self.plans[0].evaluate else None
         if not self.stacked:
             params = {name: value.unsqueeze(0) for name, value in params.items()}
@@ -561,16 +647,16 @@ class _Bucket:
     def _evaluate(self, params: dict[str, Tensor]) -> list[list[dict[str, float]]]:
         """The post-fit pass: ``functional_eval`` over each client's eval batches."""
 
-        outputs, counts = measure_splits(
+        outputs = measure_splits(
             self.task,
             self.model,
             self.buffers,
             params,
             0 if self.stacked else None,
-            self.rows,
-            [plan.eval_batches for plan in self.plans],
+            self.eval_steps,
+            self.eval_counts,
         )
-        return per_split_floats(outputs, counts)
+        return per_split_floats(outputs, self.eval_counts)
 
     def _per_client(
         self, outputs: list[dict[str, Tensor]], counts: Sequence[int]

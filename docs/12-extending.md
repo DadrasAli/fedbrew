@@ -535,7 +535,14 @@ is the sequential one bit for bit. They must be pure -- no host round trip,
 no random draw, no in-place edit -- for `torch.func.vmap` to run them over a
 stack, and take a `mask` for padded rows (`row_mean`, `row_count`). A custom
 `autograd.Function` needs `setup_context` and `generate_vmap_rule = True`;
-drift-quad's shows the form.
+drift-quad's shows the form. A fifth, optional: `loader_order(data, config)`
+declares what `build_dataloader(data, config)` yields as a `LoaderOrder` --
+its batching, and whether its generator draws a `DataLoader`'s order per
+epoch or one permutation when it is built -- and then every client's batches
+for a round are computed together instead of each loader being replayed
+through `row_batches`. `listed_loader_order` is the linear examples'
+declaration; add your task to `tests/test_batch_orders.py`, which iterates
+your loader and compares.
 
 Override `train_loss_denominator(batch, output)` if your training loss is not
 a mean over the batch's examples. It returns the count `train_step`'s loss
