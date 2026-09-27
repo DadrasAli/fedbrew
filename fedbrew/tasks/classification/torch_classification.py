@@ -263,7 +263,8 @@ class TorchClassificationTask(TaskAdapter):
             scaler.step(optimizer)
             scaler.update()
         else:
-            loss, _ = self.functional_loss(model, None, None, (features, targets))
+            # functional_loss's loss, without the outputs it also builds.
+            loss = self._cross_entropy(self._logits(model, None, None, features), targets)
             loss.backward()
             optimizer.step()
         return {"loss": float(loss.detach())}
@@ -277,10 +278,15 @@ class TorchClassificationTask(TaskAdapter):
             if self.use_amp:
                 with torch.autocast("cuda", dtype=torch.float16):
                     outputs = model(features)
-                measured = self._measured(outputs.float(), targets)
+                outputs = outputs.float()
             else:
-                measured = self.functional_eval(model, None, None, (features, targets))
-        return {name: float(value) for name, value in measured.items()}
+                outputs = self._logits(model, None, None, features)
+            loss, correct = self._scored(outputs, targets)
+        return {
+            "loss": float(loss),
+            "correct": float(correct),
+            "total": float(int(targets.numel())),
+        }
 
     # -- the batched executor (fedbrew.tasks.base.BatchableTask) --------------
 
@@ -364,10 +370,17 @@ class TorchClassificationTask(TaskAdapter):
     ) -> dict[str, Tensor]:
         """What eval_step reports for a batch's logits: loss, correct and total."""
 
+        loss, correct = self._scored(logits, targets, mask)
+        return {"loss": loss, "correct": correct, "total": row_count(targets, mask)}
+
+    def _scored(
+        self, logits: Tensor, targets: Tensor, mask: Tensor | None = None
+    ) -> tuple[Tensor, Tensor]:
+        """A batch's mean loss and its count of correct predictions, over its real rows."""
+
         loss = self._cross_entropy(logits, targets, mask).detach()
         hits = logits.argmax(dim=1) == targets
-        correct = hits.sum() if mask is None else (hits * mask).sum()
-        return {"loss": loss, "correct": correct, "total": row_count(targets, mask)}
+        return loss, hits.sum() if mask is None else (hits * mask).sum()
 
     def evaluation_total(self, batch: Any) -> float | None:
         """eval_step's "total": how many targets the batch holds."""
