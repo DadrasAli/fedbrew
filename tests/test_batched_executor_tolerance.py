@@ -36,7 +36,7 @@ import math
 import tempfile
 import unittest
 from collections.abc import Callable, Iterator
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -150,17 +150,24 @@ class ExecutorRuns(unittest.TestCase):
             batched = self.run_config(config, "batched", **performance)
         return batched, sequential
 
-    def assertAgree(self, batched: Path, sequential: Path, *, exact: bool = False) -> None:
-        """Every non-timing cell and every checkpoint agree, to TOLERANCE or bit for bit."""
+    def assertAgree(
+        self,
+        batched: Path,
+        sequential: Path,
+        *,
+        exact: bool = False,
+        tolerance: float = TOLERANCE,
+    ) -> None:
+        """Every non-timing cell and every checkpoint agree, to ``tolerance`` or bit for bit."""
 
         for name in CSVS:
-            self._compare_csv(batched / name, sequential / name, exact)
+            self._compare_csv(batched / name, sequential / name, exact, tolerance)
         checkpoints = sorted((sequential / "checkpoints").glob("round_*.pt"))
         self.assertEqual(len(checkpoints), ROUNDS)
         for path in checkpoints:
-            self._compare_checkpoint(batched / "checkpoints" / path.name, path, exact)
+            self._compare_checkpoint(batched / "checkpoints" / path.name, path, exact, tolerance)
 
-    def _compare_csv(self, batched: Path, sequential: Path, exact: bool) -> None:
+    def _compare_csv(self, batched: Path, sequential: Path, exact: bool, tolerance: float) -> None:
         if not sequential.exists():
             self.assertFalse(batched.exists(), batched.name)
             return
@@ -176,13 +183,16 @@ class ExecutorRuns(unittest.TestCase):
                 where = f"{batched.name} row {number} {column}: {row_b[column]} vs {value_s}"
                 self.assertFalse(exact or column in EXACT_COLUMNS, where)
                 self.assertLessEqual(
-                    _relative(float(row_b[column]), float(value_s)), TOLERANCE, where
+                    _relative(float(row_b[column]), float(value_s)), tolerance, where
                 )
 
-    def _compare_checkpoint(self, batched: Path, sequential: Path, exact: bool) -> None:
+    def _compare_checkpoint(
+        self, batched: Path, sequential: Path, exact: bool, tolerance: float
+    ) -> None:
         loaded_b = torch.load(batched, weights_only=False)
         loaded_s = torch.load(sequential, weights_only=False)
-        pairs = [("model_state", loaded_b["model_state"], loaded_s["model_state"])]
+        model = loaded_s["model_state"]
+        pairs = [("model_state", loaded_b["model_state"], model)]
         for client, state in loaded_s["client_states"].items():
             for key, value in state.items():
                 if isinstance(value, dict):
@@ -196,8 +206,18 @@ class ExecutorRuns(unittest.TestCase):
                     self.assertTrue(torch.equal(tensor_b, tensor_s), label)
                 else:
                     scale = max(float(tensor_s.abs().max()), 1e-300)
+                    if where != "model_state" and key in model:
+                        # A persistent client state is compared at least at its
+                        # model tensor's scale: SCAFFOLD's c_i is (x - y_i) / (K
+                        # lr) plus earlier terms, a difference of two models,
+                        # and it tends to 0 as clients agree -- one bias's c_i
+                        # was 9.7e-17 at round 4 of the CNN run below, all
+                        # rounding -- so its error is the models' (1e-16 of
+                        # their 0.37) and not a fraction of its own size, which
+                        # was 2.4 there (measured 2026-09-27).
+                        scale = max(scale, float(model[key].abs().max()))
                     error = float((tensor_b - tensor_s).abs().max()) / scale
-                    self.assertLessEqual(error, TOLERANCE, label)
+                    self.assertLessEqual(error, tolerance, label)
 
 
 def _rows(path: Path) -> list[dict[str, str]]:
@@ -412,6 +432,231 @@ class EveryRuleTest(ExecutorRuns):
         config = rule_config({"update_rule": "scaffold", "update_mode": "sequential_epoch"})
         config["server"]["participation_rate"] = 0.5
         self.assertAgree(*self.both(config))
+
+
+# ---------------------------------------------------------------------------
+# Stage c: the classification task, MLP and CNN
+# ---------------------------------------------------------------------------
+
+#: The options of the shared engine a rule with its own step refuses.
+ENGINE_OPTIONS = (
+    "momentum",
+    "weight_decay",
+    "nesterov",
+    "learning_rate_schedule",
+    "min_learning_rate",
+)
+
+#: The float32 bound, for the classification task as it ships. float32 rounds
+#: at 6e-8, and the batched products and reductions sum in another order; over
+#: three rounds of the MNIST MLP at 1000 clients the largest difference was
+#: 4.0e-5 relative, in one client's fit_loss, and 1.9e-5 of a tensor's scale
+#: (measured 2026-09-27). The float64 fixture below holds the same code to
+#: TOLERANCE.
+FLOAT32_TOLERANCE = 1e-4
+
+
+def classification_config(**client: Any) -> dict[str, Any]:
+    """Synthetic classification: eight clients of 20 rows, an MLP, every pass every round."""
+
+    from tests.test_reproducibility import _config
+
+    config = _config(Path(_root.name) / "unused", rounds=ROUNDS, checkpoint=True)
+    config["runtime"]["checkpointing"]["keep_last"] = None
+    config["runtime"]["quiet"] = True
+    config["model"]["dropout"] = 0.0
+    config["data"].update(num_clients=8, samples_per_client=20)
+    config["client"].update(batch_size=3, **client)
+    config["client_statistics"] = {"per_client_csv": True}
+    return config
+
+
+def cnn_config(**client: Any) -> dict[str, Any]:
+    """The same federation as one-channel 32x32 images, and the small CNN."""
+
+    config = classification_config(**client)
+    config["data"]["input_dim"] = 32 * 32
+    config["model"] = {"name": "small_cnn", "input_channels": 1, "hidden_dim": 16, "num_classes": 2}
+    return config
+
+
+@contextmanager
+def images() -> Iterator[None]:
+    """Synthetic rows reshaped to (N, 1, 32, 32), for the CNN."""
+
+    from fedbrew.data.synthetic_classification import SyntheticClassificationDataset as Data
+
+    real_client, real_global = Data.get_client_data, Data.get_global_data
+
+    def shaped(split: Any) -> Any:
+        if isinstance(split, dict) and "X" in split:
+            return {**split, "X": split["X"].reshape(-1, 1, 32, 32)}
+        return split
+
+    def client_data(self: Any, client_id: str) -> dict[str, Any]:
+        return {key: shaped(value) for key, value in real_client(self, client_id).items()}
+
+    def global_data(self: Any, split: str | None = "test") -> dict[str, Any]:
+        return shaped(real_global(self, split))
+
+    with (
+        mock.patch.object(Data, "get_client_data", client_data),
+        mock.patch.object(Data, "get_global_data", global_data),
+    ):
+        yield
+
+
+@contextmanager
+def float64_classification() -> Iterator[None]:
+    """The classification task in float64: its rows widened to, and its models built in, it.
+
+    The three places the task fixes float32 -- the resident rows, the
+    extracted batches and the model -- and nothing else, so this is the
+    shipped arithmetic at the precision the tolerance is stated in.
+    """
+
+    from fedbrew.tasks.classification import torch_classification as module
+
+    real_construct = module.TorchClassificationTask._construct_model
+
+    def rows(features: Any, targets: Any, device: Any) -> tuple[Any, Any]:
+        return features.to(device).double(), targets.to(device).long()
+
+    def extract(data: Any) -> tuple[Any, Any]:
+        features, targets = module._raw_tensors(data)
+        return features.double(), targets.long()
+
+    def construct(self: Any, config: Any) -> Any:
+        return real_construct(self, config).double()
+
+    with (
+        mock.patch.object(module, "_resident_rows", rows),
+        mock.patch.object(module, "_extract_tensors", extract),
+        mock.patch.object(module.TorchClassificationTask, "_construct_model", construct),
+    ):
+        yield
+
+
+def classification_arms() -> Iterator[tuple[str, dict[str, Any]]]:
+    """FedAvg's four modes, clipped, and the four rules with their own loop."""
+
+    for mode in ("single_batch", "sequential_epoch", "frozen_batch_gradients", "full_gradient"):
+        yield (
+            f"fedavg/{mode}",
+            {
+                "update_rule": "fedavg",
+                "update_mode": mode,
+                "frozen_gradient_weighting": "examples",
+                "max_grad_norm": 0.5,
+            },
+        )
+    yield "local_sgd", {"momentum": 0.9, "nesterov": True, "weight_decay": 0.01}
+    yield (
+        "local_adamw",
+        {
+            "update_rule": "local_adamw",
+            "learning_rate": 0.01,
+            "weight_decay": 0.01,
+            "beta1": 0.9,
+            "beta2": 0.99,
+            "epsilon": 1e-8,
+            "momentum": None,
+            "nesterov": None,
+        },
+    )
+    yield "fedprox", {"update_rule": "fedprox", "proximal_mu": 0.1}
+    yield "scaffold", {"update_rule": "scaffold"}
+
+
+def classification_rule_config(client: dict[str, Any], *, cnn: bool = False) -> dict[str, Any]:
+    """The synthetic run with ``client``'s rule; a rule drops the engine options it refuses."""
+
+    config = (cnn_config if cnn else classification_config)()
+    rule = client.get("update_rule", "local_sgd")
+    refused = {
+        "local_adamw": ("momentum", "nesterov"),
+        "fedprox": ENGINE_OPTIONS,
+        "scaffold": ENGINE_OPTIONS,
+    }.get(rule, ())
+    for option in refused:
+        config["client"].pop(option, None)
+    config["client"].update({key: value for key, value in client.items() if value is not None})
+    if rule == "scaffold":
+        config["server"]["strategy"] = "scaffold"
+    return config
+
+
+def ragged_classification() -> Any:
+    """Train splits of 20, 17, 14, 11 and 8 rows, by client number."""
+
+    from fedbrew.data.synthetic_classification import SyntheticClassificationDataset as Data
+
+    real = Data.get_client_data
+
+    def truncated(self: Any, client_id: str) -> dict[str, Any]:
+        data = real(self, client_id)
+        keep = 20 - 3 * (int(client_id.rsplit("_", 1)[-1]) % 5)
+        train = {key: value[:keep] for key, value in data["train"].items()}
+        return {**data, "train": train, "num_train_examples": keep}
+
+    return mock.patch.object(Data, "get_client_data", truncated)
+
+
+class ClassificationFloat64Test(ExecutorRuns):
+    """Stage c: the MLP and the CNN through the shipped task, in float64, to TOLERANCE."""
+
+    def test_the_mlp_under_every_rule(self) -> None:
+        for label, client in classification_arms():
+            with self.subTest(rule=label):
+                self.assertAgree(
+                    *self.both(classification_rule_config(client), data=float64_classification)
+                )
+
+    def test_the_mlp_on_ragged_clients(self) -> None:
+        @contextmanager
+        def data() -> Iterator[None]:
+            with float64_classification(), ragged_classification():
+                yield
+
+        for label, client in classification_arms():
+            with self.subTest(rule=label):
+                self.assertAgree(*self.both(classification_rule_config(client), data=data))
+
+    def test_the_cnn(self) -> None:
+        @contextmanager
+        def data() -> Iterator[None]:
+            with float64_classification(), images():
+                yield
+
+        for label, client in classification_arms():
+            if label not in {"fedavg/sequential_epoch", "fedavg/full_gradient", "scaffold"}:
+                continue
+            with self.subTest(rule=label):
+                self.assertAgree(
+                    *self.both(classification_rule_config(client, cnn=True), data=data)
+                )
+
+
+class ClassificationFloat32Test(ExecutorRuns):
+    """The task as it ships, in float32: to FLOAT32_TOLERANCE, and exactly with one client."""
+
+    def test_the_mlp_and_the_cnn_one_client_per_chunk_are_bit_identical(self) -> None:
+        for label, client in classification_arms():
+            with self.subTest(model="mlp", rule=label):
+                batched, sequential = self.both(
+                    classification_rule_config(client), executor_chunk_bytes=1
+                )
+                self.assertAgree(batched, sequential, exact=True)
+        with self.subTest(model="cnn"):
+            config = classification_rule_config({"update_mode": "sequential_epoch"}, cnn=True)
+            batched, sequential = self.both(config, data=images, executor_chunk_bytes=1)
+            self.assertAgree(batched, sequential, exact=True)
+
+    def test_the_mlp_within_the_float32_bound(self) -> None:
+        for label, client in classification_arms():
+            with self.subTest(rule=label):
+                batched, sequential = self.both(classification_rule_config(client))
+                self.assertAgree(batched, sequential, tolerance=FLOAT32_TOLERANCE)
 
 
 class BatchedRunsAreDeterministicTest(ExecutorRuns):

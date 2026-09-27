@@ -10,7 +10,14 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset, TensorDataset
 
 from fedbrew.core.torch_utils import OptimizerLike, SeedWorker, resolve_torch_device
-from fedbrew.tasks.base import TaskAdapter, model_config_key
+from fedbrew.tasks.base import (
+    TaskAdapter,
+    batch_row_numbers,
+    model_config_key,
+    row_count,
+    row_mean,
+    row_numbers,
+)
 
 
 class TorchClassificationTask(TaskAdapter):
@@ -256,7 +263,7 @@ class TorchClassificationTask(TaskAdapter):
             scaler.step(optimizer)
             scaler.update()
         else:
-            loss = self._criterion(model(features), targets)
+            loss, _ = self.functional_loss(model, None, None, (features, targets))
             loss.backward()
             optimizer.step()
         return {"loss": float(loss.detach())}
@@ -270,18 +277,93 @@ class TorchClassificationTask(TaskAdapter):
             if self.use_amp:
                 with torch.autocast("cuda", dtype=torch.float16):
                     outputs = model(features)
-                outputs = outputs.float()
+                measured = self._measured(outputs.float(), targets)
             else:
-                outputs = model(features)
-            loss = self._criterion(outputs, targets)
-            predictions = outputs.argmax(dim=1)
-            correct = (predictions == targets).sum()
-            total = int(targets.numel())
-        return {
-            "loss": float(loss.detach()),
-            "correct": float(correct),
-            "total": float(total),
-        }
+                measured = self.functional_eval(model, None, None, (features, targets))
+        return {name: float(value) for name, value in measured.items()}
+
+    # -- the batched executor (fedbrew.tasks.base.BatchableTask) --------------
+
+    def split_rows(self, data: Any) -> tuple[Tensor, Tensor]:
+        """A split's features and targets as the loader yields them: widened, on the device."""
+
+        return _resident_rows(*_raw_tensors(data), self.device)
+
+    def row_batches(
+        self,
+        data: Any,
+        config: Mapping[str, Any] | bool | None = None,
+    ) -> _RowNumbers:
+        """``build_dataloader(data, config)``'s batches as row indices, by the same loader.
+
+        The loader is built on the row numbers in place of the rows, so its
+        generator, shuffle, batching and ``drop_last`` are the ones it
+        applies; each iteration of the result iterates it once, drawing what
+        an epoch of it draws. In the main process: the order a DataLoader
+        yields is its sampler's, whichever process fetches the rows.
+        """
+
+        _, targets = _raw_tensors(data)
+        rows = len(targets)
+        numbered = {"x": torch.zeros((rows, 1)), "y": row_numbers(rows).long()}
+        if isinstance(config, bool):
+            config = {"shuffle": config}
+        return _RowNumbers(self.build_dataloader(numbered, {**(config or {}), "num_workers": 0}))
+
+    def functional_loss(
+        self,
+        model: nn.Module,
+        params: Mapping[str, Tensor] | None,
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """The cross-entropy ``train_step`` backpropagates, at ``params`` or the model's own."""
+
+        features, targets = batch
+        loss = self._cross_entropy(self._logits(model, params, buffers, features), targets, mask)
+        return loss, {"loss": loss.detach()}
+
+    def functional_eval(
+        self,
+        model: nn.Module,
+        params: Mapping[str, Tensor] | None,
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> dict[str, Tensor]:
+        """``eval_step``'s loss, correct and total, as tensors."""
+
+        features, targets = batch
+        return self._measured(self._logits(model, params, buffers, features), targets, mask)
+
+    def _logits(
+        self,
+        model: nn.Module,
+        params: Mapping[str, Tensor] | None,
+        buffers: Mapping[str, Tensor] | None,
+        features: Tensor,
+    ) -> Tensor:
+        if params is None:
+            return model(features)
+        return torch.func.functional_call(model, (dict(params), dict(buffers or {})), (features,))
+
+    def _cross_entropy(self, logits: Tensor, targets: Tensor, mask: Tensor | None = None) -> Tensor:
+        """The criterion's mean, or its mean over the real rows under ``mask``."""
+
+        if mask is None:
+            return self._criterion(logits, targets)
+        return row_mean(nn.functional.cross_entropy(logits, targets, reduction="none"), mask)
+
+    def _measured(
+        self, logits: Tensor, targets: Tensor, mask: Tensor | None = None
+    ) -> dict[str, Tensor]:
+        """What eval_step reports for a batch's logits: loss, correct and total."""
+
+        loss = self._cross_entropy(logits, targets, mask).detach()
+        hits = logits.argmax(dim=1) == targets
+        correct = hits.sum() if mask is None else (hits * mask).sum()
+        return {"loss": loss, "correct": correct, "total": row_count(targets, mask)}
 
     def evaluation_total(self, batch: Any) -> float | None:
         """eval_step's "total": how many targets the batch holds."""
@@ -379,10 +461,9 @@ class _DeviceTensorBatches:
 
     def _resident(self) -> tuple[Tensor, Tensor]:
         if self._features is None or self._targets is None:
-            # Transfer in the stored dtype (uint8 images stay 1 byte per pixel)
-            # and widen on the device, so the copy is as small as possible.
-            self._features = self._raw_features.to(self._device).float()
-            self._targets = self._raw_targets.to(self._device).long()
+            self._features, self._targets = _resident_rows(
+                self._raw_features, self._raw_targets, self._device
+            )
         return self._features, self._targets
 
     def __len__(self) -> int:
@@ -428,6 +509,32 @@ class _DeviceTensorBatches:
             if self._drop_last and end - start < batch_size:
                 break
             yield features[start:end], targets[start:end]
+
+
+class _RowNumbers:
+    """A loader built on row numbers, yielding each batch's numbers as a CPU index tensor."""
+
+    def __init__(self, loader: Any) -> None:
+        self._loader = loader
+
+    def __iter__(self) -> Iterator[Tensor]:
+        for _, numbers in self._loader:
+            yield batch_row_numbers(numbers)
+
+    def __len__(self) -> int:
+        return len(self._loader)
+
+
+def _resident_rows(
+    features: Tensor, targets: Tensor, device: torch.device
+) -> tuple[Tensor, Tensor]:
+    """Rows as ``_DeviceTensorBatches`` and ``split_rows`` hold them: widened on the device.
+
+    Transferred in the stored dtype (uint8 images stay 1 byte per pixel) and
+    widened there, so the copy is as small as possible.
+    """
+
+    return features.to(device).float(), targets.to(device).long()
 
 
 def _raw_tensors(data: Any) -> tuple[Tensor, Tensor]:

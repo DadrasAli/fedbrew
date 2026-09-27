@@ -124,6 +124,15 @@ class SelectionIsRecordedTest(ExecutorRuns):
         self.assertIn("batched falls back", rows[0].value)
         self.assertIsNotNone(rows[0].tone)
 
+    def test_dropout_falls_back(self) -> None:
+        from tests.test_batched_executor_tolerance import classification_config
+
+        config = classification_config()
+        config["model"]["dropout"] = 0.3
+        record = self._record(self.run_config(config, "batched"))
+        self.assertEqual(record["used"], "sequential")
+        self.assertIn("dropout at p = 0.3", record["fallback"])
+
     def test_the_plan_header_names_a_batched_run(self) -> None:
         self.assertEqual(_executor_rows({"used": "batched"})[0].value, "batched")
         self.assertEqual(_executor_rows({"used": "sequential"}), [])

@@ -346,8 +346,15 @@ both executors and compares every round's model, every persistent client
 state and every non-timing cell: within `1e-12` relative in float64 (a tensor
 against its own largest element, since an element whose exact value is 0
 holds rounding residue), the identity and count columns equal, and bit for bit
-when every chunk holds one client or a round samples one. Two things the
-tolerance cannot cover, both about values whose exact answer is 0:
+when every chunk holds one client or a round samples one. The classification
+task is compared at that bound in float64 -- the shipped task with its rows
+and model widened -- and as it ships, in float32, at `1e-4`: float32 rounds at
+`6e-8`, and three rounds of the MNIST MLP at 1000 clients differed by at most
+`4.0e-5` (one client's `fit_loss`) and `1.9e-5` of a tensor's scale (measured
+2026-09-27). A client state derived from a difference of models, SCAFFOLD's
+`c_i`, is measured at least at its model tensor's scale: it tends to 0 as
+clients agree, and its error is the models'. Two things the tolerance cannot
+cover, both about values whose exact answer is 0:
 
 - **a count of exact zeros** -- fed-lasso's `exact_zeros` -- is a function of
   summation order itself: a coordinate that cancels to 0 comes out `0.0` or
@@ -368,7 +375,7 @@ back: <reason>` in amber, and `run.json` records the reason
 
 | Part | Requirement |
 | --- | --- |
-| Task | implements `BatchableTask` (`fedbrew/tasks/base.py`): `split_rows`, `row_batches`, `functional_loss`, `functional_eval`, with a loss that averages over rows. The five linear examples do. |
+| Task | implements `BatchableTask` (`fedbrew/tasks/base.py`): `split_rows`, `row_batches`, `functional_loss`, `functional_eval`, with a loss that averages over rows. The classification task does (the MLP and the CNNs), and so do the five linear examples; the causal-LM task does not. |
 | Model | its federated state is exactly its parameters, all trainable; no dropout at `p > 0`, which draws from the process-wide generator; no batch normalisation, whose statistics are state |
 | Rule | declares a batched update on its own class: `fedavg` in every update mode, with or without `max_grad_norm`; `local_sgd` with momentum, Nesterov, weight decay and a cosine rate; `local_adamw`, its step cap included; `fedprox`; `scaffold`, whose `c_i` is gathered from each client and its new value kept there. The last four under both of their modes. `fedlalr`, `delta_sgd`, `fedavg_ft` and `centralized` run sequentially. |
 | Runtime | `experiment.seed` set, so every loader draws from its own generator; `use_amp: false`; CPU or CUDA; not the `centralized` strategy |
