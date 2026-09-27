@@ -145,6 +145,14 @@ class ClientBatchFit:
     start: Mapping[str, Tensor] = field(default_factory=dict)
 
 
+def data_versions(data: Any) -> tuple[int, ...]:
+    """The version counters of a split's tensors, which move on any in-place edit."""
+
+    if isinstance(data, Mapping):
+        return tuple(value._version for value in data.values() if isinstance(value, Tensor))
+    return (data._version,) if isinstance(data, Tensor) else ()
+
+
 # ---------------------------------------------------------------------------
 # The batches, drawn as the sequential loops draw them
 # ---------------------------------------------------------------------------

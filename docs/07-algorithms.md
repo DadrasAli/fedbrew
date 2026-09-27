@@ -274,7 +274,7 @@ they were. `tests/test_finiteness_is_checked_on_the_aggregate.py` pins it.
 `StackedRow` (`fedbrew/core/torch_utils.py`) -- is held until the stack's
 last row arrives, or a state from elsewhere, or `result`. The stack is then
 folded in one weighted reduction per tensor, on its own device, and every
-row's minimum and maximum come from one `aminmax` over the client dimension,
+row's minimum and maximum come from one reduction each over the client dimension,
 so the refusal and the client it names are the ones above. The sum differs
 from adding the rows one by one only in summation order, and a stack of one
 row is added exactly as a plain state is. `tests/test_stacked_fold.py` pins

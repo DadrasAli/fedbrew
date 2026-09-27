@@ -414,7 +414,7 @@ class WeightedStateAccumulator:
     stack's last row arrives (or a state from elsewhere, or :meth:`result`),
     and the stack is then reduced over its client dimension in one weighted
     sum on its own device, with each row's minimum and maximum from one
-    ``aminmax`` over the same dimension. The mean, the check and the client it
+    reduction each over the same dimension. The mean, the check and the client it
     names are those of adding the rows one by one; the sum differs from that
     only in its order and rounding, and a single row is added exactly as a
     state is.
@@ -551,7 +551,10 @@ class WeightedStateAccumulator:
             )
             flat = selected.reshape(len(rows), -1)
             if flat.shape[1]:
-                lows, highs = torch.aminmax(flat, dim=1)
+                # amin and amax, not aminmax: along this dimension aminmax was
+                # 137 ms on a 1000 x 50,176 stack against 20 ms for the two
+                # (measured 2026-09-27), and the values are the same.
+                lows, highs = flat.amin(dim=1), flat.amax(dim=1)
                 for entry, low, high in zip(entries, lows, highs, strict=True):
                     entry[key] = (low, high)
             total = self._totals[key]

@@ -296,19 +296,23 @@ class TorchClassificationTask(TaskAdapter):
     ) -> _RowNumbers:
         """``build_dataloader(data, config)``'s batches as row indices, by the same loader.
 
-        The loader is built on the row numbers in place of the rows, so its
-        generator, shuffle, batching and ``drop_last`` are the ones it
-        applies; each iteration of the result iterates it once, drawing what
-        an epoch of it draws. In the main process: the order a DataLoader
-        yields is its sampler's, whichever process fetches the rows.
+        The loader itself says which rows it yields (``index_batches``), or,
+        on the ``DataLoader`` path, is built on the row numbers in place of the
+        rows, so its generator, shuffle, batching and ``drop_last`` are the
+        ones it applies; each iteration of the result iterates it once,
+        drawing what an epoch of it draws. In the main process: the order a
+        DataLoader yields is its sampler's, whichever process fetches the
+        rows.
         """
 
-        _, targets = _raw_tensors(data)
-        rows = len(targets)
-        numbered = {"x": torch.zeros((rows, 1)), "y": row_numbers(rows).long()}
         if isinstance(config, bool):
             config = {"shuffle": config}
-        return _RowNumbers(self.build_dataloader(numbered, {**(config or {}), "num_workers": 0}))
+        loader = self.build_dataloader(data, {**(config or {}), "num_workers": 0})
+        if not isinstance(loader, _DeviceTensorBatches):
+            rows = len(_raw_tensors(data)[1])
+            numbered = {"x": torch.zeros((rows, 1)), "y": row_numbers(rows).long()}
+            loader = self.build_dataloader(numbered, {**(config or {}), "num_workers": 0})
+        return _RowNumbers(loader)
 
     def functional_loss(
         self,
@@ -486,17 +490,32 @@ class _DeviceTensorBatches:
 
     def __iter__(self) -> Iterator[tuple[Tensor, Tensor]]:
         features, targets = self._resident()
-        total = features.shape[0]
+        for index in self.index_batches(self._device):
+            if isinstance(index, slice):
+                yield features[index], targets[index]
+            else:
+                yield features.index_select(0, index), targets.index_select(0, index)
+
+    def index_batches(self, device: torch.device | str = "cpu") -> Iterator[Tensor | slice]:
+        """One epoch's batches as the rows they hold: an index on ``device``, or a slice.
+
+        The epoch's draws are made here, so iterating this is iterating the
+        loader as far as its generator can tell; it is what ``__iter__``
+        yields the rows of, and what the batched executor reads the order
+        from (``TorchClassificationTask.row_batches``).
+        """
+
+        total = self._raw_features.shape[0]
         batch_size = self._batch_size
 
         if self._shuffle:
             generator = self._epoch_generator()
-            order = torch.randperm(total, generator=generator).to(self._device)
+            order = torch.randperm(total, generator=generator).to(device)
             for start in range(0, total, batch_size):
                 index = order[start : start + batch_size]
                 if self._drop_last and int(index.numel()) < batch_size:
                     break
-                yield features.index_select(0, index), targets.index_select(0, index)
+                yield index
             # RandomSampler always evaluates one more permutation before it
             # stops, and discards it. Draining it here keeps the generator state
             # aligned with the DataLoader path across epochs. Consumers that
@@ -508,16 +527,27 @@ class _DeviceTensorBatches:
             end = min(start + batch_size, total)
             if self._drop_last and end - start < batch_size:
                 break
-            yield features[start:end], targets[start:end]
+            yield slice(start, end)
 
 
 class _RowNumbers:
-    """A loader built on row numbers, yielding each batch's numbers as a CPU index tensor."""
+    """A loader's batches as CPU index tensors, each iteration one epoch of it.
+
+    ``_DeviceTensorBatches`` says which rows it yields (``index_batches``); a
+    ``DataLoader`` is built on the row numbers, and its batches are them.
+    """
 
     def __init__(self, loader: Any) -> None:
         self._loader = loader
 
     def __iter__(self) -> Iterator[Tensor]:
+        if isinstance(self._loader, _DeviceTensorBatches):
+            for index in self._loader.index_batches():
+                if isinstance(index, slice):
+                    yield torch.arange(index.start, index.stop)
+                else:
+                    yield index
+            return
         for _, numbers in self._loader:
             yield batch_row_numbers(numbers)
 

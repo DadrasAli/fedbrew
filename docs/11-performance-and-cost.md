@@ -393,6 +393,12 @@ stacked, so what is held at once is one chunk's stack, and the previous one's
 while the aggregator still holds that chunk's last result, as the sequential
 executor's previous client state is held while the next client fits.
 `run.json` records the most clients one chunk held (`largest_chunk_clients`).
+A bucket's rows are held padded to its longest split and stacked, so a batch
+that is every client's whole split, as the post-fit pass usually is, is used
+in place. When a round is one chunk its stacked rows are kept for the next
+round and reused for the same clients' data, the same objects unedited; at
+full participation that is every round, and what is held between rounds is
+what the chunk holds anyway.
 
 **What it keeps.** The no-training-batches refusal comes before any client
 runs, in the rule's own words; the non-finite refusal names the client and

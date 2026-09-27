@@ -53,6 +53,7 @@ from fedbrew.clients.batched_update import (
     ClientBatchPlan,
     accumulate,
     apply_update,
+    data_versions,
     divide,
     initial_optimizer_state,
 )
@@ -96,6 +97,10 @@ class BatchedExecutor:
         self.chunk_bytes = int(chunk_bytes)
         self.record = record if record is not None else {}
         self.record.setdefault("largest_chunk_clients", 0)
+        #: The stacked rows of the last round's buckets, kept while the round is
+        #: one chunk: at full participation the same clients' unchanged data
+        #: would otherwise be stacked again every round.
+        self._rows: dict[tuple[int, ...], _Rows] = {}
 
     def fit(
         self,
@@ -124,12 +129,19 @@ class BatchedExecutor:
             for member, request in zip(members, requests, strict=True)
         ]
         done, total = 0, len(requests)
-        for start, stop in self._chunks(task, template, plans):
+        chunks = list(self._chunks(task, template, plans))
+        # Kept only while a round is one chunk, so what is held between rounds
+        # is what one chunk holds anyway.
+        kept = self._rows if len(chunks) == 1 else None
+        self._rows = {}
+        for start, stop in chunks:
             self.record["largest_chunk_clients"] = max(
                 self.record["largest_chunk_clients"], stop - start
             )
             chunk_started = time.perf_counter()
-            fits = _train_chunk(task, template, plans[start:stop])
+            fits = _train_chunk(task, template, plans[start:stop], kept, self._rows)
+            if kept is None:
+                self._rows = {}
             share = (time.perf_counter() - chunk_started) / (stop - start)
             for index in range(start, stop):
                 result_started = time.perf_counter()
@@ -167,9 +179,18 @@ class BatchedExecutor:
 
 
 def _train_chunk(
-    task: Any, template: nn.Module, plans: Sequence[ClientBatchPlan]
+    task: Any,
+    template: nn.Module,
+    plans: Sequence[ClientBatchPlan],
+    kept: Mapping[tuple[int, ...], _Rows] | None = None,
+    keep: dict[tuple[int, ...], _Rows] | None = None,
 ) -> list[ClientBatchFit]:
-    """Train one chunk's clients, bucket by bucket, and return each one's share."""
+    """Train one chunk's clients, bucket by bucket, and return each one's share.
+
+    ``kept`` holds stacked rows from the last round, reused for a bucket of
+    the same clients whose data is the same objects, unedited; ``keep``
+    receives this chunk's.
+    """
 
     state_keys = list(task.get_federated_model_state(template))
     names = [name for name, _ in template.named_parameters()]
@@ -181,7 +202,6 @@ def _train_chunk(
     metadata = task.federated_model_state_metadata(template)
     trainable = trainable_parameter_count(template)
     buffers = dict(template.named_buffers())
-    rows = [task.split_rows(plan.train_data) for plan in plans]
 
     buckets: dict[tuple[Any, ...], list[int]] = {}
     for index, plan in enumerate(plans):
@@ -189,9 +209,14 @@ def _train_chunk(
 
     fits: list[ClientBatchFit | None] = [None] * len(plans)
     for members in buckets.values():
-        bucket = _Bucket(
-            task, template, buffers, [plans[i] for i in members], [rows[i] for i in members]
-        )
+        sources = [plans[i].train_data for i in members]
+        key = tuple(id(source) for source in sources)
+        rows = (kept or {}).get(key)
+        if rows is None or not rows.holds(sources):
+            rows = _Rows(task, sources)
+        if keep is not None:
+            keep[key] = rows
+        bucket = _Bucket(task, template, buffers, [plans[i] for i in members], rows)
         stack, training_outputs, eval_outputs = bucket.run()
         states = StateStack({key: stack[key] for key in state_keys})
         for position, index in enumerate(members):
@@ -207,6 +232,37 @@ def _train_chunk(
     return [fit for fit in fits if fit is not None]
 
 
+class _Rows:
+    """A bucket's train splits as the task's rows, each tensor padded to the longest and stacked.
+
+    A client's rows are ``tensors[k][position, :lengths[position]]``; the
+    padding is zeros and is never read unmasked. One client is held as its
+    own rows, unstacked.
+    """
+
+    def __init__(self, task: Any, sources: list[Any]) -> None:
+        rows = [task.split_rows(source) for source in sources]
+        self.sources = sources
+        self.versions = [data_versions(source) for source in sources]
+        self.lengths = [int(len(client_rows[0])) for client_rows in rows]
+        self.longest = max(self.lengths)
+        if len(rows) == 1:
+            self.tensors = rows[0]
+        else:
+            self.tensors = tuple(
+                torch.nn.utils.rnn.pad_sequence(list(parts), batch_first=True)
+                for parts in zip(*rows, strict=True)
+            )
+
+    def holds(self, sources: list[Any]) -> bool:
+        """Whether these are the rows of ``sources``: the same objects, not edited since."""
+
+        return all(
+            held is source and version == data_versions(source)
+            for held, source, version in zip(self.sources, sources, self.versions, strict=True)
+        )
+
+
 class _Bucket:
     """Clients whose updates share a shape, stepped together.
 
@@ -220,7 +276,7 @@ class _Bucket:
         model: nn.Module,
         buffers: Mapping[str, Tensor],
         plans: list[ClientBatchPlan],
-        rows: list[tuple[Tensor, ...]],
+        rows: _Rows,
     ) -> None:
         self.task = task
         self.model = model
@@ -232,13 +288,7 @@ class _Bucket:
         first = next(model.parameters())
         self.device, self.dtype = first.device, first.dtype
         self.parameters = dict(model.named_parameters())
-        if self.stacked:
-            self.rows = tuple(torch.cat(parts) for parts in zip(*rows, strict=True))
-            counts = [len(client_rows[0]) for client_rows in rows]
-            self.offsets = [sum(counts[:position]) for position in range(self.size)]
-        else:
-            self.rows = rows[0]
-            self.offsets = [0]
+        self.rows = rows
 
     # -- the tensors every client starts from --------------------------------
 
@@ -258,33 +308,56 @@ class _Bucket:
         return {name: torch.stack([s[name] for s in placed]) for name in self.parameters}, 0
 
     def _start(self) -> dict[str, Tensor]:
+        """Every client's starting parameters.
+
+        Nothing is written into them -- every step is out of place -- so the
+        broadcast the clients share is one tensor seen C times, not C copies.
+        """
+
+        if all(plan.start is self.plans[0].start for plan in self.plans):
+            shared = {
+                name: _placed(self.plans[0].start[name], parameter)
+                for name, parameter in self.parameters.items()
+            }
+            if not self.stacked:
+                return shared
+            return {
+                name: value.unsqueeze(0).expand(self.size, *value.shape)
+                for name, value in shared.items()
+            }
         start = [
             {name: _placed(plan.start[name], self.parameters[name]) for name in self.parameters}
             for plan in self.plans
         ]
         if not self.stacked:
-            return {name: value.clone() for name, value in start[0].items()}
+            return start[0]
         return {name: torch.stack([s[name] for s in start]) for name in self.parameters}
 
     # -- one batch per client, gathered from the rows ------------------------
 
     def _gather(self, indices: Sequence[Tensor]) -> tuple[tuple[Tensor, ...], Tensor | None]:
-        """Each client's batch, padded to the longest with its own first row, and the mask."""
+        """Each client's batch, padded to the longest with its own first row, and the mask.
 
+        A batch that is every client's whole split in order is the stacked
+        rows themselves, and nothing is copied.
+        """
+
+        rows = self.rows
         if not self.stacked:
             index = indices[0].to(self.device)
-            return tuple(tensor.index_select(0, index) for tensor in self.rows), None
+            return tuple(tensor.index_select(0, index) for tensor in rows.tensors), None
         lengths = [int(len(index)) for index in indices]
         longest = max(lengths)
-        padded = torch.empty((self.size, longest), dtype=torch.long)
-        for position, (index, offset) in enumerate(zip(indices, self.offsets, strict=True)):
-            padded[position, : lengths[position]] = index + offset
-            padded[position, lengths[position] :] = offset
-        flat = padded.reshape(-1).to(self.device)
-        batch = tuple(
-            tensor.index_select(0, flat).reshape(self.size, longest, *tensor.shape[1:])
-            for tensor in self.rows
-        )
+        if longest == rows.longest and all(
+            length == whole and bool((index == torch.arange(whole)).all())
+            for index, length, whole in zip(indices, lengths, rows.lengths, strict=True)
+        ):
+            batch = rows.tensors
+        else:
+            padded = torch.nn.utils.rnn.pad_sequence(list(indices), batch_first=True)
+            padded = padded.to(self.device)
+            clients = torch.arange(self.size, device=self.device).unsqueeze(1)
+            batch = tuple(tensor[clients, padded] for tensor in rows.tensors)
         if min(lengths) == longest:
             return batch, None
         mask = (torch.arange(longest).unsqueeze(0) < torch.tensor(lengths).unsqueeze(1)).to(

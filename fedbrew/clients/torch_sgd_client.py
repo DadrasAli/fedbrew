@@ -16,6 +16,7 @@ from fedbrew.clients.batched_update import (
     LocalProgram,
     OptimizerSpec,
     combine_weights,
+    data_versions,
     own_loop_updates,
 )
 from fedbrew.clients.local_update_modes import (
@@ -419,13 +420,27 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
             weights=combine_weights(
                 updates, program.combine, getattr(self, "frozen_gradient_weighting", None)
             ),
-            eval_batches=list(
-                self.task.row_batches(train_data, self._eval_loader_config(request.round_id))
-            ),
+            eval_batches=self._batched_eval_batches(train_data, request.round_id),
             evaluate=request.post_fit_evaluation,
             start=start,
             **controls,
         )
+
+    def _batched_eval_batches(self, train_data: Any, round_id: int) -> list[Any]:
+        """The post-fit pass's batches, as row indices.
+
+        Unshuffled they are the same every round -- no generator is read --
+        so they are kept for the same, unedited data at the same batch size.
+        """
+
+        key = (self.eval_batch_size, data_versions(train_data))
+        kept = getattr(self, "_kept_eval_batches", None)
+        if not self.eval_shuffle and kept is not None and kept[0] is train_data and kept[1] == key:
+            return kept[2]
+        batches = list(self.task.row_batches(train_data, self._eval_loader_config(round_id)))
+        if not self.eval_shuffle:
+            self._kept_eval_batches = (train_data, key, batches)
+        return batches
 
     def batched_result(
         self, request: FitRequest, plan: ClientBatchPlan, fit: ClientBatchFit
