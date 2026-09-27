@@ -21,6 +21,7 @@ from fedbrew.core.seeding import derive_seed
 from fedbrew.core.torch_utils import (
     WeightedStateAccumulator,
     clone_model_state,
+    copy_state_into,
 )
 from fedbrew.servers.base import ServerStrategy
 from fedbrew.tasks.base import SupportsDatasetEvaluation, TaskAdapter
@@ -355,8 +356,13 @@ class FedAvgServer(ServerStrategy):
             return 1.0
         return float(result.num_examples)
 
-    def evaluate_global(self, global_data: Any) -> dict[str, float]:
-        """Evaluate the current global model on global data if available."""
+    def evaluate_global(self, global_data: Any, model: Any = None) -> dict[str, float]:
+        """Evaluate the current global model on global data if available.
+
+        ``model`` is one the caller keeps (the batched evaluator's): the state
+        is copied into it in place, rather than a model being built and the
+        state cloned into it. The same numbers either way.
+        """
 
         if global_data is None:
             return {}
@@ -365,7 +371,9 @@ class FedAvgServer(ServerStrategy):
         if self._model_state is None or self.task is None:
             return {}
 
-        model = self.task.build_model(self.model_config)
+        resident = model is not None
+        if model is None:
+            model = self.task.build_model(self.model_config)
         expected_metadata = self.task.federated_model_state_metadata(model)
         validate_federated_state_metadata(
             expected_metadata,
@@ -373,7 +381,10 @@ class FedAvgServer(ServerStrategy):
             received_scope=self._model_state_scope or "full",
             context="server evaluation state",
         )
-        self.task.load_federated_model_state(model, self._model_state)
+        if resident:
+            copy_state_into(model, self._model_state)
+        else:
+            self.task.load_federated_model_state(model, self._model_state)
         # A task without the optional whole-dataset evaluator produces no
         # central_test_* columns rather than failing -- twelve task doubles in
         # tests/ stop at the five abstract methods. The check is the protocol

@@ -20,6 +20,7 @@ from fedbrew.core.artifacts import (
     save_round_metrics_csv,
     save_run_json,
 )
+from fedbrew.core.batched_evaluator import evaluator_for
 from fedbrew.core.batched_executor import select_executor
 from fedbrew.core.config import (
     FullConfig,
@@ -170,6 +171,7 @@ def run(
         on_client_progress=client_progress_reporter(config, progress),
         on_termination=_termination_reporter(config),
         executor=executor,
+        evaluator=evaluator_for(executor),
     )
     run_metadata["finished_at"] = _utc_timestamp()
     _record_durations(run_metadata, run_started)

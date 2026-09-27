@@ -145,6 +145,28 @@ class ClientBatchFit:
     start: Mapping[str, Tensor] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class ClientEvalPlan:
+    """One client's evaluation of one round, as the batched evaluator runs it.
+
+    Per requested split, in order: the split's data, or None for a ``val``
+    split the client does not have (reported as zero examples), and its
+    evaluation loader's batches as row indices into ``task.split_rows``.
+    ``refusal`` is what the client's own ``evaluate`` would raise, raised
+    when its result is built.
+    """
+
+    splits: list[str]
+    data: list[Any]
+    batches: list[list[Tensor]]
+    refusal: Exception | None = None
+
+    def row_count(self, position: int) -> int:
+        """The rows split ``position``'s batches hold."""
+
+        return sum(len(batch) for batch in self.batches[position])
+
+
 def data_versions(data: Any) -> tuple[int, ...]:
     """The version counters of a split's tensors, which move on any in-place edit."""
 

@@ -401,6 +401,28 @@ round and reused for the same clients' data, the same objects unedited; at
 full participation that is every round, and what is held between rounds is
 what the chunk holds anyway.
 
+**Evaluation.** A batched run is measured by the batched evaluator
+(`fedbrew/core/batched_evaluator.py`), on the cadences of `evaluation.*`,
+which it does not change. The clients due for evaluation in a round are
+measured together: each requested split held as the task's rows, stacked per
+split name, and batch `k` of every split measured in one `vmap` of
+`functional_eval` at the broadcast model, which all of them share. Each
+client's batches are its own evaluation loader's, shuffled or not, and its
+result is built by its rule from its share with the code its own `evaluate`
+ends with, so a missing `val` split is reported as zero examples and a
+missing `test` split is refused in the same words, for the same client.
+Splits are chunked by `executor_chunk_bytes`; when a round's evaluation fits
+one chunk its rows are kept for the next evaluation round, and a train
+split's rows are the ones the executor already holds. The central pass keeps
+one model and copies the server's state into it in place, rather than
+building a model and cloning the state into it each time, and reads the
+global test shard once, refusing it if it has been edited since
+(`CachedPayload`). The tolerance is training's: every run in
+`tests/test_batched_executor_tolerance.py` evaluates every split every round,
+and `tests/test_batched_evaluator.py` adds splits of different lengths, a
+shuffled evaluation loader, a client without a `val` or a `test` split, and
+the central pass's kept model and shard.
+
 **What it keeps.** The no-training-batches refusal comes before any client
 runs, in the rule's own words; the non-finite refusal names the client and
 tensor the sequential run names; permuting the sampled clients permutes the
@@ -426,6 +448,7 @@ identical.
 | `fedbrew/clients/lazy_pool.py` | building clients on demand |
 | `fedbrew/core/batched_executor.py` | §9: `BatchedExecutor`, its buckets and chunks, and `select_executor`'s fallback |
 | `fedbrew/clients/batched_update.py` | §9: a rule's update as steps over a stack, and the batches its loop draws |
+| `fedbrew/core/batched_evaluator.py` | §9: the due clients' splits measured together, and the central pass's kept model and shard |
 | `tools/` | the benchmark and profiling scripts |
 
 ### Commands
@@ -490,6 +513,7 @@ python tools/bench_compare_runs.py --help
 | `tests/test_report_run_size.py` | Reported run size. |
 | `tests/test_batched_executor_tolerance.py` | §9: both executors agree on every model, client state and cell, to `1e-12`, and bit for bit with one client per chunk. |
 | `tests/test_batched_executor.py` | §9: the keys, the fallback and its record, client isolation, the refusals, the generator, and one chunk at a time. |
+| `tests/test_batched_evaluator.py` | §9: ragged, shuffled and missing evaluation splits through both evaluators, the refusal's words, and the central pass's kept model and shard. |
 | `tests/test_stacked_fold.py` | A stack's rows fold to their mean, and one row exactly. |
 
 ### Known failure modes

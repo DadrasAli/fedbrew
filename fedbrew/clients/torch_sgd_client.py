@@ -13,6 +13,7 @@ from fedbrew.clients.base import ClientUpdate
 from fedbrew.clients.batched_update import (
     ClientBatchFit,
     ClientBatchPlan,
+    ClientEvalPlan,
     LocalProgram,
     OptimizerSpec,
     combine_weights,
@@ -426,21 +427,88 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
             **controls,
         )
 
-    def _batched_eval_batches(self, train_data: Any, round_id: int) -> list[Any]:
-        """The post-fit pass's batches, as row indices.
+    def _batched_eval_batches(self, data: Any, round_id: int) -> list[Any]:
+        """An evaluation pass's batches over ``data``, as row indices.
 
         Unshuffled they are the same every round -- no generator is read --
-        so they are kept for the same, unedited data at the same batch size.
+        so they are kept, per split, for the same unedited data at the same
+        batch size.
         """
 
-        key = (self.eval_batch_size, data_versions(train_data))
+        key = (self.eval_batch_size, data_versions(data))
         kept = getattr(self, "_kept_eval_batches", None)
-        if not self.eval_shuffle and kept is not None and kept[0] is train_data and kept[1] == key:
-            return kept[2]
-        batches = list(self.task.row_batches(train_data, self._eval_loader_config(round_id)))
+        if kept is None:
+            kept = self._kept_eval_batches = {}
+        held = kept.get(id(data))
+        if not self.eval_shuffle and held is not None and held[0] is data and held[1] == key:
+            return held[2]
+        batches = list(self.task.row_batches(data, self._eval_loader_config(round_id)))
         if not self.eval_shuffle:
-            self._kept_eval_batches = (train_data, key, batches)
+            kept[id(data)] = (data, key, batches)
         return batches
+
+    def batched_evaluation_supported(self) -> bool:
+        """Whether the batched evaluator may measure this client: its evaluate is this class's."""
+
+        cls = type(self)
+        return (
+            cls.__dict__.get("_batched_rule") is not None
+            and cls.evaluate is TorchSGDClient.evaluate
+            and cls._evaluate is TorchSGDClient._evaluate
+            and self.batched_unsupported() is None
+        )
+
+    def batched_evaluation_plan(self, request: EvalRequest) -> ClientEvalPlan:
+        """``_evaluate``'s passes over the requested splits, as the batched evaluator runs them."""
+
+        splits = _eval_request_splits(request)
+        if splits is None:
+            raise ValueError("the batched evaluator measures requested splits")
+        plan = ClientEvalPlan(splits=list(splits), data=[], batches=[])
+        for split in splits:
+            split_data = _get_evaluation_split(self.client_data, split)
+            if split_data is None:
+                if split != "val":
+                    plan.refusal = self._missing_split_refusal(split)
+                    break
+                plan.data.append(None)
+                plan.batches.append([])
+                continue
+            plan.data.append(split_data)
+            plan.batches.append(self._batched_eval_batches(split_data, request.round_id))
+        return plan
+
+    def batched_evaluation_result(
+        self,
+        request: EvalRequest,
+        plan: ClientEvalPlan,
+        outputs: list[list[dict[str, float]] | None],
+        model_state_metadata: dict[str, Any],
+    ) -> EvalResult:
+        """The EvalResult ``evaluate`` returns, from this client's share of the batched pass."""
+
+        if plan.refusal is not None:
+            raise plan.refusal
+        metrics: dict[str, float] = {}
+        num_examples_by_split: dict[str, int] = {}
+        requested_metrics = self._eval_request_metrics(request)
+        for split, split_data, split_outputs in zip(plan.splits, plan.data, outputs, strict=True):
+            if split_data is None:
+                num_examples_by_split[split] = 0
+                continue
+            assert split_outputs is not None
+            split_metrics, num_examples = self._evaluation_metrics(
+                split_outputs, split_data, metrics=requested_metrics
+            )
+            self._record_split(
+                metrics, num_examples_by_split, split, split, split_metrics, num_examples
+            )
+        result = self._requested_splits_result(request, metrics, num_examples_by_split)
+        result.payload.update(
+            model_state_scope=str(model_state_metadata["model_state_scope"]),
+            model_state_metadata=model_state_metadata,
+        )
+        return result
 
     def batched_result(
         self, request: FitRequest, plan: ClientBatchPlan, fit: ClientBatchFit
@@ -664,6 +732,16 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
             request,
             requested_splits,
         )
+        return self._requested_splits_result(request, metrics, num_examples_by_split)
+
+    def _requested_splits_result(
+        self,
+        request: EvalRequest,
+        metrics: dict[str, float],
+        num_examples_by_split: dict[str, int],
+    ) -> EvalResult:
+        """The EvalResult of a pass over the requested splits, whichever evaluator ran it."""
+
         return EvalResult(
             round_id=request.round_id,
             client_id=self.client_id,
@@ -702,22 +780,40 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
                 if split == "val":
                     num_examples_by_split[reported] = 0
                     continue
-                raise ValueError(
-                    f"client {self.client_id!r} has no non-empty {split} split; "
-                    "post-aggregation evaluation requires separate train and test data"
-                )
+                raise self._missing_split_refusal(split)
             split_metrics, num_examples = self._evaluate_model(
                 model,
                 split_data,
                 metrics=requested_metrics,
                 round_id=request.round_id,
             )
-            if num_examples <= 0:
-                raise ValueError(f"client {self.client_id!r} has an empty {split} split")
-            num_examples_by_split[reported] = num_examples
-            metrics.update({f"{reported}_{name}": value for name, value in split_metrics.items()})
+            self._record_split(
+                metrics, num_examples_by_split, split, reported, split_metrics, num_examples
+            )
 
         return metrics, num_examples_by_split
+
+    def _missing_split_refusal(self, split: str) -> ValueError:
+        return ValueError(
+            f"client {self.client_id!r} has no non-empty {split} split; "
+            "post-aggregation evaluation requires separate train and test data"
+        )
+
+    def _record_split(
+        self,
+        metrics: dict[str, float],
+        num_examples_by_split: dict[str, int],
+        split: str,
+        reported: str,
+        split_metrics: Mapping[str, float],
+        num_examples: int,
+    ) -> None:
+        """One split's metrics under its reported name, and its count; an empty one refused."""
+
+        if num_examples <= 0:
+            raise ValueError(f"client {self.client_id!r} has an empty {split} split")
+        num_examples_by_split[reported] = num_examples
+        metrics.update({f"{reported}_{name}": value for name, value in split_metrics.items()})
 
     def get_state(self) -> dict[str, Any]:
         """Return serializable client metadata."""

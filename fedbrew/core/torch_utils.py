@@ -178,6 +178,19 @@ def load_model_state(model: nn.Module, state: Mapping[str, Any]) -> None:
     model.load_state_dict(clone_model_state(state))
 
 
+def copy_state_into(model: nn.Module, state: Mapping[str, Any]) -> None:
+    """Copy a state into a model's own tensors: ``load_model_state`` without the clone.
+
+    ``load_state_dict`` copies each value into the tensor the model already
+    holds, so nothing of ``state`` is aliased and the clone
+    ``load_model_state`` makes first is a second copy of the same numbers.
+    For a model kept to be loaded again and again.
+    """
+
+    forget_resident_state(model)
+    model.load_state_dict(state)
+
+
 def tied_state_aliases(model: nn.Module) -> dict[str, str]:
     """Map each duplicate state key to the key whose storage it shares.
 

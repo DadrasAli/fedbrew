@@ -233,26 +233,30 @@ def _train_chunk(
 
 
 class _Rows:
-    """A bucket's train splits as the task's rows, each tensor padded to the longest and stacked.
+    """Splits as the task's rows, each tensor padded to the longest and stacked.
 
-    A client's rows are ``tensors[k][position, :lengths[position]]``; the
-    padding is zeros and is never read unmasked. One client is held as its
-    own rows, unstacked.
+    A split's rows are ``tensors[k][position, :lengths[position]]``; the
+    padding is zeros and is never read unmasked. One split is held as its own
+    rows, unstacked.
     """
 
     def __init__(self, task: Any, sources: list[Any]) -> None:
         rows = [task.split_rows(source) for source in sources]
         self.sources = sources
         self.versions = [data_versions(source) for source in sources]
-        self.lengths = [int(len(client_rows[0])) for client_rows in rows]
+        self.lengths = [int(len(split_rows[0])) for split_rows in rows]
         self.longest = max(self.lengths)
-        if len(rows) == 1:
+        self.stacked = len(rows) > 1
+        if not self.stacked:
             self.tensors = rows[0]
         else:
             self.tensors = tuple(
                 torch.nn.utils.rnn.pad_sequence(list(parts), batch_first=True)
                 for parts in zip(*rows, strict=True)
             )
+        first = self.tensors[0]
+        self.device = first.device
+        self.bytes = sum(tensor.numel() * tensor.element_size() for tensor in self.tensors)
 
     def holds(self, sources: list[Any]) -> bool:
         """Whether these are the rows of ``sources``: the same objects, not edited since."""
@@ -261,6 +265,100 @@ class _Rows:
             held is source and version == data_versions(source)
             for held, source, version in zip(self.sources, sources, self.versions, strict=True)
         )
+
+    def gather(
+        self, indices: Sequence[Tensor], mask_dtype: torch.dtype
+    ) -> tuple[tuple[Tensor, ...], Tensor | None]:
+        """Each split's batch, padded to the longest with its own first row, and the mask.
+
+        A batch that is every split's whole length in order is the stacked
+        rows themselves, and nothing is copied.
+        """
+
+        if not self.stacked:
+            index = indices[0].to(self.device)
+            return tuple(tensor.index_select(0, index) for tensor in self.tensors), None
+        lengths = [int(len(index)) for index in indices]
+        longest = max(lengths)
+        if longest == self.longest and all(
+            length == whole and bool((index == torch.arange(whole)).all())
+            for index, length, whole in zip(indices, lengths, self.lengths, strict=True)
+        ):
+            batch = self.tensors
+        else:
+            padded = torch.nn.utils.rnn.pad_sequence(list(indices), batch_first=True)
+            padded = padded.to(self.device)
+            splits = torch.arange(len(indices), device=self.device).unsqueeze(1)
+            batch = tuple(tensor[splits, padded] for tensor in self.tensors)
+        if min(lengths) == longest:
+            return batch, None
+        mask = (torch.arange(longest).unsqueeze(0) < torch.tensor(lengths).unsqueeze(1)).to(
+            device=self.device, dtype=mask_dtype
+        )
+        return batch, mask
+
+
+def measure_splits(
+    task: Any,
+    model: nn.Module,
+    buffers: Mapping[str, Tensor],
+    params: Mapping[str, Tensor],
+    params_dim: int | None,
+    rows: _Rows,
+    batches: Sequence[Sequence[Tensor]],
+) -> tuple[list[dict[str, Tensor]], list[int]]:
+    """``functional_eval`` over each split's batches, all splits together.
+
+    ``batches[k]`` are split ``k``'s batches as row indices into ``rows``;
+    ``params`` are every split's own (stacked, ``params_dim`` 0) or one model
+    all share (``params_dim`` None). Batch ``position`` of every split is
+    measured in one vmapped call, a split with fewer batches padded with an
+    empty one whose outputs are never read; with one split nothing is vmapped,
+    and the call is ``eval_step``'s arithmetic. Returns the outputs per
+    position, each a tensor per key over the splits, and each split's count.
+    """
+
+    dtype = next(iter(params.values())).dtype
+
+    def measure(params: Any, batch: Any, mask: Any) -> Any:
+        return task.functional_eval(model, params, buffers, batch, mask)
+
+    counts = [len(split_batches) for split_batches in batches]
+    empty = torch.zeros(0, dtype=torch.long)
+    outputs: list[dict[str, Tensor]] = []
+    model.eval()
+    with torch.no_grad():
+        for position in range(max(counts, default=0)):
+            indices = [
+                split_batches[position] if position < count else empty
+                for split_batches, count in zip(batches, counts, strict=True)
+            ]
+            batch, mask = rows.gather(indices, dtype)
+            if not rows.stacked:
+                outputs.append(measure(params, batch, mask))
+                continue
+            dims = (params_dim, 0, None if mask is None else 0)
+            outputs.append(torch.func.vmap(measure, in_dims=dims)(params, batch, mask))
+    return outputs, counts
+
+
+def per_split_floats(
+    outputs: list[dict[str, Tensor]], counts: Sequence[int]
+) -> list[list[dict[str, float]]]:
+    """Per-position outputs as each split's list of float dicts, one host copy per key."""
+
+    if not outputs:
+        return [[] for _ in counts]
+    keys = list(outputs[0])
+    size = len(counts)
+    values = {
+        key: torch.stack([output[key] for output in outputs]).reshape(len(outputs), size).tolist()
+        for key in keys
+    }
+    return [
+        [{key: float(values[key][step][position]) for key in keys} for step in range(count)]
+        for position, count in enumerate(counts)
+    ]
 
 
 class _Bucket:
@@ -333,37 +431,10 @@ class _Bucket:
             return start[0]
         return {name: torch.stack([s[name] for s in start]) for name in self.parameters}
 
-    # -- one batch per client, gathered from the rows ------------------------
-
     def _gather(self, indices: Sequence[Tensor]) -> tuple[tuple[Tensor, ...], Tensor | None]:
-        """Each client's batch, padded to the longest with its own first row, and the mask.
+        """Each client's batch, padded to the longest with its own first row, and the mask."""
 
-        A batch that is every client's whole split in order is the stacked
-        rows themselves, and nothing is copied.
-        """
-
-        rows = self.rows
-        if not self.stacked:
-            index = indices[0].to(self.device)
-            return tuple(tensor.index_select(0, index) for tensor in rows.tensors), None
-        lengths = [int(len(index)) for index in indices]
-        longest = max(lengths)
-        if longest == rows.longest and all(
-            length == whole and bool((index == torch.arange(whole)).all())
-            for index, length, whole in zip(indices, lengths, rows.lengths, strict=True)
-        ):
-            batch = rows.tensors
-        else:
-            padded = torch.nn.utils.rnn.pad_sequence(list(indices), batch_first=True)
-            padded = padded.to(self.device)
-            clients = torch.arange(self.size, device=self.device).unsqueeze(1)
-            batch = tuple(tensor[clients, padded] for tensor in rows.tensors)
-        if min(lengths) == longest:
-            return batch, None
-        mask = (torch.arange(longest).unsqueeze(0) < torch.tensor(lengths).unsqueeze(1)).to(
-            device=self.device, dtype=self.dtype
-        )
-        return batch, mask
+        return self.rows.gather(indices, self.dtype)
 
     def _call(self, function: Callable[..., Any], arguments: list[tuple[Any, int | None]]) -> Any:
         """``function`` on each client's arguments: vmapped over the stack, or called as is."""
@@ -490,25 +561,16 @@ class _Bucket:
     def _evaluate(self, params: dict[str, Tensor]) -> list[list[dict[str, float]]]:
         """The post-fit pass: ``functional_eval`` over each client's eval batches."""
 
-        task, model, buffers = self.task, self.model, self.buffers
-
-        def measure(params: Any, batch: Any, mask: Any) -> Any:
-            return task.functional_eval(model, params, buffers, batch, mask)
-
-        client_dim = 0 if self.stacked else None
-        model.eval()
-        counts = [len(plan.eval_batches) for plan in self.plans]
-        outputs: list[dict[str, Tensor]] = []
-        for position in range(max(counts)):
-            indices = [
-                plan.eval_batches[position] if position < count else plan.eval_batches[0][:0]
-                for plan, count in zip(self.plans, counts, strict=True)
-            ]
-            batch, mask = self._gather(indices)
-            outputs.append(
-                self._call(measure, [(params, client_dim), (batch, client_dim), (mask, client_dim)])
-            )
-        return self._per_client(outputs, counts)
+        outputs, counts = measure_splits(
+            self.task,
+            self.model,
+            self.buffers,
+            params,
+            0 if self.stacked else None,
+            self.rows,
+            [plan.eval_batches for plan in self.plans],
+        )
+        return per_split_floats(outputs, counts)
 
     def _per_client(
         self, outputs: list[dict[str, Tensor]], counts: Sequence[int]
@@ -517,17 +579,7 @@ class _Bucket:
 
         if not outputs:
             return [[] for _ in self.plans]
-        keys = list(outputs[0])
-        values = {
-            key: torch.stack([output[key] for output in outputs])
-            .reshape(len(outputs), self.size)
-            .tolist()
-            for key in keys
-        }
-        return [
-            [{key: float(values[key][step][position]) for key in keys} for step in range(count)]
-            for position, count in enumerate(counts)
-        ]
+        return per_split_floats(outputs, counts)
 
 
 def _placed(value: Tensor, like: Tensor) -> Tensor:

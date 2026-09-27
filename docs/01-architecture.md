@@ -73,7 +73,9 @@ fit time and the progress footer are written whatever runs the clients.
 The second executor is `BatchedExecutor` (`fedbrew/core/batched_executor.py`),
 selected by `runtime.performance.executor: batched`: it trains the sampled
 clients together over a stack of their parameters and yields each result as a
-row of that stack, which the `StreamingAggregator` folds as before. Chapter 11
+row of that stack, which the `StreamingAggregator` folds as before. Beside it
+runs `BatchedEvaluator` (`fedbrew/core/batched_evaluator.py`), which measures
+the due clients together and keeps one model for the central pass. Chapter 11
 §9.
 
 A round's checkpoints become visible last, so a kill anywhere in a round leaves

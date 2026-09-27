@@ -12,6 +12,7 @@ from fedbrew.core.torch_utils import (
     WeightedStateAccumulator,
     add_model_states,
     clone_model_state,
+    copy_state_into,
     load_model_state,
     refuse_non_finite_state,
     scale_model_state,
@@ -226,8 +227,13 @@ class ScaffoldServer(FedAvgServer):
         payload["server_control"] = clone_model_state(self._server_control)
         return payload
 
-    def evaluate_global(self, global_data: Any) -> dict[str, float]:
-        """Evaluate the current global model on global data if available."""
+    def evaluate_global(self, global_data: Any, model: Any = None) -> dict[str, float]:
+        """Evaluate the current global model on global data if available.
+
+        ``model`` is one the caller keeps (the batched evaluator's): the state
+        is copied into it in place, rather than a model being built and the
+        state cloned into it. The same numbers either way.
+        """
 
         if global_data is None:
             return {}
@@ -236,8 +242,13 @@ class ScaffoldServer(FedAvgServer):
         if self._model_state is None or self.task is None:
             return {}
 
-        model = self.task.build_model(self.model_config)
-        load_model_state(model, self._model_state)
+        resident = model is not None
+        if model is None:
+            model = self.task.build_model(self.model_config)
+        if resident:
+            copy_state_into(model, self._model_state)
+        else:
+            load_model_state(model, self._model_state)
         # A task without the optional whole-dataset evaluator produces no
         # central_test_* columns rather than failing -- twelve task doubles in
         # tests/ stop at the five abstract methods. The check is the protocol
