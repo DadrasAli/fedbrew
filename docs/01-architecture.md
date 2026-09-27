@@ -51,13 +51,25 @@ separately, and those timings are columns in `round_metrics.csv` — chapter 08 
 | # | Phase | Who does it | Timed as |
 | --- | --- | --- | --- |
 | 1 | Select clients for this round | `server.configure_round` | — |
-| 2 | Train each selected client locally | `client.fit` per client | `fit_sec` |
-| 3 | Fold each result into the global model as it arrives; skipped when the round selected no client, which leaves the model and server state unchanged | `server.aggregate_stream` | `aggregate_sec` |
-| 4 | Evaluate on each due client's own splits | `client.evaluate` per client | `client_eval_sec` |
-| 5 | Evaluate on the server's pooled test shard | `server.evaluate_global` | `global_eval_sec` |
+| 2 | Train each selected client locally | the `ClientExecutor`: `client.fit` per client | `fit_sec` |
+| 3 | Fold each result into the global model as it arrives; skipped when the round selected no client, which leaves the model and server state unchanged | the `Aggregator`: `server.aggregate_stream` | `aggregate_sec` |
+| 4 | Evaluate on each due client's own splits | the `Evaluator`: `client.evaluate` per client | `client_eval_sec` |
+| 5 | Evaluate on the server's pooled test shard | the `Evaluator`: `server.evaluate_global` | `global_eval_sec` |
 | 6 | Write checkpoints if due, staged: complete on disk as `.tmp`, not yet visible | `checkpointing` | `checkpoint_sec` |
 | 7 | Flush artifacts: the CSV rows, then `run.json` | `artifacts.flush_round_artifacts`, the runner's writer | — |
 | 8 | Commit the staged checkpoints, then prune to `keep_last` | `loop._commit_checkpoints` | — |
+
+**How phases 2–5 are run is a seam** (`fedbrew/core/execution.py`). An
+algorithm -- a `ServerStrategy` and a `ClientUpdate` rule -- decides *what* the
+server and the clients compute; a `ClientExecutor` decides how the sampled
+clients are run, an `Aggregator` how their results are folded, and an
+`Evaluator` how the model is measured. `run_fl_loop` takes one of each and
+defaults to the references, `SequentialExecutor`, `StreamingAggregator` and
+`SequentialEvaluator`: each client alone, in request order, folded as it
+arrives -- what every run did before the seam existed. An executor reports each
+result to a `FitObserver` before yielding it, so the per-client records, the
+fit time and the progress footer are written whatever runs the clients.
+`tests/test_execution_seam.py` pins that the loop calls nothing else.
 
 A round's checkpoints become visible last, so a kill anywhere in a round leaves
 a checkpoint whose round the metric history already holds, which a resume can
@@ -273,6 +285,7 @@ Four files, written every round. Chapter 09 covers them in full.
 | Path | What it is |
 | --- | --- |
 | `fedbrew/core/loop.py` | the round loop; `run_fl_loop` at line 96 |
+| `fedbrew/core/execution.py` | the executor seam: `ClientExecutor`, `Aggregator`, `Evaluator`, `FitObserver` |
 | `fedbrew/core/runner.py` | `run()`, the CLI, and the override application |
 | `fedbrew/core/factory.py` | config → built objects |
 | `fedbrew/core/registry.py` | the six registries; `register_builtin_components` is the whole built-in set |
@@ -329,6 +342,7 @@ python -m pytest tests/test_lazy_client_pool_selection.py \
 | `tests/test_lazy_client_pool_selection.py` | The pool follows from the dataset, not a config key. |
 | `tests/test_auxiliary_state_aggregation.py` | Algorithm state travels in `payload` and survives aggregation. |
 | `tests/test_aggregation_peak_memory.py` | Aggregation retains the same bytes at 4, 16 and 64 clients, and the fit phase is a generator. |
+| `tests/test_execution_seam.py` | §2: the loop runs, folds and measures through the executor seam alone, and the references are the defaults. |
 | `tests/test_tied_weight_federation.py` | The federated-state group handles tied weights. |
 | `tests/test_lora_adapter_federation.py` | Adapter-scoped state federates without the full model. |
 | `tests/test_federated_state_compatibility.py` | §5: FedAvg, SCAFFOLD and FedLALR each refuse a result of the wrong scope, adapter identity, keys or shapes, and leave their state unchanged (`POST-F28`). |

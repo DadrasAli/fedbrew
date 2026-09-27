@@ -147,6 +147,13 @@ def run_fl_loop(
     # wait staged, so no checkpoint is ever visible ahead of the CSVs. A kill
     # loses at most the rounds since the last flush, which a resume recomputes.
     flush_every: int = 1,
+    # How the round's sampled clients are run, how their results are folded,
+    # and how the model is measured (fedbrew/core/execution.py). None is the
+    # reference for each -- SequentialExecutor, StreamingAggregator,
+    # SequentialEvaluator -- which is what every run used before the seam.
+    executor: ClientExecutor | None = None,
+    aggregator: Aggregator | None = None,
+    evaluator: Evaluator | None = None,
 ) -> ExperimentState:
     """Run a minimal task-agnostic federated loop."""
 
@@ -167,9 +174,9 @@ def run_fl_loop(
         evaluation.central_test.every, "evaluation.central_test"
     )
     fit_schedule = parse_evaluation_schedule(evaluation.fit.every, "evaluation.fit")
-    executor: ClientExecutor = SequentialExecutor()
-    aggregator: Aggregator = StreamingAggregator()
-    evaluator: Evaluator = SequentialEvaluator()
+    executor = executor or SequentialExecutor()
+    aggregator = aggregator or StreamingAggregator()
+    evaluator = evaluator or SequentialEvaluator()
 
     # Decided before anything is written: a resume that cannot be taken is
     # refused with the directory exactly as it was. POST-F25.

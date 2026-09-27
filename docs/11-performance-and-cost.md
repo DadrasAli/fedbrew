@@ -57,7 +57,8 @@ per update, for every rule that steps one.
 `configure_round` broadcasts one shared read-only state, and `aggregate_stream`
 folds each result into a running weighted sum, so a client's model state
 becomes unreachable as soon as it is aggregated, in `_stream_fit_results`
-(`fedbrew/core/loop.py`).
+(`fedbrew/core/loop.py`). That holds for any `ClientExecutor`: the seam's
+contract is a generator the `Aggregator` pulls from (chapter 01 §2).
 
 Measured rather than reasoned: the accumulator retains **two model states** —
 the running sum and one reference copy — identically at 4, 16 and 64 clients
