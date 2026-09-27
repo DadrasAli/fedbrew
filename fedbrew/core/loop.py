@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fedbrew.clients.base import ClientUpdate
 from fedbrew.core.artifacts import (
     clear_stale_temp_files,
     flush_round_artifacts,
@@ -40,6 +39,7 @@ from fedbrew.core.divergence import (
     DivergenceMonitor,
     DivergenceVerdict,
 )
+from fedbrew.core.execution import ClientExecutor, ClientPool, FitObserver
 from fedbrew.core.protocol import (
     ClientInfo,
     EvalRequest,
@@ -61,8 +61,6 @@ from fedbrew.core.state import (
 from fedbrew.core.torch_utils import NonFiniteStateError, model_state_is_all_zeros
 from fedbrew.data.dataset import FederatedDataset
 from fedbrew.servers.base import ServerStrategy
-
-ClientPool = ClientUpdate | Mapping[str, ClientUpdate]
 
 #: The metrics every evaluated client must report, and the split each is
 #: measured on. accuracy is deliberately not among them: a task with no
@@ -161,6 +159,7 @@ def run_fl_loop(
         evaluation.central_test.every, "evaluation.central_test"
     )
     fit_schedule = parse_evaluation_schedule(evaluation.fit.every, "evaluation.fit")
+    executor: ClientExecutor = SequentialExecutor()
 
     # Decided before anything is written: a resume that cannot be taken is
     # refused with the directory exactly as it was. POST-F25.
@@ -233,6 +232,7 @@ def run_fl_loop(
         if on_client_progress is not None:
             on_client_progress(round_id, 0, len(requests), "fit")
         fit_totals = _FitPhaseTotals()
+        observer = _RoundFitObserver(state, fit_totals, round_id, on_client_progress)
         fit_phase_started = time.perf_counter()
         try:
             # Skipped when no client was selected: the model and every server
@@ -240,10 +240,7 @@ def run_fl_loop(
             # update over no results.
             if requests:
                 server_payload = server.aggregate_stream(
-                    round_info,
-                    _stream_fit_results(
-                        client, requests, state, fit_totals, round_id, on_client_progress
-                    ),
+                    round_info, executor.fit(client, requests, observer)
                 )
         except NonFiniteStateError as error:
             # Same contract as the monitor below: a model that went non-finite
@@ -715,6 +712,65 @@ class _FitPhaseTotals:
     fit_seconds: float = 0.0
 
 
+class _RoundFitObserver:
+    """The FitObserver the loop hands its executor: the round's records, as they were written.
+
+    Per result, in this order: the fit time into the phase totals, the
+    per-client update row into the history, the example count, then the
+    progress footer.
+    """
+
+    __slots__ = ("_state", "_totals", "_round_id", "_on_progress")
+
+    def __init__(
+        self,
+        state: ExperimentState,
+        totals: _FitPhaseTotals,
+        round_id: int,
+        on_progress: Callable[[int, int, int, str], None] | None,
+    ) -> None:
+        self._state = state
+        self._totals = totals
+        self._round_id = round_id
+        self._on_progress = on_progress
+
+    def fitted(self, result: FitResult, seconds: float, done: int, total: int) -> None:
+        self._totals.fit_seconds += seconds
+        self._state.client_update_metrics_history.append(_build_client_metric_record(result))
+        self._totals.num_examples += result.num_examples
+        if self._on_progress is not None:
+            self._on_progress(self._round_id, done, total, "fit")
+
+
+class SequentialExecutor:
+    """The reference ClientExecutor: each sampled client fits alone, in request order.
+
+    Every run used this before the executor seam existed, and it stays the
+    default and the reference any other executor is measured against.
+    """
+
+    def fit(
+        self,
+        clients: ClientPool,
+        requests: Sequence[FitRequest],
+        observer: FitObserver,
+    ) -> Iterator[FitResult]:
+        return _fit_one_at_a_time(clients, requests, observer)
+
+
+def _fit_one_at_a_time(
+    client: ClientPool,
+    requests: Sequence[FitRequest],
+    observer: FitObserver,
+) -> Iterator[FitResult]:
+    total = len(requests)
+    for done, request in enumerate(requests, start=1):
+        fit_started = time.perf_counter()
+        result = _fit_client(client, request)
+        observer.fitted(result, time.perf_counter() - fit_started, done, total)
+        yield result
+
+
 def _stream_fit_results(
     client: ClientPool,
     requests: Sequence[FitRequest],
@@ -735,18 +791,13 @@ def _stream_fit_results(
     client to be rebuilt moments later. The cost is that a round holds every
     participating client's data at once, which is what makes peak RSS scale with
     participation_rate x client count. See docs/11-performance-and-cost.md.
+
+    What SequentialExecutor runs, with the loop's own observer.
     """
 
-    total = len(requests)
-    for done, request in enumerate(requests, start=1):
-        fit_started = time.perf_counter()
-        result = _fit_client(client, request)
-        totals.fit_seconds += time.perf_counter() - fit_started
-        state.client_update_metrics_history.append(_build_client_metric_record(result))
-        totals.num_examples += result.num_examples
-        if on_progress is not None:
-            on_progress(round_id, done, total, "fit")
-        yield result
+    yield from _fit_one_at_a_time(
+        client, requests, _RoundFitObserver(state, totals, round_id, on_progress)
+    )
 
 
 def _fit_client(client: ClientPool, request: FitRequest) -> FitResult:
