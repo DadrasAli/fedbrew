@@ -344,6 +344,47 @@ def _extremes(tensor: Tensor) -> tuple[Tensor, Tensor]:
     return torch.aminmax(tensor)
 
 
+class StateStack:
+    """Several clients' model states held as one tensor per key, clients first.
+
+    What the batched executor trains, and what it yields its results as rows
+    of (:class:`StackedRow`).
+    """
+
+    __slots__ = ("tensors", "size", "foldable", "__weakref__")
+
+    def __init__(self, tensors: Mapping[str, Tensor]) -> None:
+        self.tensors = dict(tensors)
+        sizes = {int(tensor.shape[0]) for tensor in self.tensors.values()}
+        if len(sizes) != 1:
+            raise ValueError("a state stack needs one client dimension shared by every tensor")
+        self.size = sizes.pop()
+        #: Whether WeightedStateAccumulator may fold its rows together: it
+        #: does so for floating tensors only, as its sum is only of those.
+        self.foldable = all(tensor.is_floating_point() for tensor in self.tensors.values())
+
+    def row(self, index: int) -> StackedRow:
+        """One client's state: a dict of views into this stack."""
+
+        return StackedRow({key: tensor[index] for key, tensor in self.tensors.items()}, self, index)
+
+
+class StackedRow(dict):  # type: ignore[type-arg]
+    """One client's model state, as a row of a :class:`StateStack`.
+
+    A dict of that client's tensors to everything that reads it, and to
+    :class:`WeightedStateAccumulator` a row it folds together with the stack's
+    other rows, in one weighted reduction over the client dimension.
+    """
+
+    __slots__ = ("stack", "index")
+
+    def __init__(self, values: Mapping[str, Tensor], stack: StateStack, index: int) -> None:
+        super().__init__(values)
+        self.stack = stack
+        self.index = index
+
+
 class WeightedStateAccumulator:
     """Accumulate a running weighted mean of model states one client at a time.
 
@@ -367,6 +408,16 @@ class WeightedStateAccumulator:
     replaces on a 50,890-parameter state. The check on the result also refuses
     what the per-client one let through: finite states whose weighted mean is
     not representable. FINDINGS.csv POST-F32.
+
+    States that are rows of one :class:`StateStack` -- what the batched
+    executor yields -- are folded together: their weights are held until the
+    stack's last row arrives (or a state from elsewhere, or :meth:`result`),
+    and the stack is then reduced over its client dimension in one weighted
+    sum on its own device, with each row's minimum and maximum from one
+    ``aminmax`` over the same dimension. The mean, the check and the client it
+    names are those of adding the rows one by one; the sum differs from that
+    only in its order and rounding, and a single row is added exactly as a
+    state is.
     """
 
     def __init__(self) -> None:
@@ -383,6 +434,9 @@ class WeightedStateAccumulator:
         #: Per state added, in order: who sent it, and each floating tensor's
         #: (minimum, maximum), which are finite exactly when the tensor is.
         self._extremes: list[tuple[str | None, dict[str, tuple[Tensor, Tensor]]]] = []
+        #: Rows of one stack waiting to be folded: the stack, and per row its
+        #: index, weight and the extremes entry to fill.
+        self._pending: tuple[StateStack, list[int], list[float], list[dict[str, Any]]] | None = None
 
     def add(self, state: Mapping[str, Any], weight: float, source: str | None = None) -> None:
         """Add one weighted client state to the running sum.
@@ -414,6 +468,14 @@ class WeightedStateAccumulator:
             raise NonFiniteStateError(f"client weight must be finite, got {weight}")
         if self._count and set(state.keys()) != set(self._reference.keys()):
             raise ValueError("all states must have the same keys")
+        if isinstance(state, StackedRow) and state.stack.foldable:
+            self._add_row(state, weight, source)
+        else:
+            self._fold_pending()
+            self._add_state(state, weight, source)
+
+    def _add_state(self, state: Mapping[str, Any], weight: float, source: str | None) -> None:
+        """Add one plain state: into the sums now, with its extremes."""
 
         extremes: dict[str, tuple[Tensor, Tensor]] = {}
         self._extremes.append((source, extremes))
@@ -442,9 +504,70 @@ class WeightedStateAccumulator:
         self._total_weight += weight
         self._count += 1
 
+    def _add_row(self, row: StackedRow, weight: float, source: str | None) -> None:
+        """Hold one stacked row's weight until its stack is folded."""
+
+        stack = row.stack
+        if self._pending is not None and self._pending[0] is not stack:
+            self._fold_pending()
+        if self._pending is None:
+            for key, tensor in stack.tensors.items():
+                shape, dtype = tensor.shape[1:], tensor.dtype
+                reference = self._reference.get(key)
+                if reference is None:
+                    # Its dtype and shape are all a floating reference is read
+                    # for; a real row would keep the whole stack alive.
+                    self._reference[key] = torch.empty(shape, dtype=dtype, device="meta")
+                    self._totals[key] = torch.zeros(shape, dtype=_accumulation_dtype(dtype))
+                elif dtype != reference.dtype or shape != reference.shape:
+                    raise ValueError(
+                        f"state tensor {key!r} must have matching dtype and shape across clients"
+                    )
+            self._pending = (stack, [], [], [])
+        extremes: dict[str, tuple[Tensor, Tensor]] = {}
+        self._extremes.append((source, extremes))
+        _, rows, weights, entries = self._pending
+        rows.append(row.index)
+        weights.append(weight)
+        entries.append(extremes)
+        self._total_weight += weight
+        self._count += 1
+        if len(rows) == stack.size:
+            self._fold_pending()
+
+    def _fold_pending(self) -> None:
+        """Fold the held rows of one stack into the sums: one weighted reduction per tensor."""
+
+        if self._pending is None:
+            return
+        stack, rows, weights, entries = self._pending
+        self._pending = None
+        every_row = rows == list(range(stack.size))
+        for key, tensor in stack.tensors.items():
+            selected = (
+                tensor
+                if every_row
+                else tensor.index_select(0, torch.tensor(rows, device=tensor.device))
+            )
+            flat = selected.reshape(len(rows), -1)
+            if flat.shape[1]:
+                lows, highs = torch.aminmax(flat, dim=1)
+                for entry, low, high in zip(entries, lows, highs, strict=True):
+                    entry[key] = (low, high)
+            total = self._totals[key]
+            if len(rows) == 1:
+                # One row is added as add() adds a state -- one fused
+                # multiply-add into the sum -- so a stack of one is folded
+                # bit for bit as the state alone would be.
+                total.add_(selected[0].detach().cpu(), alpha=weights[0])
+                continue
+            scale = torch.tensor(weights, dtype=total.dtype, device=tensor.device)
+            total.add_((scale @ flat.to(total.dtype)).reshape(total.shape).cpu())
+
     def result(self) -> StateDict:
         """Return the weighted mean and reset the accumulator."""
 
+        self._fold_pending()
         if not self._count:
             raise ValueError("states must not be empty")
         if self._total_weight == 0.0:

@@ -269,6 +269,17 @@ names no client (FINDINGS.csv `POST-F32`). `FedLALRServer` computes its model
 and both moments before assigning any, so a refused round leaves all three as
 they were. `tests/test_finiteness_is_checked_on_the_aggregate.py` pins it.
 
+**Rows of one stack are folded together.** A state that arrives as a row of a
+`StateStack` -- what an executor that trains clients together yields,
+`StackedRow` (`fedbrew/core/torch_utils.py`) -- is held until the stack's
+last row arrives, or a state from elsewhere, or `result`. The stack is then
+folded in one weighted reduction per tensor, on its own device, and every
+row's minimum and maximum come from one `aminmax` over the client dimension,
+so the refusal and the client it names are the ones above. The sum differs
+from adding the rows one by one only in summation order, and a stack of one
+row is added exactly as a plain state is. `tests/test_stacked_fold.py` pins
+both.
+
 ### 3.4 `fedlalr`
 
 Locally adaptive rates with synchronised optimizer state,
