@@ -363,10 +363,11 @@ cover, both about values whose exact answer is 0:
 - **a kink** -- fed-lasso's L1 term, whose subgradient `sign(x)` is 0 at
   exactly 0 and ±1 a rounding error away -- turns that residue into a step
   `lam` apart, and from there the two runs part by more than rounding: under
-  AdamW, 1.3e-3 in one coordinate at round 2 (measured 2026-09-27). The run
-  was on the kink, not the executor wrong; the same happens to one executor
-  across thread counts. The rules are compared on the smooth control,
-  `fed-lasso-l2`.
+  AdamW, 1.3e-3 in one coordinate at round 2, and on an A100 the shipped
+  FedAvg arm parts from round 1 (measured 2026-09-27). The run was on the
+  kink; the executor computed what it was given. The rules are compared on
+  the smooth control, `fed-lasso-l2`, which agrees on the A100 to 2e-16 of
+  the model's scale over 150 rounds.
 
 **What is batchable.** A run is batched when all of these hold; otherwise it
 runs sequentially, the plan header says `Executor: sequential; batched falls
@@ -405,8 +406,9 @@ runs, in the rule's own words; the non-finite refusal names the client and
 tensor the sequential run names; permuting the sampled clients permutes the
 results, and a NaN in one client's data leaves every other client's result
 bit-identical; neither executor draws from the process-wide generator on a
-seeded run; two batched runs are identical. `tests/test_batched_executor.py`
-pins each.
+seeded run. `tests/test_batched_executor.py` pins each, and
+`tests/test_batched_executor_tolerance.py` that two batched runs are
+identical.
 
 ## For agents
 
