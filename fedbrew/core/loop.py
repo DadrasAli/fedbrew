@@ -39,7 +39,13 @@ from fedbrew.core.divergence import (
     DivergenceMonitor,
     DivergenceVerdict,
 )
-from fedbrew.core.execution import ClientExecutor, ClientPool, FitObserver
+from fedbrew.core.execution import (
+    Aggregator,
+    ClientExecutor,
+    ClientPool,
+    FitObserver,
+    StreamingAggregator,
+)
 from fedbrew.core.protocol import (
     ClientInfo,
     EvalRequest,
@@ -160,6 +166,7 @@ def run_fl_loop(
     )
     fit_schedule = parse_evaluation_schedule(evaluation.fit.every, "evaluation.fit")
     executor: ClientExecutor = SequentialExecutor()
+    aggregator: Aggregator = StreamingAggregator()
 
     # Decided before anything is written: a resume that cannot be taken is
     # refused with the directory exactly as it was. POST-F25.
@@ -239,8 +246,8 @@ def run_fl_loop(
             # state carry over unchanged, rather than each strategy defining an
             # update over no results.
             if requests:
-                server_payload = server.aggregate_stream(
-                    round_info, executor.fit(client, requests, observer)
+                server_payload = aggregator.aggregate(
+                    server, round_info, executor.fit(client, requests, observer)
                 )
         except NonFiniteStateError as error:
             # Same contract as the monitor below: a model that went non-finite
