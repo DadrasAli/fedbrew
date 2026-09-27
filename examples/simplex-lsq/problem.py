@@ -87,7 +87,13 @@ from fedbrew.data.manifest_validation import IDENTICAL_TO_TRAIN
 from fedbrew.data.writers.manifest import save_clients_jsonl, save_manifest
 from fedbrew.data.writers.torch_shards import save_client_shard, save_split_client_shard
 from fedbrew.models.config_keys import reject_unknown_model_keys
-from fedbrew.tasks.base import TaskAdapter
+from fedbrew.tasks.base import (
+    TaskAdapter,
+    batch_row_numbers,
+    row_count,
+    row_mean,
+    row_numbers,
+)
 
 #: float64 throughout: `constraint_violation` and `simplex_sum - 1` are the two
 #: numbers the example is about, and both are exactly 0 at initialisation. In
@@ -120,8 +126,13 @@ def project_simplex(values: Tensor) -> Tensor:
     cumulative = torch.cumsum(sorted_values, dim=0)
     counts = torch.arange(1, len(values) + 1, dtype=values.dtype, device=values.device)
     candidates = sorted_values - (cumulative - 1.0) / counts
-    support = int((candidates > 0).sum())
-    threshold = (cumulative[support - 1] - 1.0) / support
+    # No host round trip: the support is counted and its threshold gathered
+    # as tensors, so torch.func.vmap can run this over a stack of iterates
+    # (the batched executor). The arithmetic is the float one; a negative
+    # index wraps as Python's does.
+    support = (candidates > 0).sum()
+    last = torch.remainder(support - 1, len(values)).reshape(1)
+    threshold = (cumulative.gather(0, last).reshape(()) - 1.0) / support
     return torch.clamp(values - threshold, min=0.0)
 
 
@@ -733,9 +744,8 @@ class SimplexLSQTask(TaskAdapter):
         if optimizer is None:
             optimizer = optim.SGD(model.parameters(), lr=0.01)
         model.train()
-        features, targets = self._move_batch(batch)
         optimizer.zero_grad(set_to_none=True)
-        loss = self._criterion(model(features), targets)
+        loss, _ = self.functional_loss(model, None, None, self._move_batch(batch))
         loss.backward()
         optimizer.step()
         return {"loss": float(loss.detach())}
@@ -750,23 +760,71 @@ class SimplexLSQTask(TaskAdapter):
         """Measure the batch's objective, and six properties of the iterate."""
 
         model.eval()
-        features, targets = self._move_batch(batch)
         with torch.no_grad():
-            loss = self._criterion(model(features), targets)
-            iterate = model.iterate
-            projected = project_simplex(iterate)
+            outputs = self.functional_eval(model, None, None, self._move_batch(batch))
+        return {name: float(value) for name, value in outputs.items()}
+
+    # -- the batched executor (fedbrew.tasks.base.BatchableTask) --------------
+
+    def split_rows(self, data: Any) -> tuple[Tensor, Tensor]:
+        """A split's design rows and targets, as ``build_dataloader`` slices them."""
+
+        features, targets = _rows_of(data)
+        return features.to(self.device), targets.to(self.device)
+
+    def row_batches(
+        self, data: Any, config: Mapping[str, Any] | bool | None = None
+    ) -> list[Tensor]:
+        """``build_dataloader(data, config)``'s batches as row indices, by the same code."""
+
+        numbers = row_numbers(len(_rows_of(data)[1]))
+        batches = self.build_dataloader({"x": numbers.unsqueeze(1), "y": numbers}, config)
+        return [batch_row_numbers(numbered) for _, numbered in batches]
+
+    def functional_loss(
+        self,
+        model: SimplexModel,
+        params: Mapping[str, Tensor] | None,
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """The batch's least-squares objective at ``params``, or at the model's own when None."""
+
+        features, targets = batch
+        outputs = (
+            model(features)
+            if params is None
+            else torch.func.functional_call(model, (dict(params), dict(buffers or {})), (features,))
+        )
+        loss = self._criterion(outputs, targets, mask)
+        return loss, {"loss": loss.detach()}
+
+    def functional_eval(
+        self,
+        model: SimplexModel,
+        params: Mapping[str, Tensor] | None,
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> dict[str, Tensor]:
+        """The batch's objective, and six properties of the iterate, as tensors."""
+
+        loss, _ = self.functional_loss(model, params, buffers, batch, mask)
+        iterate = (model.x if params is None else params["x"]).detach()
+        projected = project_simplex(iterate)
         return {
-            "loss": float(loss),
-            "total": float(len(targets)),
+            "loss": loss.detach(),
+            "total": row_count(batch[1], mask),
             # The objective, and then the three numbers that say whether the
             # objective is a claim about anything.
-            "optimality_gap": self._global_objective(iterate) - self._optimal_objective,
-            "feasible_gap": self._global_objective(projected) - self._optimal_objective,
-            "distance_to_optimum": float(torch.linalg.vector_norm(iterate - self._optimum)),
-            "constraint_violation": float(torch.linalg.vector_norm(iterate - projected)),
-            "simplex_sum": float(iterate.sum()),
-            "min_coordinate": float(iterate.min()),
-            "negative_mass": negative_mass(iterate),
+            "optimality_gap": self._objective(iterate) - self._optimal_objective,
+            "feasible_gap": self._objective(projected) - self._optimal_objective,
+            "distance_to_optimum": torch.linalg.vector_norm(iterate - self._optimum),
+            "constraint_violation": torch.linalg.vector_norm(iterate - projected),
+            "simplex_sum": iterate.sum(),
+            "min_coordinate": iterate.min(),
+            "negative_mass": torch.clamp(-iterate, min=0.0).sum(),
         }
 
     def compute_metrics(self, outputs: Sequence[Any]) -> dict[str, float]:
@@ -832,8 +890,13 @@ class SimplexLSQTask(TaskAdapter):
         """`F(x)` over the cached design and targets; the same value as
         ``ProblemSpec.objective_at``, without rebuilding the data."""
 
+        return float(self._objective(x))
+
+    def _objective(self, x: Tensor) -> Tensor:
+        """``_global_objective`` as a tensor."""
+
         residual = self._design @ x - self._targets
-        return float(0.5 * (residual * residual).sum(dim=1).mean()) / len(self._design)
+        return 0.5 * (residual * residual).sum(dim=1).mean() / len(self._design)
 
     def _move_batch(self, batch: Any) -> tuple[Tensor, Tensor]:
         """Split a batch into (features, targets), both on the device."""
@@ -842,7 +905,7 @@ class SimplexLSQTask(TaskAdapter):
         return features.to(self.device), targets.to(self.device)
 
 
-def _least_squares(outputs: Tensor, targets: Tensor) -> Tensor:
+def _least_squares(outputs: Tensor, targets: Tensor, mask: Tensor | None = None) -> Tensor:
     """`(1/2|B|) ||H_B x - y_B||^2`, as a scalar tensor.
 
     Two arguments, unlike ``examples/fed-lasso``: the objective here is smooth
@@ -853,7 +916,7 @@ def _least_squares(outputs: Tensor, targets: Tensor) -> Tensor:
     """
 
     residual = outputs - targets
-    return 0.5 * (residual * residual).mean()
+    return 0.5 * row_mean(residual * residual, mask)
 
 
 def _rows_of(data: Any) -> tuple[Tensor, Tensor]:

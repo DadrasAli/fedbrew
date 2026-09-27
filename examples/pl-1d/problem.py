@@ -70,7 +70,13 @@ from fedbrew.data.manifest_validation import IDENTICAL_TO_TRAIN
 from fedbrew.data.writers.manifest import save_clients_jsonl, save_manifest
 from fedbrew.data.writers.torch_shards import save_client_shard, save_split_client_shard
 from fedbrew.models.config_keys import reject_unknown_model_keys
-from fedbrew.tasks.base import TaskAdapter
+from fedbrew.tasks.base import (
+    TaskAdapter,
+    batch_row_numbers,
+    row_count,
+    row_mean,
+    row_numbers,
+)
 
 #: The optimum, in closed form. Both are exact for the *federated* objective,
 #: not only for one client, because the shifts sum to zero.
@@ -136,12 +142,21 @@ class _PLObjective(torch.autograd.Function):  # type: ignore[misc]
     Delta-SGD paths that call ``backward()`` on their own.
     """
 
+    #: Forward and backward are plain tensor code, so ``torch.func.vmap`` can
+    #: run them over a stack of clients as they are (the batched executor).
+    generate_vmap_rule = True
+
     @staticmethod
-    def forward(ctx: Any, x: Tensor, shifts: Tensor) -> Tensor:
+    def forward(x: Tensor, shifts: Tensor) -> Tensor:
         """Return `f_i(x)` for each shift in the batch; shape `(N,)`."""
 
-        ctx.save_for_backward(x, shifts)
         return x * x + 3.0 * torch.sin(x) ** 2 + shifts * x
+
+    @staticmethod
+    def setup_context(ctx: Any, inputs: tuple[Tensor, Tensor], output: Tensor) -> None:
+        """Keep what the backward reads; separate from forward, as torch.func requires."""
+
+        ctx.save_for_backward(*inputs)
 
     @staticmethod
     def backward(ctx: Any, grad_output: Tensor) -> tuple[Tensor, None]:
@@ -550,9 +565,8 @@ class PL1DTask(TaskAdapter):
         if optimizer is None:
             optimizer = optim.SGD(model.parameters(), lr=0.01)
         model.train()
-        shifts, targets = self._move_batch(batch)
         optimizer.zero_grad(set_to_none=True)
-        loss = self._criterion(model(shifts), targets)
+        loss, _ = self.functional_loss(model, None, None, self._move_batch(batch))
         loss.backward()
         optimizer.step()
         return {"loss": float(loss.detach())}
@@ -567,17 +581,74 @@ class PL1DTask(TaskAdapter):
         """Measure the batch's mean objective, and the iterate it was measured at."""
 
         model.eval()
-        shifts, _ = self._move_batch(batch)
         with torch.no_grad():
-            values = model(shifts)
+            outputs = self.functional_eval(model, None, None, self._move_batch(batch))
+        return {name: float(value) for name, value in outputs.items()}
+
+    # -- the batched executor (fedbrew.tasks.base.BatchableTask) --------------
+
+    def split_rows(self, data: Any) -> tuple[Tensor, Tensor]:
+        """A split's shifts, and the dummy targets ``build_dataloader`` pairs them with."""
+
+        shifts = _shifts_of(data).to(self.device)
+        return shifts, torch.zeros_like(shifts)
+
+    def row_batches(
+        self, data: Any, config: Mapping[str, Any] | bool | None = None
+    ) -> list[Tensor]:
+        """``build_dataloader(data, config)``'s batches as row indices, by the same code."""
+
+        numbers = row_numbers(len(_shifts_of(data)))
+        return [
+            batch_row_numbers(numbered)
+            for numbered, _ in self.build_dataloader({"x": numbers}, config)
+        ]
+
+    def functional_loss(
+        self,
+        model: PLScalarModel,
+        params: Mapping[str, Tensor] | None,
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """The batch's mean objective at ``params``, or at the model's own when None."""
+
+        loss = self._criterion(self._values(model, params, buffers, batch[0]), batch[1], mask)
+        return loss, {"loss": loss.detach()}
+
+    def functional_eval(
+        self,
+        model: PLScalarModel,
+        params: Mapping[str, Tensor] | None,
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> dict[str, Tensor]:
+        """The batch's mean objective, and the iterate it was measured at, as tensors."""
+
+        shifts = batch[0]
+        values = self._values(model, params, buffers, shifts).detach()
+        iterate = model.x if params is None else params["x"]
         return {
-            "loss": float(values.mean()),
-            "total": float(shifts.numel()),
+            "loss": row_mean(values, mask),
+            "total": row_count(shifts, mask),
             # Carried per batch because compute_metrics is handed the outputs
             # and nothing else, and two of the three metrics it returns are
             # functions of the iterate rather than of the data.
-            "iterate": model.iterate,
+            "iterate": iterate.detach().reshape(()),
         }
+
+    def _values(
+        self,
+        model: PLScalarModel,
+        params: Mapping[str, Tensor] | None,
+        buffers: Mapping[str, Tensor] | None,
+        shifts: Tensor,
+    ) -> Tensor:
+        if params is None:
+            return model(shifts)
+        return torch.func.functional_call(model, (dict(params), dict(buffers or {})), (shifts,))
 
     def compute_metrics(self, outputs: Sequence[Any]) -> dict[str, float]:
         """Fold eval-step outputs into the three numbers this task reports.
@@ -652,11 +723,13 @@ class PL1DTask(TaskAdapter):
         return shifts.to(self.device), targets.to(self.device)
 
 
-def _mean_of_batch(outputs: Tensor, targets: Tensor | None = None) -> Tensor:
+def _mean_of_batch(
+    outputs: Tensor, targets: Tensor | None = None, mask: Tensor | None = None
+) -> Tensor:
     """The batch objective: the mean of `f_i(x)` over the batch's rows."""
 
     del targets
-    return outputs.mean()
+    return row_mean(outputs, mask)
 
 
 def _shifts_of(data: Any) -> Tensor:

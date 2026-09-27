@@ -101,7 +101,13 @@ from fedbrew.data.manifest_validation import IDENTICAL_TO_TRAIN
 from fedbrew.data.writers.manifest import save_clients_jsonl, save_manifest
 from fedbrew.data.writers.torch_shards import save_client_shard, save_split_client_shard
 from fedbrew.models.config_keys import reject_unknown_model_keys
-from fedbrew.tasks.base import TaskAdapter
+from fedbrew.tasks.base import (
+    TaskAdapter,
+    batch_row_numbers,
+    row_count,
+    row_mean,
+    row_numbers,
+)
 
 #: float64 throughout. The iterate's norm spans 160 orders of magnitude over a
 #: run; in float32 it would overflow before round 40 and the example would be
@@ -128,8 +134,13 @@ def project_simplex(values: Tensor) -> Tensor:
     cumulative = torch.cumsum(sorted_values, dim=0)
     counts = torch.arange(1, len(finite) + 1, dtype=finite.dtype, device=finite.device)
     candidates = sorted_values - (cumulative - 1.0) / counts
-    support = int((candidates > 0).sum())
-    threshold = (cumulative[support - 1] - 1.0) / support
+    # No host round trip: the support is counted and its threshold gathered
+    # as tensors, so torch.func.vmap can run this over a stack of iterates
+    # (the batched executor). The arithmetic is the float one; a negative
+    # index wraps as Python's does.
+    support = (candidates > 0).sum()
+    last = torch.remainder(support - 1, len(finite)).reshape(1)
+    threshold = (cumulative.gather(0, last).reshape(()) - 1.0) / support
     return torch.clamp(finite - threshold, min=0.0)
 
 
@@ -659,6 +670,7 @@ class NonconvexSimplexTask(TaskAdapter):
         # calling through the spec made the run an order of magnitude slower
         # than the arithmetic warrants.
         self._matrices = spec.client_adjacencies().to(self.device)
+        self._clique = torch.tensor(spec.clique_vertices(), device=self.device)
         self._criterion = _mean_of_batch
         # Read as `getattr(task, "_scaler", None)` by four client rules.
         self._scaler: Any = None
@@ -709,9 +721,8 @@ class NonconvexSimplexTask(TaskAdapter):
         if optimizer is None:
             optimizer = optim.SGD(model.parameters(), lr=0.01)
         model.train()
-        graphs, targets = self._move_batch(batch)
         optimizer.zero_grad(set_to_none=True)
-        loss = self._criterion(model(graphs), targets)
+        loss, _ = self.functional_loss(model, None, None, self._move_batch(batch))
         loss.backward()
         optimizer.step()
         return {"loss": float(loss.detach())}
@@ -726,22 +737,78 @@ class NonconvexSimplexTask(TaskAdapter):
         """Measure the batch's objective, and seven properties of the iterate."""
 
         model.eval()
-        graphs, _ = self._move_batch(batch)
         with torch.no_grad():
-            values = model(graphs)
-            iterate = model.iterate
-            projected = project_simplex(iterate)
+            outputs = self.functional_eval(model, None, None, self._move_batch(batch))
+        return {name: float(value) for name, value in outputs.items()}
+
+    # -- the batched executor (fedbrew.tasks.base.BatchableTask) --------------
+
+    def split_rows(self, data: Any) -> tuple[Tensor, Tensor]:
+        """A split's matrices, and the dummy targets ``build_dataloader`` pairs them with."""
+
+        graphs = _graphs_of(data).to(self.device)
+        return graphs, torch.zeros(len(graphs), dtype=DTYPE, device=self.device)
+
+    def row_batches(
+        self, data: Any, config: Mapping[str, Any] | bool | None = None
+    ) -> list[Tensor]:
+        """``build_dataloader(data, config)``'s batches as row indices, by the same code."""
+
+        numbers = row_numbers(len(_graphs_of(data)))
+        return [
+            batch_row_numbers(numbered)
+            for numbered, _ in self.build_dataloader({"x": numbers.reshape(-1, 1, 1)}, config)
+        ]
+
+    def functional_loss(
+        self,
+        model: SimplexPointModel,
+        params: Mapping[str, Tensor] | None,
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """The batch's mean objective at ``params``, or at the model's own when None."""
+
+        loss = self._criterion(self._values(model, params, buffers, batch[0]), batch[1], mask)
+        return loss, {"loss": loss.detach()}
+
+    def functional_eval(
+        self,
+        model: SimplexPointModel,
+        params: Mapping[str, Tensor] | None,
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> dict[str, Tensor]:
+        """The batch's objective, and seven properties of the iterate, as tensors."""
+
+        graphs = batch[0]
+        values = self._values(model, params, buffers, graphs).detach()
+        iterate = (model.x if params is None else params["x"]).detach()
+        projected = project_simplex(iterate)
         return {
-            "loss": float(values.mean()),
-            "total": float(len(graphs)),
-            "optimality_gap": self._global_objective(iterate) - self._optimal_objective,
-            "feasible_gap": self._global_objective(projected) - self._optimal_objective,
-            "distance_to_optimum": float(torch.linalg.vector_norm(iterate - self._optimum)),
-            "constraint_violation": float(torch.linalg.vector_norm(iterate - projected)),
-            "simplex_sum": float(iterate.sum()),
-            "iterate_norm": float(torch.linalg.vector_norm(iterate)),
-            "mass_on_clique": self.spec.mass_on_clique(projected),
+            "loss": row_mean(values, mask),
+            "total": row_count(graphs, mask),
+            "optimality_gap": self._objective(iterate) - self._optimal_objective,
+            "feasible_gap": self._objective(projected) - self._optimal_objective,
+            "distance_to_optimum": torch.linalg.vector_norm(iterate - self._optimum),
+            "constraint_violation": torch.linalg.vector_norm(iterate - projected),
+            "simplex_sum": iterate.sum(),
+            "iterate_norm": torch.linalg.vector_norm(iterate),
+            "mass_on_clique": projected[self._clique].sum(),
         }
+
+    def _values(
+        self,
+        model: SimplexPointModel,
+        params: Mapping[str, Tensor] | None,
+        buffers: Mapping[str, Tensor] | None,
+        graphs: Tensor,
+    ) -> Tensor:
+        if params is None:
+            return model(graphs)
+        return torch.func.functional_call(model, (dict(params), dict(buffers or {})), (graphs,))
 
     def compute_metrics(self, outputs: Sequence[Any]) -> dict[str, float]:
         """Fold eval-step outputs into the eight numbers this task reports.
@@ -805,7 +872,12 @@ class NonconvexSimplexTask(TaskAdapter):
         """`F(x)` over the cached client matrices; the same value as
         ``ProblemSpec.objective_at`` and about a hundred times cheaper."""
 
-        return float(-0.5 * torch.einsum("j,njk,k->n", x, self._matrices, x).mean())
+        return float(self._objective(x))
+
+    def _objective(self, x: Tensor) -> Tensor:
+        """``_global_objective`` as a tensor."""
+
+        return -0.5 * torch.einsum("j,njk,k->n", x, self._matrices, x).mean()
 
     def _move_batch(self, batch: Any) -> tuple[Tensor, Tensor]:
         """Split a batch into (graphs, ignored targets), both on the device."""
@@ -814,11 +886,13 @@ class NonconvexSimplexTask(TaskAdapter):
         return graphs.to(self.device), targets.to(self.device)
 
 
-def _mean_of_batch(outputs: Tensor, targets: Tensor | None = None) -> Tensor:
+def _mean_of_batch(
+    outputs: Tensor, targets: Tensor | None = None, mask: Tensor | None = None
+) -> Tensor:
     """The batch objective: the mean of `f_i(x)` over the batch's matrices."""
 
     del targets
-    return outputs.mean()
+    return row_mean(outputs, mask)
 
 
 def _graphs_of(data: Any) -> Tensor:

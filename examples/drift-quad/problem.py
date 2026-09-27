@@ -108,7 +108,13 @@ from fedbrew.data.manifest_validation import IDENTICAL_TO_TRAIN
 from fedbrew.data.writers.manifest import save_clients_jsonl, save_manifest
 from fedbrew.data.writers.torch_shards import save_client_shard, save_split_client_shard
 from fedbrew.models.config_keys import reject_unknown_model_keys
-from fedbrew.tasks.base import TaskAdapter
+from fedbrew.tasks.base import (
+    TaskAdapter,
+    batch_row_numbers,
+    row_count,
+    row_mean,
+    row_numbers,
+)
 
 #: The optimum's objective value, in closed form and exact for the federated
 #: objective because the offsets sum to zero. `x*` is the zero vector, whose
@@ -175,13 +181,22 @@ class _QuadraticObjective(torch.autograd.Function):  # type: ignore[misc]
     FedLALR paths that wrap the optimizer around it.
     """
 
+    #: Forward and backward are plain tensor code, so ``torch.func.vmap`` can
+    #: run them over a stack of clients as they are (the batched executor).
+    generate_vmap_rule = True
+
     @staticmethod
-    def forward(ctx: Any, x: Tensor, curvature: Tensor, offsets: Tensor) -> Tensor:
+    def forward(x: Tensor, curvature: Tensor, offsets: Tensor) -> Tensor:
         """Return `f_i(x)` for each offset row; shape `(N,)`."""
 
-        ctx.save_for_backward(x, curvature, offsets)
         quadratic = 0.5 * (curvature * x * x).sum()
         return quadratic - offsets @ x
+
+    @staticmethod
+    def setup_context(ctx: Any, inputs: tuple[Tensor, Tensor, Tensor], output: Tensor) -> None:
+        """Keep what the backward reads; separate from forward, as torch.func requires."""
+
+        ctx.save_for_backward(*inputs)
 
     @staticmethod
     def backward(ctx: Any, grad_output: Tensor) -> tuple[Tensor, None, None]:
@@ -735,9 +750,8 @@ class DriftQuadTask(TaskAdapter):
         if optimizer is None:
             optimizer = optim.SGD(model.parameters(), lr=0.01)
         model.train()
-        offsets, targets = self._move_batch(batch)
         optimizer.zero_grad(set_to_none=True)
-        loss = self._criterion(model(offsets), targets)
+        loss, _ = self.functional_loss(model, None, None, self._move_batch(batch))
         loss.backward()
         optimizer.step()
         return {"loss": float(loss.detach())}
@@ -752,22 +766,78 @@ class DriftQuadTask(TaskAdapter):
         """Measure the batch's mean objective, and the iterate it was measured at."""
 
         model.eval()
-        offsets, _ = self._move_batch(batch)
         with torch.no_grad():
-            values = model(offsets)
-            iterate = model.iterate
-            own_optima = offsets / model.curvature
-            drift = torch.linalg.vector_norm(iterate - own_optima, dim=1).mean()
+            outputs = self.functional_eval(model, None, None, self._move_batch(batch))
+        return {name: float(value) for name, value in outputs.items()}
+
+    # -- the batched executor (fedbrew.tasks.base.BatchableTask) --------------
+
+    def split_rows(self, data: Any) -> tuple[Tensor, Tensor]:
+        """A split's offsets, and the dummy targets ``build_dataloader`` pairs them with."""
+
+        offsets = _offsets_of(data).to(self.device)
+        return offsets, torch.zeros(len(offsets), dtype=DTYPE, device=self.device)
+
+    def row_batches(
+        self, data: Any, config: Mapping[str, Any] | bool | None = None
+    ) -> list[Tensor]:
+        """``build_dataloader(data, config)``'s batches as row indices, by the same code."""
+
+        numbers = row_numbers(len(_offsets_of(data)))
+        return [
+            batch_row_numbers(numbered)
+            for numbered, _ in self.build_dataloader({"x": numbers.unsqueeze(1)}, config)
+        ]
+
+    def functional_loss(
+        self,
+        model: QuadraticModel,
+        params: Mapping[str, Tensor] | None,
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """The batch's mean objective at ``params``, or at the model's own when None."""
+
+        loss = self._criterion(self._values(model, params, buffers, batch[0]), batch[1], mask)
+        return loss, {"loss": loss.detach()}
+
+    def functional_eval(
+        self,
+        model: QuadraticModel,
+        params: Mapping[str, Tensor] | None,
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> dict[str, Tensor]:
+        """The batch's mean objective, and the iterate it was measured at, as tensors."""
+
+        offsets = batch[0]
+        values = self._values(model, params, buffers, offsets).detach()
+        iterate = (model.x if params is None else params["x"]).detach()
+        own_optima = offsets / model.curvature
+        drift = row_mean(torch.linalg.vector_norm(iterate - own_optima, dim=1), mask)
         return {
-            "loss": float(values.mean()),
-            "total": float(len(offsets)),
+            "loss": row_mean(values, mask),
+            "total": row_count(offsets, mask),
             # Carried per batch because compute_metrics is handed the outputs
             # and nothing else, and three of the four numbers it returns are
             # functions of the iterate rather than of the objective's value.
-            "optimality_gap": optimality_gap(iterate, model.curvature),
-            "distance_to_optimum": distance_to_optimum(iterate),
-            "distance_to_client_optimum": float(drift),
+            "optimality_gap": 0.5 * (model.curvature * iterate * iterate).sum() - F_STAR,
+            "distance_to_optimum": torch.linalg.vector_norm(iterate),
+            "distance_to_client_optimum": drift,
         }
+
+    def _values(
+        self,
+        model: QuadraticModel,
+        params: Mapping[str, Tensor] | None,
+        buffers: Mapping[str, Tensor] | None,
+        offsets: Tensor,
+    ) -> Tensor:
+        if params is None:
+            return model(offsets)
+        return torch.func.functional_call(model, (dict(params), dict(buffers or {})), (offsets,))
 
     def compute_metrics(self, outputs: Sequence[Any]) -> dict[str, float]:
         """Fold eval-step outputs into the four numbers this task reports.
@@ -845,11 +915,13 @@ class DriftQuadTask(TaskAdapter):
         return offsets.to(self.device), targets.to(self.device)
 
 
-def _mean_of_batch(outputs: Tensor, targets: Tensor | None = None) -> Tensor:
+def _mean_of_batch(
+    outputs: Tensor, targets: Tensor | None = None, mask: Tensor | None = None
+) -> Tensor:
     """The batch objective: the mean of `f_i(x)` over the batch's rows."""
 
     del targets
-    return outputs.mean()
+    return row_mean(outputs, mask)
 
 
 def _offsets_of(data: Any) -> Tensor:

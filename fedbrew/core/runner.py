@@ -20,6 +20,7 @@ from fedbrew.core.artifacts import (
     save_round_metrics_csv,
     save_run_json,
 )
+from fedbrew.core.batched_executor import select_executor
 from fedbrew.core.config import (
     FullConfig,
     evaluates_round,
@@ -133,12 +134,16 @@ def run(
     # than whatever the config guessed, and after _resolve_resume_latest, so
     # the plan names the checkpoint this run will actually load.
     roster = _client_roster_size(components)
+    # Chosen after build_components, which it inspects, and announced in the
+    # plan: a batched run that has to fall back says so before round 1.
+    executor, run_metadata["executor"] = select_executor(components)
     print_plan_header(
         config,
         deterministic=deterministic,
         deterministic_warn_only=deterministic_warn_only,
         client_count=roster,
         resume_from=config.runtime.extra.get("resume_from"),
+        executor=run_metadata["executor"],
     )
     # One object, both halves of the run surface. The live footer and the
     # settled block report the same rate and the same estimate because they
@@ -164,6 +169,7 @@ def run(
         on_round_flush=_run_json_writer(config, run_metadata, output_dir, run_started),
         on_client_progress=client_progress_reporter(config, progress),
         on_termination=_termination_reporter(config),
+        executor=executor,
     )
     run_metadata["finished_at"] = _utc_timestamp()
     _record_durations(run_metadata, run_started)

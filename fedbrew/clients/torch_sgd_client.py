@@ -10,6 +10,14 @@ import torch
 from torch import optim
 
 from fedbrew.clients.base import ClientUpdate
+from fedbrew.clients.batched_update import (
+    ClientBatchFit,
+    ClientBatchPlan,
+    LocalProgram,
+    OptimizerSpec,
+    combine_weights,
+    own_loop_updates,
+)
 from fedbrew.clients.local_update_modes import (
     FULL_GRADIENT_UPDATE_MODE,
     MIN_POSITIVE_LEARNING_RATE,
@@ -41,7 +49,7 @@ from fedbrew.core.torch_utils import (
     RESIDENT_STATE_ATTR,
     forget_resident_state,
 )
-from fedbrew.tasks.base import TaskAdapter
+from fedbrew.tasks.base import BatchableTask, TaskAdapter, loss_averages_over_examples
 
 TaskT = TypeVar("TaskT", bound=TaskAdapter)
 
@@ -263,19 +271,44 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
         self._require_training_batches(optimizer_steps)
 
         metrics, evaluated_num_examples = self._post_fit_evaluation(model, train_data, request)
+        return self._fit_result(
+            request,
+            metrics=metrics,
+            evaluated_num_examples=evaluated_num_examples,
+            training_outputs=training_outputs,
+            optimizer_steps=optimizer_steps,
+            model_state=self.task.get_federated_model_state(model),
+            model_state_metadata=self.task.federated_model_state_metadata(model),
+            trainable_parameters=trainable_parameter_count(model),
+        )
+
+    def _fit_result(
+        self,
+        request: FitRequest,
+        *,
+        metrics: dict[str, float],
+        evaluated_num_examples: int,
+        training_outputs: list[Mapping[str, float]],
+        optimizer_steps: int,
+        model_state: dict[str, Any],
+        model_state_metadata: dict[str, Any],
+        trainable_parameters: int,
+        extra_metrics: Mapping[str, float] | None = None,
+    ) -> FitResult:
+        """The FitResult of a trained local update, whichever executor trained it.
+
+        ``metrics`` are the post-fit pass's, which this extends in place;
+        ``extra_metrics`` go last, after the update's own.
+        """
+
         num_examples = self.task.federated_aggregation_weight(
             training_outputs,
             evaluated_num_examples,
         )
         if num_examples < 0:
             raise ValueError("task federated aggregation weight must be non-negative")
-        model_state = self.task.get_federated_model_state(model)
-        model_state_metadata = self.task.federated_model_state_metadata(model)
         model_state_scope = str(model_state_metadata["model_state_scope"])
         communicated_parameters, communicated_bytes = model_state_size(model_state)
-        trainable_parameters = sum(
-            int(parameter.numel()) for parameter in model.parameters() if parameter.requires_grad
-        )
         active_target_tokens = sum(float(output.get("total", 0.0)) for output in training_outputs)
         metrics.update(
             {
@@ -286,6 +319,7 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
                 "communicated_bytes": float(communicated_bytes),
             }
         )
+        metrics.update(extra_metrics or {})
         return FitResult(
             round_id=request.round_id,
             client_id=self.client_id,
@@ -297,6 +331,130 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
             },
             metrics=metrics,
         )
+
+    # -- the batched executor (fedbrew/clients/batched_update.py) -----------
+
+    def batched_unsupported(self) -> str | None:
+        """Why the batched executor cannot run this client's update, or None if it can.
+
+        A rule runs batched only when its own class declares ``_batched_rule``:
+        a subclass inherits the hooks below but not the declaration, so one
+        whose update differs is never run as its parent's.
+        """
+
+        if type(self).__dict__.get("_batched_rule") is None:
+            return f"update rule {type(self).__name__} declares no batched update"
+        if not isinstance(self.task, BatchableTask):
+            return (
+                f"task {type(self.task).__name__} provides no functional_loss and "
+                "functional_eval (fedbrew.tasks.base.BatchableTask)"
+            )
+        if not loss_averages_over_examples(self.task):
+            return f"task {type(self.task).__name__}'s training loss is not a mean over examples"
+        if self.base_seed is None:
+            return "experiment.seed is unset, so the loaders draw from the process-wide stream"
+        if getattr(self.task, "_scaler", None) is not None:
+            return "runtime.use_amp is on, and GradScaler's loss scale is sequential state"
+        return None
+
+    def batched_program(self, request: FitRequest) -> LocalProgram:
+        """What one step of this rule's own loop does this round (``_build_optimizer``)."""
+
+        if self.momentum is None or self.weight_decay is None or self.nesterov is None:
+            raise ValueError("local_sgd requires optimizer settings from configuration")
+        return LocalProgram(
+            optimizer=OptimizerSpec(
+                "sgd",
+                lr=self._round_learning_rate(request.round_id),
+                momentum=self.momentum,
+                weight_decay=self.weight_decay,
+                nesterov=bool(self.nesterov),
+            ),
+            combine="full" if self.update_mode == FULL_GRADIENT_UPDATE_MODE else "batch",
+        )
+
+    def batched_plan(self, request: FitRequest, model: torch.nn.Module) -> ClientBatchPlan:
+        """This round's local update, as the batched executor runs it (``fit``'s loop).
+
+        ``model`` is the architecture, for checking the broadcast against;
+        its values are not read.
+        """
+
+        train_data = _get_train_data(self.client_data)
+        start = self.batched_start(request, model)
+        program = self.batched_program(request)
+        updates = own_loop_updates(
+            self.task.row_batches(train_data, self._train_loader_config(request.round_id)),
+            local_iterations=self.local_iterations,
+            update_mode=self.update_mode,
+            max_local_steps=self.max_local_steps,
+            client_id=self.client_id,
+        )
+        self._require_training_batches(len(updates))
+        return self._batch_plan(request, program, train_data, updates, start)
+
+    def batched_start(self, request: FitRequest, model: torch.nn.Module) -> Mapping[str, Any]:
+        """The broadcast state the update starts from, checked as ``fit`` checks it."""
+
+        return self._checked_federated_payload(model, request.payload, context="fit request")[0]
+
+    def _batch_plan(
+        self,
+        request: FitRequest,
+        program: LocalProgram,
+        train_data: Any,
+        updates: list[list[Any]],
+        start: Mapping[str, Any],
+        **controls: Any,
+    ) -> ClientBatchPlan:
+        return ClientBatchPlan(
+            program=program,
+            train_data=train_data,
+            updates=updates,
+            weights=combine_weights(
+                updates, program.combine, getattr(self, "frozen_gradient_weighting", None)
+            ),
+            eval_batches=list(
+                self.task.row_batches(train_data, self._eval_loader_config(request.round_id))
+            ),
+            evaluate=request.post_fit_evaluation,
+            start=start,
+            **controls,
+        )
+
+    def batched_result(
+        self, request: FitRequest, plan: ClientBatchPlan, fit: ClientBatchFit
+    ) -> FitResult:
+        """The FitResult ``fit`` returns, from the batched executor's share for this client."""
+
+        metrics, evaluated_num_examples = self._batched_post_fit(plan, fit)
+        return self._fit_result(
+            request,
+            metrics=metrics,
+            evaluated_num_examples=evaluated_num_examples,
+            training_outputs=fit.training_outputs,
+            optimizer_steps=fit.optimizer_steps,
+            model_state=fit.model_state,
+            model_state_metadata=fit.model_state_metadata,
+            trainable_parameters=fit.trainable_parameters,
+        )
+
+    def _batched_post_fit(
+        self,
+        plan: ClientBatchPlan,
+        fit: ClientBatchFit,
+        metrics: list[str] | None = None,
+    ) -> tuple[dict[str, float], int]:
+        """``_post_fit_evaluation``'s result, from the executor's pass over the same batches."""
+
+        if plan.evaluate:
+            assert fit.eval_outputs is not None
+            return self._evaluation_metrics(
+                fit.eval_outputs, plan.train_data, metrics=metrics, prefix="fit_"
+            )
+        if plan.eval_batches:
+            return {}, plan.eval_count
+        return {}, _infer_split_num_examples(plan.train_data)
 
     def _require_training_batches(self, optimizer_steps: int) -> None:
         """Refuse to report a fit that never ran a step.
@@ -428,17 +586,8 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
         was found.
         """
 
-        model_state = payload.get("model_state")
-        if not isinstance(model_state, dict):
-            raise ValueError(f"{context} payload must contain model_state")
-        expected_metadata = self.task.federated_model_state_metadata(model)
-        received_scope = payload_model_state_scope(payload, context=context)
-        received_metadata = payload.get("model_state_metadata")
-        validate_federated_state_metadata(
-            expected_metadata,
-            received_metadata if isinstance(received_metadata, Mapping) else None,
-            received_scope=received_scope,
-            context=context,
+        model_state, expected_metadata = self._checked_federated_payload(
+            model, payload, context=context
         )
         # Identity, not equality: the loop builds one payload per round and
         # shares it across every request, so `is` is exactly the question
@@ -455,6 +604,34 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
         if not mutates:
             setattr(model, RESIDENT_STATE_ATTR, model_state)
         return expected_metadata
+
+    def _checked_federated_payload(
+        self,
+        model: torch.nn.Module,
+        payload: Mapping[str, Any],
+        *,
+        context: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """A received payload's model state, and the metadata it was checked against.
+
+        Raises:
+            ValueError: If the payload carries no model state, or one whose
+                scope or metadata does not describe ``model``.
+        """
+
+        model_state = payload.get("model_state")
+        if not isinstance(model_state, dict):
+            raise ValueError(f"{context} payload must contain model_state")
+        expected_metadata = self.task.federated_model_state_metadata(model)
+        received_scope = payload_model_state_scope(payload, context=context)
+        received_metadata = payload.get("model_state_metadata")
+        validate_federated_state_metadata(
+            expected_metadata,
+            received_metadata if isinstance(received_metadata, Mapping) else None,
+            received_scope=received_scope,
+            context=context,
+        )
+        return model_state, expected_metadata
 
     def _evaluate_requested_splits(
         self,
@@ -682,6 +859,17 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
             self._eval_loader_config(round_id or 0),
         )
         outputs = [self.task.eval_step(model, batch) for batch in eval_loader]
+        return self._evaluation_metrics(outputs, data, metrics=metrics, prefix=prefix)
+
+    def _evaluation_metrics(
+        self,
+        outputs: list[Mapping[str, Any]],
+        data: Any,
+        metrics: list[str] | None = None,
+        prefix: str = "",
+    ) -> tuple[dict[str, float], int]:
+        """``_evaluate_model``'s result from the eval-step outputs of its pass over ``data``."""
+
         metric_names = self.metrics if metrics is None else metrics
         computed = self.task.compute_metrics(outputs)
         if prefix:
@@ -785,6 +973,14 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
             self.client_id,
             phase,
         )
+
+
+def trainable_parameter_count(model: torch.nn.Module) -> int:
+    """The elements of ``model``'s trainable parameters: the ``trainable_parameters`` metric."""
+
+    return sum(
+        int(parameter.numel()) for parameter in model.parameters() if parameter.requires_grad
+    )
 
 
 def _get_train_data(client_data: Any) -> Any:

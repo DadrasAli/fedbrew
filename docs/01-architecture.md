@@ -70,6 +70,11 @@ arrives -- what every run did before the seam existed. An executor reports each
 result to a `FitObserver` before yielding it, so the per-client records, the
 fit time and the progress footer are written whatever runs the clients.
 `tests/test_execution_seam.py` pins that the loop calls nothing else.
+The second executor is `BatchedExecutor` (`fedbrew/core/batched_executor.py`),
+selected by `runtime.performance.executor: batched`: it trains the sampled
+clients together over a stack of their parameters and yields each result as a
+row of that stack, which the `StreamingAggregator` folds as before. Chapter 11
+§9.
 
 A round's checkpoints become visible last, so a kill anywhere in a round leaves
 a checkpoint whose round the metric history already holds, which a resume can

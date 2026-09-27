@@ -402,6 +402,8 @@ strategy does not load clean under another.
 | `reuse_model` | bool | `true` | One cached model instance per architecture. |
 | `fast_batching` | bool | `true` | Classification only. |
 | `shard_cache_bytes` | int | `4294967296` (4 GiB) | Forced to `0` for the centralized strategy, whose pooled view would only hold a second copy. |
+| `executor` | `sequential` \| `batched` | `sequential` | How a round's sampled clients are run. `batched` trains them together, to summation order; a configuration it cannot batch runs `sequential` and the plan header and `run.json` say why. Chapter 11 §9. |
+| `executor_chunk_bytes` | int > 0 | `1073741824` (1 GiB) | The memory one chunk of batched clients may take. Chapter 11 §9. |
 | `dataloader` | mapping | — | Four keys, below. |
 
 These three are checked by `validate_config` and then **applied**, not

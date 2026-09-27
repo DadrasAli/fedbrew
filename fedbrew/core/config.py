@@ -770,6 +770,8 @@ _KNOWN_EXTRA_KEYS: dict[str, frozenset[str]] = {
             "fast_batching",
             "dataloader",
             "shard_cache_bytes",
+            "executor",
+            "executor_chunk_bytes",
         }
     ),
     # Only the four the loader takes from the config. batch_size, shuffle,
@@ -901,6 +903,8 @@ def _validate_performance_values(config: FullConfig) -> None:
             "including 'false' -- as true."
         )
 
+    _validate_executor_values(performance)
+
     precision = performance.get("matmul_precision")
     if precision is None:
         return
@@ -911,6 +915,32 @@ def _validate_performance_values(config: FullConfig) -> None:
             + f", got {precision!r}. torch does not reject an unknown value; "
             "it warns and keeps the current setting, so the run would train at "
             "highest while run.json recorded this."
+        )
+
+
+#: What ``runtime.performance.executor`` accepts: how a round's sampled clients
+#: are run (chapter 11 §9). ``batched`` on a configuration it cannot batch runs
+#: ``sequential``, says so in the plan header, and records why in run.json.
+EXECUTORS: frozenset[str] = frozenset({"sequential", "batched"})
+
+
+def _validate_executor_values(performance: Mapping[str, Any]) -> None:
+    """Refuse an executor the runner does not have, or a chunk budget it cannot use."""
+
+    executor = performance.get("executor")
+    if executor is not None and (not isinstance(executor, str) or executor not in EXECUTORS):
+        raise RunRefused(
+            "runtime.performance.executor must be one of "
+            + ", ".join(sorted(EXECUTORS))
+            + f", got {executor!r}"
+        )
+    chunk_bytes = performance.get("executor_chunk_bytes")
+    if chunk_bytes is not None and (
+        isinstance(chunk_bytes, bool) or not isinstance(chunk_bytes, int) or chunk_bytes <= 0
+    ):
+        raise RunRefused(
+            "runtime.performance.executor_chunk_bytes must be a positive integer, "
+            f"got {chunk_bytes!r}"
         )
 
 

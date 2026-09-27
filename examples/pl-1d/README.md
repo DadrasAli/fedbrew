@@ -188,8 +188,8 @@ and `torch_fedprox_client._FedProxCorrectingOptimizer` correct `.grad` inside a
 
 For a task author that means the five abstract methods are now enough.
 `PL1DTask` still has `_move_batch` and `_criterion`, but as its own helpers —
-its `train_step` and `eval_step` call them — not as an interface a client rule
-requires. Same for the batch shape: batches here still carry a dummy target
+its `train_step`, `eval_step` and the functional forms of the two that the
+batched executor runs call them — not as an interface a client rule requires. Same for the batch shape: batches here still carry a dummy target
 tensor nothing reads, but that is now this example's own choice and could be
 dropped, rather than a shape every rule imposes by destructuring into two.
 

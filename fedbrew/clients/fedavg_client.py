@@ -5,16 +5,36 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+import torch
+
+from fedbrew.clients.batched_update import (
+    ClientBatchFit,
+    ClientBatchPlan,
+    LocalProgram,
+    OptimizerSpec,
+    sgd_mode_updates,
+)
 from fedbrew.clients.local_update_modes import (
     SUPPORTED_FROZEN_WEIGHTING,
     SUPPORTED_UPDATE_MODES,
     normalize_choice,
     run_sgd_update_mode,
 )
-from fedbrew.clients.torch_sgd_client import TorchSGDClient, _get_train_data
+from fedbrew.clients.torch_sgd_client import (
+    TorchSGDClient,
+    _get_train_data,
+    trainable_parameter_count,
+)
 from fedbrew.core.checkpointing import refuse_a_reconfigured_resume
-from fedbrew.core.federated_state import model_state_size
 from fedbrew.core.protocol import FitRequest, FitResult
+
+#: How each update mode forms the gradient one update steps on.
+_COMBINE_OF_MODE = {
+    "single_batch": "batch",
+    "sequential_epoch": "batch",
+    "frozen_batch_gradients": "frozen",
+    "full_gradient": "full",
+}
 
 
 class FedAvgClient(TorchSGDClient):
@@ -119,45 +139,66 @@ class FedAvgClient(TorchSGDClient):
         )
 
         metrics, evaluated_num_examples = self._post_fit_evaluation(model, train_data, request)
-        num_examples = self.task.federated_aggregation_weight(
-            update_result.training_outputs,
-            evaluated_num_examples,
-        )
-        if num_examples < 0:
-            raise ValueError("task federated aggregation weight must be non-negative")
-
-        model_state = self.task.get_federated_model_state(model)
-        model_state_metadata = self.task.federated_model_state_metadata(model)
-        model_state_scope = str(model_state_metadata["model_state_scope"])
-        communicated_parameters, communicated_bytes = model_state_size(model_state)
-        trainable_parameters = sum(
-            int(parameter.numel()) for parameter in model.parameters() if parameter.requires_grad
-        )
-        active_target_tokens = sum(
-            float(output.get("total", 0.0)) for output in update_result.training_outputs
-        )
-
-        metrics.update(
-            {
-                "optimizer_steps": float(update_result.optimizer_steps),
-                "active_target_tokens": float(active_target_tokens),
-                "trainable_parameters": float(trainable_parameters),
-                "communicated_parameters": float(communicated_parameters),
-                "communicated_bytes": float(communicated_bytes),
-                "client_learning_rate": float(learning_rate_used),
-            }
-        )
-
-        return FitResult(
-            round_id=request.round_id,
-            client_id=self.client_id,
-            num_examples=num_examples,
-            payload={
-                "model_state": model_state,
-                "model_state_scope": model_state_scope,
-                "model_state_metadata": model_state_metadata,
-            },
+        return self._fit_result(
+            request,
             metrics=metrics,
+            evaluated_num_examples=evaluated_num_examples,
+            training_outputs=update_result.training_outputs,
+            optimizer_steps=update_result.optimizer_steps,
+            model_state=self.task.get_federated_model_state(model),
+            model_state_metadata=self.task.federated_model_state_metadata(model),
+            trainable_parameters=trainable_parameter_count(model),
+            extra_metrics={"client_learning_rate": float(learning_rate_used)},
+        )
+
+    #: The batched executor runs this rule's update: every mode, with or
+    #: without max_grad_norm (fedbrew/clients/batched_update.py).
+    _batched_rule = "fedavg"
+
+    def batched_program(self, request: FitRequest) -> LocalProgram:
+        """What one update of ``run_sgd_update_mode`` does this round, checked as it checks."""
+
+        learning_rate = self._round_learning_rate(request.round_id)
+        if self.local_iterations <= 0:
+            raise ValueError("local_iterations must be positive")
+        if learning_rate <= 0.0:
+            raise ValueError("learning_rate must be positive")
+        return LocalProgram(
+            optimizer=OptimizerSpec("sgd", lr=learning_rate),
+            combine=_COMBINE_OF_MODE[self.update_mode],
+            max_grad_norm=self.max_grad_norm,
+        )
+
+    def batched_plan(self, request: FitRequest, model: torch.nn.Module) -> ClientBatchPlan:
+        """This round's local update, as the batched executor runs it (``fit``)."""
+
+        train_data = _get_train_data(self.client_data)
+        start = self.batched_start(request, model)
+        program = self.batched_program(request)
+        updates = sgd_mode_updates(
+            self.task.row_batches(train_data, self._train_loader_config(request.round_id)),
+            local_iterations=self.local_iterations,
+            update_mode=self.update_mode,
+            client_id=self.client_id,
+        )
+        return self._batch_plan(request, program, train_data, updates, start)
+
+    def batched_result(
+        self, request: FitRequest, plan: ClientBatchPlan, fit: ClientBatchFit
+    ) -> FitResult:
+        """The FitResult ``fit`` returns, from the batched executor's share for this client."""
+
+        metrics, evaluated_num_examples = self._batched_post_fit(plan, fit)
+        return self._fit_result(
+            request,
+            metrics=metrics,
+            evaluated_num_examples=evaluated_num_examples,
+            training_outputs=fit.training_outputs,
+            optimizer_steps=fit.optimizer_steps,
+            model_state=fit.model_state,
+            model_state_metadata=fit.model_state_metadata,
+            trainable_parameters=fit.trainable_parameters,
+            extra_metrics={"client_learning_rate": float(plan.program.optimizer.lr)},
         )
 
     def get_state(self) -> dict[str, Any]:

@@ -821,6 +821,7 @@ def save_run_json(
         "llm",
         "federated_model_state",
         "extensions",
+        "executor",
     ):
         value = metadata.get(key)
         if isinstance(value, Mapping) and value:

@@ -331,7 +331,17 @@ has nothing to hold out.
    numbers, which `tests/test_shipped_config_explicitness.py` enforces for
    everything under `configs/`.
 
-7. **Document it** in chapter 07 if it is in the package, and add any new
+7. **Declare a batched update if it has one.** A rule built on
+   `TorchSGDClient` runs under `runtime.performance.executor: batched` only
+   when its own class sets `_batched_rule` and gives `batched_program` (what
+   one step does), `batched_plan` (the batches its loop draws, from
+   `sgd_mode_updates` or `own_loop_updates`) and `batched_result` (its
+   `FitResult`, from the tail its `fit` shares). A subclass inherits the hooks
+   but not the declaration, so a rule whose step differs from its parent's
+   runs sequentially rather than as its parent. `fedbrew/clients/batched_update.py`,
+   chapter 11 §9.
+
+8. **Document it** in chapter 07 if it is in the package, and add any new
    metric to chapter 08. Both have guards that will fail if a *registered*
    built-in name has no prose. The guards read `builtin()` rather than `list()`,
    so an extension loaded by a test does not put the suite into a state where
@@ -510,6 +520,22 @@ so a task that omits it produces **no `central_test_*` column at all** and
 nothing in the run says why. Both shipped tasks implement it in three lines:
 build an eval dataloader, `eval_step` each batch, `compute_metrics` the
 outputs.
+
+Implement `BatchableTask` (`fedbrew/tasks/base.py`) as well if its runs should
+be able to use `runtime.performance.executor: batched`; without it they run
+sequentially and say so (chapter 11 §9). Four methods: `split_rows` returns a
+split as the loader's rows, `row_batches` the loader's batches as row indices
+-- run your own `build_dataloader` on `row_numbers(n)` so the order is the
+loader's by construction -- and `functional_loss` and `functional_eval` are
+`train_step`'s loss and `eval_step`'s outputs as functions of a parameter
+dict. Write them with the operations `train_step` and `eval_step` use, and
+have those two call them with `params=None`, the model's own: the five linear
+examples do, so each objective has one definition and a one-client batched run
+is the sequential one bit for bit. They must be pure -- no host round trip,
+no random draw, no in-place edit -- for `torch.func.vmap` to run them over a
+stack, and take a `mask` for padded rows (`row_mean`, `row_count`). A custom
+`autograd.Function` needs `setup_context` and `generate_vmap_rule = True`;
+drift-quad's shows the form.
 
 Override `train_loss_denominator(batch, output)` if your training loss is not
 a mean over the batch's examples. It returns the count `train_step`'s loss

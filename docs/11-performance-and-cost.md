@@ -40,7 +40,9 @@ comparison, and its figures are not quoted.
 The consequence for tuning: a round's wall clock is dominated by per-client
 Python overhead, not by matrix multiplication. Settings that reduce the number
 of client visits help; settings that make each visit's arithmetic faster mostly
-do not.
+do not. The exception is `runtime.performance.executor: batched`, which removes
+the per-client overhead instead, by training the sampled clients together
+(§9).
 
 **Each worker builds its optimizer once.** Every local update used to construct
 its own `torch.optim` optimizer, 86 µs per client per round, 86 ms a round at
@@ -292,6 +294,9 @@ not a dated measurement but a guarded one, re-measured by
 
 `bench_compare_runs.py` encodes the rule worth stating on its own: **a
 performance change is only a performance change if the numbers are identical.**
+The one setting that changes them by summation order alone, the batched
+executor, is held to a stated tolerance instead, and to identity where nothing
+is summed differently (§9).
 
 ## 8. Before a long run
 
@@ -304,6 +309,78 @@ performance change is only a performance change if the numbers are identical.**
 5. Consider `--staging` only if the job is long and storage is slow.
 6. Choose a checkpoint interval; `save_every_round` on a large model fills a
    quota quickly.
+
+## 9. The batched executor
+
+`runtime.performance.executor: batched` trains a round's sampled clients
+together (`fedbrew/core/batched_executor.py`). Every client's parameters are
+stacked on a leading client dimension, and each local step is one
+`torch.func.vmap(torch.func.grad(...))` of the task's `functional_loss` over
+the stack, followed by the rule's step over the same dimension
+(`fedbrew/clients/batched_update.py`). The post-fit pass that gives `fit_*`
+and the aggregation weight is one `vmap` of `functional_eval`, and the results
+are folded in one weighted reduction per tensor (chapter 07 §3.3).
+`sequential`, the default, is the reference it is held to.
+
+| Key | Type | Default | Effect |
+| --- | --- | --- | --- |
+| `executor` | `sequential` \| `batched` | `sequential` | How a round's sampled clients are run. |
+| `executor_chunk_bytes` | int > 0 | `1073741824` (1 GiB) | The memory one chunk of clients may take. Read only by `batched`. |
+
+**What it computes.** Per client, what the sequential executor computes:
+
+- the same batches in the same order, because each client's rule replays its
+  own loader iteration on the row numbers of its split to name them
+  (`sgd_mode_updates`, `own_loop_updates`), drawing what the loader draws;
+- the same records, weights and state, because each client's rule builds its
+  `FitResult` from its share of the stack with the code its own `fit` ends
+  with (`batched_result`);
+- the same arithmetic, to summation order: `functional_loss` is the loss
+  `train_step` backpropagates, and the step is `torch.optim.SGD`'s and
+  `AdamW`'s single-tensor step operation for operation. Across a stack,
+  batched matrix products and reductions round in another order; a chunk of
+  one client is not vmapped at all.
+
+`tests/test_batched_executor_tolerance.py` runs each configuration through
+both executors and compares every round's model, every persistent client
+state and every non-timing cell: within `1e-12` relative in float64 (a tensor
+against its own largest element, since an element whose exact value is 0
+holds rounding residue), the identity and count columns equal, and bit for bit
+when every chunk holds one client or a round samples one.
+
+**What is batchable.** A run is batched when all of these hold; otherwise it
+runs sequentially, the plan header says `Executor: sequential; batched falls
+back: <reason>` in amber, and `run.json` records the reason
+(`reproducibility.executor`, chapter 09 §3.3):
+
+| Part | Requirement |
+| --- | --- |
+| Task | implements `BatchableTask` (`fedbrew/tasks/base.py`): `split_rows`, `row_batches`, `functional_loss`, `functional_eval`, with a loss that averages over rows. The five linear examples do. |
+| Model | its federated state is exactly its parameters, all trainable; no dropout at `p > 0`, which draws from the process-wide generator; no batch normalisation, whose statistics are state |
+| Rule | declares a batched update on its own class: `fedavg`, every update mode, with or without `max_grad_norm` |
+| Runtime | `experiment.seed` set, so every loader draws from its own generator; `use_amp: false`; CPU or CUDA; not the `centralized` strategy |
+
+**Buckets and chunks.** Clients whose updates have the same shape -- the same
+number of updates, each over the same number of batches -- are stepped
+together. Within a bucket a batch shorter than the others is padded with one
+of the client's own rows and masked, and the task's functions take the mean
+over the real rows. Consecutive clients join a chunk while its estimated
+memory fits `executor_chunk_bytes`: per client, its parameters times three
+(parameters, gradient, sum or update) plus its optimizer's slots and any
+persistent state, plus its split's rows and two of its longest batch. A
+chunk's results are yielded in request order before the next chunk is
+stacked, so what is held at once is one chunk's stack, and the previous one's
+while the aggregator still holds that chunk's last result, as the sequential
+executor's previous client state is held while the next client fits.
+`run.json` records the most clients one chunk held (`largest_chunk_clients`).
+
+**What it keeps.** The no-training-batches refusal comes before any client
+runs, in the rule's own words; the non-finite refusal names the client and
+tensor the sequential run names; permuting the sampled clients permutes the
+results, and a NaN in one client's data leaves every other client's result
+bit-identical; neither executor draws from the process-wide generator on a
+seeded run; two batched runs are identical. `tests/test_batched_executor.py`
+pins each.
 
 ## For agents
 
@@ -319,6 +396,8 @@ performance change is only a performance change if the numbers are identical.**
 | `fedbrew/core/data_staging.py` | staging, and the unresolvable-root path |
 | `fedbrew/data/manifest_dataset.py` | on-demand shard reads and the cache |
 | `fedbrew/clients/lazy_pool.py` | building clients on demand |
+| `fedbrew/core/batched_executor.py` | §9: `BatchedExecutor`, its buckets and chunks, and `select_executor`'s fallback |
+| `fedbrew/clients/batched_update.py` | §9: a rule's update as steps over a stack, and the batches its loop draws |
 | `tools/` | the benchmark and profiling scripts |
 
 ### Commands
@@ -342,7 +421,9 @@ python tools/bench_compare_runs.py --help
 
 1. **A performance change must not change the numbers.** `bench_compare_runs.py`
    exists to check that; any `central_test_accuracy` difference rejects the
-   change regardless of the speedup.
+   change regardless of the speedup. The batched executor changes them by
+   summation order only, and is held to `1e-12` relative in float64, and to
+   identity with one client per chunk (§9).
 2. **Aggregation stays streaming.** Two model states, whatever the
    participation rate — never one per participant.
 3. **Clients are released after evaluation, never after fitting.** Releasing
@@ -379,6 +460,9 @@ python tools/bench_compare_runs.py --help
 | `tests/test_evaluation_client_scope.py` | The four client scopes. |
 | `tests/test_round_timing.py` | The six phase timings. |
 | `tests/test_report_run_size.py` | Reported run size. |
+| `tests/test_batched_executor_tolerance.py` | §9: both executors agree on every model, client state and cell, to `1e-12`, and bit for bit with one client per chunk. |
+| `tests/test_batched_executor.py` | §9: the keys, the fallback and its record, client isolation, the refusals, the generator, and one chunk at a time. |
+| `tests/test_stacked_fold.py` | A stack's rows fold to their mean, and one row exactly. |
 
 ### Known failure modes
 
@@ -397,3 +481,6 @@ python tools/bench_compare_runs.py --help
   a 500-round FEMNIST run.
 - **Quoting a number from this chapter as current.** They are dated
   measurements. Remeasure with `tools/`.
+- **Asking for `batched` and not reading the plan header.** A configuration
+  it cannot batch runs sequentially, as fast as it always did, and the header
+  and `run.json` say why.

@@ -207,7 +207,7 @@ gives, bit for bit; `tests/test_run_json_timing_is_running.py` checks it.
 
 ### 3.3 `reproducibility`
 
-Four to seven sub-blocks, whichever the run actually had. **Empty entries are
+Five to eight sub-blocks, whichever the run actually had. **Empty entries are
 dropped rather than written as `null`**, so a missing key means the run never
 had one, not that a lookup returned nothing.
 
@@ -219,6 +219,7 @@ had one, not that a lookup returned nothing.
 | `runtime` | what torch **actually held**: resolved device, `matmul_precision`, `cudnn_benchmark`, the determinism flags |
 | `llm` | model and adapter provenance, when there is one |
 | `federated_model_state` | `model_state_scope` and the parameter counts |
+| `executor` | which executor ran the clients (`used`), and when `runtime.performance.executor: batched` could not, why (`fallback`); a batched run adds the most clients one chunk held (`largest_chunk_clients`). Always present. Chapter 11 §9 |
 | `extensions` | one entry per `experiment.extensions` item: the path it resolved to, the SHA-256 of the file that was imported, and the names it registered. `code_state` covers the package's commit and nothing outside it, so this is what ties a run to the version of an out-of-tree component |
 
 **What the code record identifies.** The commit, a tracked-dirty flag and the

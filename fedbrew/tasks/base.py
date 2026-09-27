@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 
-from torch import nn
+import torch
+from torch import Tensor, nn
 
 from fedbrew.core.federated_state import model_state_size
 from fedbrew.core.torch_utils import OptimizerLike, get_model_state, load_model_state
@@ -51,6 +52,107 @@ class SupportsDatasetEvaluation(Protocol):
 
     def evaluate_model(self, model: Any, data: Any) -> dict[str, float]:
         """Score `model` over the whole of `data`."""
+
+
+@runtime_checkable
+class BatchableTask(Protocol):
+    """A task the batched executor can train and measure many clients of at once.
+
+    Optional, as :class:`SupportsDatasetEvaluation` is: a task without these
+    four methods runs sequentially, and ``runtime.performance.executor:
+    batched`` falls back to that with a notice (chapter 11 §9).
+
+    The executor holds a split as its rows, gathers each batch as those rows at
+    the batch's indices, and runs ``functional_loss`` and ``functional_eval``
+    through ``torch.func`` over a stack of clients' parameters. What the task
+    declares by implementing them:
+
+    - a batch of ``build_dataloader`` is exactly ``split_rows`` at the indices
+      ``row_batches`` yields for it, in the same order and after the same
+      random draws, and holds as many examples as it holds rows, so
+      ``evaluation_total`` and the example count are its row count;
+    - ``functional_loss`` and ``functional_eval`` compute what ``train_step``
+      and ``eval_step`` compute, with the same operations, from ``params``
+      rather than from the model's own tensors: they draw nothing from a
+      random generator, move nothing to the host, and change none of their
+      inputs, so ``torch.func.vmap`` can run them over a leading client
+      dimension and, without one, they are ``train_step``'s and
+      ``eval_step``'s arithmetic bit for bit;
+    - the training loss is a mean over the batch's rows, and every trainable
+      parameter enters it.
+
+    ``mask`` is None for a batch whose rows are all real. For a batch padded to
+    a longer one it holds 1.0 for each real row and 0.0 for each padded row,
+    and the result is the unpadded batch's, up to summation order.
+    """
+
+    def split_rows(self, data: Any) -> tuple[Tensor, ...]:
+        """A split's rows as the loader yields them: on the task's device, in its dtypes."""
+
+    def row_batches(self, rows: int, config: Mapping[str, Any]) -> Iterable[Tensor]:
+        """What ``build_dataloader(data, config)`` yields for a split of ``rows`` rows, as indices.
+
+        Re-iterable as the loader is, and each iteration draws what the
+        loader's draws, from the same generator.
+        """
+
+    def functional_loss(
+        self,
+        model: nn.Module,
+        params: Mapping[str, Tensor],
+        buffers: Mapping[str, Tensor],
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """The loss ``train_step`` backpropagates, and what it returns, as tensors."""
+
+    def functional_eval(
+        self,
+        model: nn.Module,
+        params: Mapping[str, Tensor],
+        buffers: Mapping[str, Tensor],
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> dict[str, Tensor]:
+        """What ``eval_step`` returns for the batch, key for key, as tensors."""
+
+
+def row_mean(values: Tensor, mask: Tensor | None = None) -> Tensor:
+    """The mean of ``values`` over a batch's rows, or over its real rows under ``mask``.
+
+    ``values`` holds one number per row. Without a mask this is ``values.mean()``
+    itself, so a task's loss written with it is its ``train_step`` loss bit for
+    bit; with one (:class:`BatchableTask`), padded rows count for nothing.
+    """
+
+    if mask is None:
+        return values.mean()
+    return (values * mask).sum() / mask.sum()
+
+
+def row_count(rows: Tensor, mask: Tensor | None = None) -> Tensor:
+    """How many real rows a batch holds, as a float64 tensor: its ``total``."""
+
+    if mask is None:
+        return torch.tensor(float(len(rows)), dtype=torch.float64, device=rows.device)
+    return mask.sum().to(torch.float64)
+
+
+def row_numbers(rows: int) -> Tensor:
+    """``0 .. rows - 1`` as float64: a split whose rows are their own numbers.
+
+    Handed to a task's ``build_dataloader`` in place of the rows, it makes the
+    loader name the rows each batch holds: its shuffle, batching and
+    ``drop_last`` are the loader's own. Exact below 2**53 rows.
+    """
+
+    return torch.arange(rows, dtype=torch.float64)
+
+
+def batch_row_numbers(numbered: Tensor) -> Tensor:
+    """The row numbers a batch of :func:`row_numbers` holds, as a CPU index tensor."""
+
+    return numbered.reshape(len(numbered), -1)[:, 0].to(device="cpu", dtype=torch.long)
 
 
 def batch_example_count(batch: Any) -> float:

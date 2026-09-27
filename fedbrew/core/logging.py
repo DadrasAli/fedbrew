@@ -192,6 +192,7 @@ def print_plan_header(
     client_count: int | None = None,
     resume_from: str | Path | None = None,
     surface: Surface | None = None,
+    executor: Mapping[str, Any] | None = None,
 ) -> None:
     """Print what this run is about to do, before it does any of it.
 
@@ -209,11 +210,15 @@ def print_plan_header(
     do" that is right only for as long as it happens to match. See
     ``runner.run``, which resolves them once for the run and for this.
 
-    Amber appears in exactly five places, and nowhere else in this header: a
+    Amber appears in exactly six places, and nowhere else in this header: a
     matmul precision that changes the numbers, determinism downgraded to
     warn-only, an output directory that already holds files, a resumed run,
-    and components loaded from outside the package. Each is something a
-    reader would otherwise assume was not the case.
+    components loaded from outside the package, and a batched executor that
+    fell back to the sequential one. Each is something a reader would
+    otherwise assume was not the case.
+
+    ``executor`` is ``select_executor``'s record: which executor runs and, if
+    ``batched`` was asked for and cannot run, why.
     """
 
     if _is_quiet(config):
@@ -224,7 +229,8 @@ def print_plan_header(
     blocks: list[tuple[str | None, list[Row]]] = [
         (
             None,
-            _identity_rows(config, resume_from, deterministic, deterministic_warn_only),
+            _identity_rows(config, resume_from, deterministic, deterministic_warn_only)
+            + _executor_rows(executor),
         ),
         ("data", _data_rows(config, client_count)),
         ("federation", _federation_rows(config, client_count)),
@@ -245,6 +251,22 @@ def print_plan_header(
         for row in rows:
             surface.row(row, width=width, wrap=True)
     surface.blank()
+
+
+def _executor_rows(executor: Mapping[str, Any] | None) -> list[Row]:
+    """The executor, when it is not the default one run without asking."""
+
+    if not executor:
+        return []
+    fallback = executor.get("fallback")
+    if fallback:
+        # Amber: batched was asked for and the run is sequential. It changes
+        # no number, and it is the difference between the run time the config
+        # was written for and the one it will take.
+        return [Row("Executor", f"sequential; batched falls back: {fallback}", tone=AMBER)]
+    if executor.get("used") == "batched":
+        return [Row("Executor", "batched")]
+    return []
 
 
 def _identity_rows(

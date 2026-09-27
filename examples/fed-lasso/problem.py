@@ -135,7 +135,13 @@ from fedbrew.data.manifest_validation import IDENTICAL_TO_TRAIN
 from fedbrew.data.writers.manifest import save_clients_jsonl, save_manifest
 from fedbrew.data.writers.torch_shards import save_client_shard, save_split_client_shard
 from fedbrew.models.config_keys import reject_unknown_model_keys
-from fedbrew.tasks.base import TaskAdapter
+from fedbrew.tasks.base import (
+    TaskAdapter,
+    batch_row_numbers,
+    row_count,
+    row_mean,
+    row_numbers,
+)
 
 #: Every tensor here is float64. The objective's floor is set by `lam` and sits
 #: around 1e-3, far above float32's precision, so this is not about resolving
@@ -943,6 +949,13 @@ class FedLassoTask(TaskAdapter):
         self._optimum = spec.optimum().to(self.device)
         self._optimal_objective = spec.optimal_objective()
         self._truth_support = spec.truth_support()
+        # F(x) is measured on every eval batch, so its data is built once here
+        # rather than from the spec per call; the same values either way.
+        self._design = spec.design().to(self.device)
+        self._client_targets = spec.client_targets().to(self.device)
+        self._truth_mask = torch.tensor(
+            [index in self._truth_support for index in range(spec.dim)], device=self.device
+        )
         # Three arguments, not the two `criterion(outputs, targets)` shape that
         # `TorchClassificationTask` uses: the L1 term is a function of the
         # parameters. README, §"A composite objective does not fit
@@ -1015,9 +1028,8 @@ class FedLassoTask(TaskAdapter):
         if optimizer is None:
             optimizer = optim.SGD(model.parameters(), lr=0.01)
         model.train()
-        features, targets = self._move_batch(batch)
         optimizer.zero_grad(set_to_none=True)
-        loss = self._criterion(model, model(features), targets)
+        loss, _ = self.functional_loss(model, None, None, self._move_batch(batch))
         loss.backward()
         optimizer.step()
         return {"loss": float(loss.detach())}
@@ -1032,25 +1044,110 @@ class FedLassoTask(TaskAdapter):
         """Measure the batch's objective, and six properties of the iterate."""
 
         model.eval()
-        features, targets = self._move_batch(batch)
         with torch.no_grad():
-            loss = self._criterion(model, model(features), targets)
-            iterate = model.iterate
-            tolerance = model.support_tolerance
-            found = support_of(iterate, tolerance)
+            outputs = self.functional_eval(model, None, None, self._move_batch(batch))
+        return {name: float(value) for name, value in outputs.items()}
+
+    # -- the batched executor (fedbrew.tasks.base.BatchableTask) --------------
+
+    def split_rows(self, data: Any) -> tuple[Tensor, Tensor]:
+        """A split's design rows and targets, as ``build_dataloader`` slices them."""
+
+        features, targets = _rows_of(data)
+        return features.to(self.device), targets.to(self.device)
+
+    def row_batches(
+        self, data: Any, config: Mapping[str, Any] | bool | None = None
+    ) -> list[Tensor]:
+        """``build_dataloader(data, config)``'s batches as row indices, by the same code.
+
+        The loader is run on the row numbers in place of the rows, so its
+        permutation, batching and ``drop_last`` are the ones it applies.
+        """
+
+        numbers = row_numbers(len(_rows_of(data)[1]))
+        batches = self.build_dataloader({"x": numbers.unsqueeze(1), "y": numbers}, config)
+        return [batch_row_numbers(numbered) for _, numbered in batches]
+
+    def functional_loss(
+        self,
+        model: LassoModel,
+        params: Mapping[str, Tensor] | None,
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """The batch's composite objective at ``params``, or at the model's own when None."""
+
+        features, targets = batch
+        iterate = model.x if params is None else params["x"]
+        outputs = (
+            model(features)
+            if params is None
+            else torch.func.functional_call(model, (dict(params), dict(buffers or {})), (features,))
+        )
+        loss = self._criterion(model, outputs, targets, self._penalty(model, iterate), mask)
+        return loss, {"loss": loss.detach()}
+
+    def functional_eval(
+        self,
+        model: LassoModel,
+        params: Mapping[str, Tensor] | None,
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> dict[str, Tensor]:
+        """The batch's objective, and six properties of the iterate, as tensors.
+
+        Each is the arithmetic ``ProblemSpec.objective_at``, ``support_of`` and
+        ``support_f1`` do on Python floats, done on float64 tensors in the same
+        order, so a value is the same number either way.
+        """
+
+        loss, _ = self.functional_loss(model, params, buffers, batch, mask)
+        iterate = (model.x if params is None else params["x"]).detach()
+        found = iterate.abs() > model.support_tolerance
         return {
-            "loss": float(loss),
-            "total": float(len(targets)),
+            "loss": loss.detach(),
+            "total": row_count(batch[1], mask),
             # Carried per batch because compute_metrics is handed the outputs
             # and nothing else, and six of the seven numbers it returns are
             # functions of the iterate and the problem rather than of the batch.
-            "optimality_gap": self.spec.objective_at(iterate) - self._optimal_objective,
-            "distance_to_optimum": float(torch.linalg.vector_norm(iterate - self._optimum)),
-            "distance_to_truth": float(torch.linalg.vector_norm(iterate - self._truth)),
-            "support_size": float(len(found)),
-            "support_f1": support_f1(found, self._truth_support),
-            "exact_zeros": float(int((iterate == 0.0).sum())),
+            "optimality_gap": self._objective(model, iterate) - self._optimal_objective,
+            "distance_to_optimum": torch.linalg.vector_norm(iterate - self._optimum),
+            "distance_to_truth": torch.linalg.vector_norm(iterate - self._truth),
+            "support_size": found.sum().to(DTYPE),
+            "support_f1": self._support_f1(found),
+            "exact_zeros": (iterate == 0.0).sum().to(DTYPE),
         }
+
+    def _penalty(self, model: LassoModel, iterate: Tensor) -> Tensor:
+        """``model.penalty()`` at ``iterate``."""
+
+        return penalty_of(iterate, model.penalty_strength, model.penalty_form, model.x.numel())
+
+    def _objective(self, model: LassoModel, iterate: Tensor) -> Tensor:
+        """`F(x)`: ``ProblemSpec.objective_at``, term by term, on the cached data."""
+
+        total: Tensor | None = None
+        for row in self._client_targets:
+            residual = self._design @ iterate - row
+            smooth = 0.5 * (residual @ residual) / len(row)
+            value = smooth + penalty_of(
+                iterate, self.spec.penalty_strength, self.spec.penalty, self.spec.dim
+            )
+            total = value if total is None else total + value
+        assert total is not None
+        return total / len(self._client_targets)
+
+    def _support_f1(self, found: Tensor) -> Tensor:
+        """``support_f1(found, truth)``, from the support as a mask."""
+
+        hits = (found & self._truth_mask).sum().to(DTYPE)
+        precision = hits / found.sum().to(DTYPE)
+        recall = hits / len(self._truth_support)
+        f1 = 2.0 * precision * recall / (precision + recall)
+        return torch.where(hits > 0, f1, torch.zeros_like(f1))
 
     def compute_metrics(self, outputs: Sequence[Any]) -> dict[str, float]:
         """Fold eval-step outputs into the seven numbers this task reports.
@@ -1148,11 +1245,24 @@ class FedLassoTask(TaskAdapter):
         return features.to(self.device), targets.to(self.device)
 
 
-def _composite_loss(model: LassoModel, outputs: Tensor, targets: Tensor) -> Tensor:
-    """`(1/2|B|) ||H_B x - y_B||^2 + lam ||x||_1`, as a scalar tensor."""
+def _composite_loss(
+    model: LassoModel,
+    outputs: Tensor,
+    targets: Tensor,
+    penalty: Tensor | None = None,
+    mask: Tensor | None = None,
+) -> Tensor:
+    """`(1/2|B|) ||H_B x - y_B||^2 + lam ||x||_1`, as a scalar tensor.
+
+    ``penalty`` is the penalty at the iterate the outputs came from, the
+    model's own when None; under ``mask`` the smooth part is over the real
+    rows.
+    """
 
     residual = outputs - targets
-    return 0.5 * (residual * residual).mean() + model.penalty()
+    return 0.5 * row_mean(residual * residual, mask) + (
+        model.penalty() if penalty is None else penalty
+    )
 
 
 def _rows_of(data: Any) -> tuple[Tensor, Tensor]:
