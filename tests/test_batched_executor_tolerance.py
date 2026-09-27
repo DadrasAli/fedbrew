@@ -51,9 +51,16 @@ from tests.test_reproducibility import TIMING
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ROUNDS = 4
 TOLERANCE = 1e-12
-EXAMPLES = ("fed-lasso", "drift-quad", "simplex-lsq", "nonconvex-simplex", "pl-1d")
+EXAMPLES = ("fed-lasso", "drift-quad", "simplex-lsq", "nonconvex-simplex", "pl-1d", "fed-lasso-l2")
 #: Columns that are identities or counts, compared for equality.
 EXACT_COLUMNS = {"round_id", "client_id", "phase", "num_clients", "num_examples", "optimizer_steps"}
+#: Compared only where the executors must be bit-identical. fed-lasso's
+#: ``exact_zeros`` counts the coordinates that are bit for bit 0.0, and a
+#: coordinate whose exact value is 0 -- its clients come in exact +/- pairs --
+#: comes out 0.0 or 1e-19 by summation order: 1 against 4 at round 1 under
+#: AdamW (measured 2026-09-27). The count is a function of summation order
+#: itself; the coordinates it counts are compared, to tolerance, in the model.
+ORDER_COUNTED = ("exact_zeros",)
 CSVS = ("round_metrics.csv", "client_update_metrics.csv", "client_metrics.csv")
 
 _generated: dict[str, Path] = {}
@@ -164,6 +171,8 @@ class ExecutorRuns(unittest.TestCase):
             for column, value_s in row_s.items():
                 if column in TIMING or value_s == row_b[column]:
                     continue
+                if not exact and column.endswith(ORDER_COUNTED):
+                    continue
                 where = f"{batched.name} row {number} {column}: {row_b[column]} vs {value_s}"
                 self.assertFalse(exact or column in EXACT_COLUMNS, where)
                 self.assertLessEqual(
@@ -228,7 +237,10 @@ def with_client(config: dict[str, Any], **client: Any) -> dict[str, Any]:
 
 
 class EveryLinearExampleTest(ExecutorRuns):
-    """The shipped FedAvg arm of each: three shuffled epochs a round, eight clients."""
+    """The shipped FedAvg arm of each, and fed-lasso's smooth control.
+
+    Shuffled epochs, eight clients.
+    """
 
     def test_each_example(self) -> None:
         for name in EXAMPLES:
@@ -290,6 +302,116 @@ class PartialParticipationTest(ExecutorRuns):
         config = example_config("fed-lasso")
         config["server"]["participation_rate"] = 0.125
         self.assertAgree(*self.both(config), exact=True)
+
+
+def rule_arms() -> Iterator[tuple[str, dict[str, Any]]]:
+    """local_sgd, local_adamw, FedProx and SCAFFOLD on fed-lasso, each under both of its modes."""
+
+    arms: list[tuple[str, dict[str, Any]]] = [
+        (
+            "local_sgd",
+            {
+                "update_rule": "local_sgd",
+                "momentum": 0.9,
+                "nesterov": True,
+                "weight_decay": 0.01,
+                "learning_rate_schedule": "cosine",
+                "min_learning_rate": 0.001,
+            },
+        ),
+        (
+            "local_sgd/heavy-ball",
+            {
+                "update_rule": "local_sgd",
+                "momentum": 0.5,
+                "nesterov": False,
+                "weight_decay": 0.0,
+                "learning_rate_schedule": "constant",
+                "min_learning_rate": 0.0,
+            },
+        ),
+        (
+            "local_adamw",
+            {
+                "update_rule": "local_adamw",
+                "learning_rate": 0.01,
+                "weight_decay": 0.01,
+                "beta1": 0.9,
+                "beta2": 0.99,
+                "epsilon": 1e-8,
+                "learning_rate_schedule": "cosine",
+                "min_learning_rate": 0.001,
+                "max_local_steps": 7,
+            },
+        ),
+        ("fedprox", {"update_rule": "fedprox", "proximal_mu": 0.5}),
+        ("scaffold", {"update_rule": "scaffold"}),
+    ]
+    for label, client in arms:
+        for mode in ("sequential_epoch", "full_gradient"):
+            yield f"{label}/{mode}", {**client, "update_mode": mode}
+
+
+def rule_config(client: dict[str, Any]) -> dict[str, Any]:
+    """The smooth control's FedAvg arm with its rule replaced.
+
+    ``fed-lasso-l2``, the same problem with the ridge penalty, and not the
+    lasso: `sign(x)`, the L1 term's subgradient, is 0 at exactly 0 and +-1 a
+    rounding error away, so a coordinate that cancels to 0.0 in one summation
+    order and to -4.3e-19 in the other takes steps `lam` apart from there.
+    Under AdamW, which normalises the step, the two runs were 1.3e-3 apart
+    in that coordinate at round 2 (measured 2026-09-27). That departure is the
+    kink's; a smooth objective shows what the executors do. The engine's
+    options a rule does not take go.
+    """
+
+    config = example_config("fed-lasso-l2")
+    for option in (
+        "momentum",
+        "weight_decay",
+        "nesterov",
+        "learning_rate_schedule",
+        "min_learning_rate",
+        "frozen_gradient_weighting",
+    ):
+        config["client"].pop(option, None)
+    config["client"].update(client)
+    if client["update_rule"] == "scaffold":
+        config["server"]["strategy"] = "scaffold"
+    return config
+
+
+class EveryRuleTest(ExecutorRuns):
+    """Stage b: the rules with their own loop, their optimizer state and SCAFFOLD's ``c_i``.
+
+    Every checkpoint holds every client's ``c_i``, so SCAFFOLD's persistent
+    state is compared round by round with the model.
+    """
+
+    def test_every_rule(self) -> None:
+        for label, client in rule_arms():
+            with self.subTest(rule=label):
+                self.assertAgree(*self.both(rule_config(client)))
+
+    def test_every_rule_on_ragged_clients(self) -> None:
+        for label, client in rule_arms():
+            with self.subTest(rule=label):
+                self.assertAgree(*self.both(rule_config(client), data=ragged_clients))
+
+    def test_every_rule_one_client_per_chunk_is_bit_identical(self) -> None:
+        for label, client in rule_arms():
+            with self.subTest(rule=label):
+                batched, sequential = self.both(
+                    rule_config(client), data=ragged_clients, executor_chunk_bytes=1
+                )
+                self.assertAgree(batched, sequential, exact=True)
+
+    def test_scaffold_at_partial_participation(self) -> None:
+        """A client's ``c_i`` carries over the rounds it sits out."""
+
+        config = rule_config({"update_rule": "scaffold", "update_mode": "sequential_epoch"})
+        config["server"]["participation_rate"] = 0.5
+        self.assertAgree(*self.both(config))
 
 
 class BatchedRunsAreDeterministicTest(ExecutorRuns):

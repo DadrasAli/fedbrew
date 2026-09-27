@@ -346,7 +346,20 @@ both executors and compares every round's model, every persistent client
 state and every non-timing cell: within `1e-12` relative in float64 (a tensor
 against its own largest element, since an element whose exact value is 0
 holds rounding residue), the identity and count columns equal, and bit for bit
-when every chunk holds one client or a round samples one.
+when every chunk holds one client or a round samples one. Two things the
+tolerance cannot cover, both about values whose exact answer is 0:
+
+- **a count of exact zeros** -- fed-lasso's `exact_zeros` -- is a function of
+  summation order itself: a coordinate that cancels to 0 comes out `0.0` or
+  `1e-19` by the order of the sum. It is compared bit for bit where the
+  executors must agree, and not otherwise;
+- **a kink** -- fed-lasso's L1 term, whose subgradient `sign(x)` is 0 at
+  exactly 0 and ±1 a rounding error away -- turns that residue into a step
+  `lam` apart, and from there the two runs part by more than rounding: under
+  AdamW, 1.3e-3 in one coordinate at round 2 (measured 2026-09-27). The run
+  was on the kink, not the executor wrong; the same happens to one executor
+  across thread counts. The rules are compared on the smooth control,
+  `fed-lasso-l2`.
 
 **What is batchable.** A run is batched when all of these hold; otherwise it
 runs sequentially, the plan header says `Executor: sequential; batched falls
@@ -357,7 +370,7 @@ back: <reason>` in amber, and `run.json` records the reason
 | --- | --- |
 | Task | implements `BatchableTask` (`fedbrew/tasks/base.py`): `split_rows`, `row_batches`, `functional_loss`, `functional_eval`, with a loss that averages over rows. The five linear examples do. |
 | Model | its federated state is exactly its parameters, all trainable; no dropout at `p > 0`, which draws from the process-wide generator; no batch normalisation, whose statistics are state |
-| Rule | declares a batched update on its own class: `fedavg`, every update mode, with or without `max_grad_norm` |
+| Rule | declares a batched update on its own class: `fedavg` in every update mode, with or without `max_grad_norm`; `local_sgd` with momentum, Nesterov, weight decay and a cosine rate; `local_adamw`, its step cap included; `fedprox`; `scaffold`, whose `c_i` is gathered from each client and its new value kept there. The last four under both of their modes. `fedlalr`, `delta_sgd`, `fedavg_ft` and `centralized` run sequentially. |
 | Runtime | `experiment.seed` set, so every loader draws from its own generator; `use_amp: false`; CPU or CUDA; not the `centralized` strategy |
 
 **Buckets and chunks.** Clients whose updates have the same shape -- the same

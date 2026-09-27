@@ -78,6 +78,10 @@ def _measures_and_filters(client: type) -> bool:
         return False
 
     effective = fit_sources[0]
+    # A fit that builds its result in a method of its own -- the tail it shares
+    # with the batched executor -- is read together with that method.
+    for name in re.findall(r"self\.(_\w+_result)\(", effective):
+        effective += inspect.getsource(getattr(client, name))
     measures = all(name in effective for name in COST_METRICS)
     if not measures and "super().fit(" in effective:
         measures = any(all(name in source for name in COST_METRICS) for source in fit_sources[1:])

@@ -334,6 +334,11 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
 
     # -- the batched executor (fedbrew/clients/batched_update.py) -----------
 
+    #: The batched executor runs this rule's update: SGD with momentum,
+    #: Nesterov and weight decay, a cosine rate and a step cap, under either
+    #: of its modes.
+    _batched_rule = "local_sgd"
+
     def batched_unsupported(self) -> str | None:
         """Why the batched executor cannot run this client's update, or None if it can.
 

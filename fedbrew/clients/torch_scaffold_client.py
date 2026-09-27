@@ -8,6 +8,13 @@ from typing import Any
 import torch
 from torch import optim
 
+from fedbrew.clients.batched_update import (
+    ClientBatchFit,
+    ClientBatchPlan,
+    LocalProgram,
+    OptimizerSpec,
+    own_loop_updates,
+)
 from fedbrew.clients.local_update_modes import (
     FULL_GRADIENT_UPDATE_MODE,
     full_gradient_into_grad,
@@ -162,6 +169,31 @@ class TorchScaffoldClient(TorchSGDClient[TaskAdapter]):
             raise ValueError("SCAFFOLD local_steps must be positive")
 
         local_state = get_model_state(model)
+        control_delta = self._update_client_control(
+            global_state, local_state, old_client_control, server_control, local_steps
+        )
+        base_metrics, num_examples = self._post_fit_evaluation(
+            model, train_data, request, metrics=[]
+        )
+        return self._scaffold_result(
+            request,
+            local_state=local_state,
+            control_delta=control_delta,
+            local_steps=local_steps,
+            base_metrics=base_metrics,
+            num_examples=num_examples,
+        )
+
+    def _update_client_control(
+        self,
+        global_state: Mapping[str, Any],
+        local_state: Mapping[str, Any],
+        old_client_control: Mapping[str, Any],
+        server_control: Mapping[str, Any],
+        local_steps: int,
+    ) -> StateDict:
+        """Option II's new ``c_i``, kept, and the delta it made."""
+
         correction = scale_model_state(
             subtract_model_states(global_state, local_state),
             1.0 / (local_steps * self.learning_rate),
@@ -172,10 +204,20 @@ class TorchScaffoldClient(TorchSGDClient[TaskAdapter]):
         )
         control_delta = subtract_model_states(new_client_control, old_client_control)
         self._client_control = new_client_control
+        return control_delta
 
-        base_metrics, num_examples = self._post_fit_evaluation(
-            model, train_data, request, metrics=[]
-        )
+    def _scaffold_result(
+        self,
+        request: FitRequest,
+        *,
+        local_state: dict[str, Any],
+        control_delta: StateDict,
+        local_steps: int,
+        base_metrics: dict[str, float],
+        num_examples: int,
+    ) -> FitResult:
+        """The FitResult of a trained SCAFFOLD update, whichever executor trained it."""
+
         communicated_parameters, communicated_bytes = model_state_size(local_state)
         # SCAFFOLD uploads the model and the control-variate delta together,
         # and the server sends its own control variate back down beside the
@@ -208,6 +250,81 @@ class TorchScaffoldClient(TorchSGDClient[TaskAdapter]):
                 "control_delta": clone_model_state(control_delta),
             },
             metrics=metrics,
+        )
+
+    # -- the batched executor (fedbrew/clients/batched_update.py) -----------
+
+    #: The batched executor runs this rule's update: plain SGD at the fixed
+    #: rate with each gradient corrected by ``c - c_i``, under either mode;
+    #: ``c_i`` is gathered from this client and its new value kept here.
+    _batched_rule = "scaffold"
+
+    def batched_program(self, request: FitRequest) -> LocalProgram:
+        """What one step does: SGD at ``learning_rate``, corrected by the control variates."""
+
+        if self.learning_rate <= 0.0:
+            raise ValueError("learning_rate must be positive for SCAFFOLD")
+        return LocalProgram(
+            optimizer=OptimizerSpec("sgd", lr=self.learning_rate),
+            combine="full" if self.update_mode == FULL_GRADIENT_UPDATE_MODE else "batch",
+            scaffold=True,
+        )
+
+    def batched_start(self, request: FitRequest, model: torch.nn.Module) -> Mapping[str, Any]:
+        """The broadcast state, checked as ``fit`` checks it."""
+
+        global_state = request.payload.get("model_state")
+        if not isinstance(global_state, dict):
+            raise ValueError("fit request payload must contain model_state")
+        if not isinstance(request.payload.get("server_control"), dict):
+            raise ValueError("SCAFFOLD fit request payload must contain server_control")
+        refuse_adapter_state(self, "scaffold", model)
+        return global_state
+
+    def batched_plan(self, request: FitRequest, model: torch.nn.Module) -> ClientBatchPlan:
+        """This round's update, as the batched executor runs it, with both control variates."""
+
+        start = self.batched_start(request, model)
+        program = self.batched_program(request)
+        if self._client_control is None:
+            self._client_control = zeros_like_model_state(start)
+        train_data = _get_train_data(self.client_data)
+        updates = own_loop_updates(
+            self.task.row_batches(train_data, self._train_loader_config(request.round_id)),
+            local_iterations=self.local_iterations,
+            update_mode=self.update_mode,
+            max_local_steps=None,
+            client_id=self.client_id,
+        )
+        if not updates:
+            raise ValueError("SCAFFOLD local_steps must be positive")
+        return self._batch_plan(
+            request,
+            program,
+            train_data,
+            updates,
+            start,
+            client_control=clone_model_state(self._client_control),
+            server_control=request.payload["server_control"],
+        )
+
+    def batched_result(
+        self, request: FitRequest, plan: ClientBatchPlan, fit: ClientBatchFit
+    ) -> FitResult:
+        """The FitResult ``fit`` returns, from the batched executor's share for this client."""
+
+        assert plan.client_control is not None and plan.server_control is not None
+        control_delta = self._update_client_control(
+            plan.start, fit.model_state, plan.client_control, plan.server_control, len(plan.updates)
+        )
+        base_metrics, num_examples = self._batched_post_fit(plan, fit, metrics=[])
+        return self._scaffold_result(
+            request,
+            local_state=fit.model_state,
+            control_delta=control_delta,
+            local_steps=len(plan.updates),
+            base_metrics=base_metrics,
+            num_examples=num_examples,
         )
 
     def get_state(self) -> dict[str, Any]:

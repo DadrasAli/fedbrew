@@ -8,6 +8,12 @@ from typing import Any
 import torch
 from torch import optim
 
+from fedbrew.clients.batched_update import (
+    ClientBatchFit,
+    ClientBatchPlan,
+    LocalProgram,
+    OptimizerSpec,
+)
 from fedbrew.clients.local_update_modes import (
     FULL_GRADIENT_UPDATE_MODE,
     full_gradient_into_grad,
@@ -144,12 +150,32 @@ class TorchFedProxClient(TorchSGDClient[TaskAdapter]):
         base_metrics, num_examples = self._post_fit_evaluation(
             model, train_data, request, metrics=[]
         )
+        return self._fedprox_result(
+            request,
+            model_state=get_model_state(model),
+            parameters=[parameter for parameter in model.parameters() if parameter.requires_grad],
+            reference_parameters=reference_parameters,
+            base_metrics=base_metrics,
+            num_examples=num_examples,
+        )
+
+    def _fedprox_result(
+        self,
+        request: FitRequest,
+        *,
+        model_state: dict[str, Any],
+        parameters: list[torch.Tensor],
+        reference_parameters: list[torch.Tensor],
+        base_metrics: dict[str, float],
+        num_examples: int,
+    ) -> FitResult:
+        """The FitResult of a trained FedProx update, whichever executor trained it."""
+
         proximal_loss = _proximal_loss_value(
-            model,
+            parameters,
             reference_parameters,
             self.proximal_mu,
         )
-        model_state = get_model_state(model)
         # One model's worth per round, the same as FedAvg: the proximal term
         # is computed locally against the state the client was already sent
         # and nothing extra crosses the wire. Reported anyway, because a
@@ -171,6 +197,48 @@ class TorchFedProxClient(TorchSGDClient[TaskAdapter]):
             num_examples=num_examples,
             payload={"model_state": model_state},
             metrics=metrics,
+        )
+
+    # -- the batched executor (fedbrew/clients/batched_update.py) -----------
+
+    #: The batched executor runs this rule's update: plain SGD at the fixed
+    #: rate, with ``mu (w - w0)`` added to each gradient, under either mode.
+    _batched_rule = "fedprox"
+
+    def batched_program(self, request: FitRequest) -> LocalProgram:
+        """What one step does: SGD at ``learning_rate``, corrected by the proximal term."""
+
+        return LocalProgram(
+            optimizer=OptimizerSpec("sgd", lr=self.learning_rate),
+            combine="full" if self.update_mode == FULL_GRADIENT_UPDATE_MODE else "batch",
+            proximal_mu=self.proximal_mu,
+        )
+
+    def batched_start(self, request: FitRequest, model: torch.nn.Module) -> Mapping[str, Any]:
+        """The broadcast state, checked as ``fit`` checks it."""
+
+        global_state = request.payload.get("model_state")
+        if not isinstance(global_state, dict):
+            raise ValueError("fit request payload must contain model_state")
+        refuse_adapter_state(self, "fedprox", model)
+        return global_state
+
+    def batched_result(
+        self, request: FitRequest, plan: ClientBatchPlan, fit: ClientBatchFit
+    ) -> FitResult:
+        """The FitResult ``fit`` returns, from the batched executor's share for this client."""
+
+        base_metrics, num_examples = self._batched_post_fit(plan, fit, metrics=[])
+        state = fit.model_state
+        return self._fedprox_result(
+            request,
+            model_state=state,
+            parameters=list(state.values()),
+            reference_parameters=[
+                plan.start[name].to(dtype=value.dtype) for name, value in state.items()
+            ],
+            base_metrics=base_metrics,
+            num_examples=num_examples,
         )
 
     def get_state(self) -> dict[str, Any]:
@@ -261,11 +329,12 @@ def _reference_parameters(model: torch.nn.Module) -> list[torch.Tensor]:
 
 
 def _proximal_loss_tensor(
-    model: torch.nn.Module,
+    parameters: list[torch.Tensor],
     reference_parameters: list[torch.Tensor],
     proximal_mu: float,
 ) -> torch.Tensor:
-    parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    """``mu / 2 * ||w - w0||^2`` over the model's trainable parameters, in their order."""
+
     if not parameters:
         return torch.tensor(0.0)
     penalty = parameters[0].new_tensor(0.0)
@@ -277,10 +346,10 @@ def _proximal_loss_tensor(
 
 
 def _proximal_loss_value(
-    model: torch.nn.Module,
+    parameters: list[torch.Tensor],
     reference_parameters: list[torch.Tensor],
     proximal_mu: float,
 ) -> float:
     return float(
-        _proximal_loss_tensor(model, reference_parameters, proximal_mu).detach().cpu().item()
+        _proximal_loss_tensor(parameters, reference_parameters, proximal_mu).detach().cpu().item()
     )

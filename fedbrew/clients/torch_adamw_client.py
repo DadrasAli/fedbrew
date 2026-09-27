@@ -8,9 +8,11 @@ from typing import Any
 import torch
 from torch import optim
 
-from fedbrew.clients.local_update_modes import reused_optimizer
+from fedbrew.clients.batched_update import LocalProgram, OptimizerSpec
+from fedbrew.clients.local_update_modes import FULL_GRADIENT_UPDATE_MODE, reused_optimizer
 from fedbrew.clients.torch_sgd_client import TorchSGDClient
 from fedbrew.core.checkpointing import refuse_a_reconfigured_resume
+from fedbrew.core.protocol import FitRequest
 from fedbrew.tasks.base import TaskAdapter
 
 
@@ -122,6 +124,25 @@ class TorchAdamWClient(TorchSGDClient[TaskAdapter]):
         # plain SGD); AdamW takes weight_decay as a required argument, so this
         # subclass narrows it to a plain float.
         self.weight_decay: float = float(weight_decay)
+
+    #: The batched executor runs this rule's update: AdamW from zero moments
+    #: every round, under either mode, with a cosine rate and a step cap.
+    _batched_rule = "local_adamw"
+
+    def batched_program(self, request: FitRequest) -> LocalProgram:
+        """What one step does this round: ``_build_optimizer``'s AdamW."""
+
+        return LocalProgram(
+            optimizer=OptimizerSpec(
+                "adamw",
+                lr=self._round_learning_rate(request.round_id),
+                weight_decay=self.weight_decay,
+                beta1=self.beta1,
+                beta2=self.beta2,
+                eps=self.epsilon,
+            ),
+            combine="full" if self.update_mode == FULL_GRADIENT_UPDATE_MODE else "batch",
+        )
 
     def get_state(self) -> dict[str, Any]:
         """Return serializable client metadata."""
