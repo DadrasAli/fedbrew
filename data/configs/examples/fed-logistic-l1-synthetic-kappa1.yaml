@@ -1,0 +1,39 @@
+# examples/fed-logistic-l1, corpus fed-logistic-l1-synthetic-kappa1.
+#
+# The data: the planted generator on a design whose pooled Gram has condition number 1.
+#
+# One dataset, shared by every problem posed on it; each is an arm under
+# configs/examples/fed-logistic-l1-synthetic-kappa1/, and a convex one's F* is in the optima table
+# (examples/fed-logistic-l1/optima.json) under this corpus's digest:
+#
+#   logistic+l1 at lam = 0.01
+#   logistic+l2sq at lam = 0.01
+#   logistic+nonconvex at lam = 0.01
+#   tanh+l2sq at lam = 0.01
+#
+#   fedbrew generate --config data/configs/examples/fed-logistic-l1-synthetic-kappa1.yaml
+#   fedbrew inspect-data data/generated/examples/fed-logistic-l1-synthetic-kappa1/manifest.json
+#
+# See examples/fed-logistic-l1/README.md.
+
+dataset:
+  name: fed_logistic_l1
+  output_dir: data/generated/examples/fed-logistic-l1-synthetic-kappa1
+  # No draw for it to fix; recorded because every dataset records its seed.
+  seed: 42
+  extensions:
+    - examples/fed-logistic-l1/problem.py
+
+partition:
+  strategy: analytic
+  num_clients: 32
+
+problem:
+  # The corpus's name, recorded beside its digest in the optima table.
+  corpus: fed-logistic-l1-synthetic-kappa1
+  dim: 32
+  rows_per_client: 64
+  sparsity: 3
+  signal_scale: 2.0
+  condition_number: 1.0
+  partition_block: 32

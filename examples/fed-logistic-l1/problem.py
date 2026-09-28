@@ -57,14 +57,19 @@ sequences:
     `c, c + N, c + 2N, ...`. 1 is a stratified deal and `rows_per_client` one
     contiguous band of margins per client; the block is the heterogeneity dial.
 
-The reference optimum
----------------------
-`x*` has no closed form. It is solved once, at generation -- FISTA to identify
-the support, then Newton on it -- and certified by its KKT residual on the
-full vector, which generation refuses above :data:`CERTIFICATE`. `x*`, `F*`
-and the residual are written into the manifest, and the task reads them as
-values: the one structural difference from fed-lasso, whose task re-derives
-its closed form.
+Corpora, and the certified optima
+---------------------------------
+The generator writes a *corpus*: the rows, the labels and the deal, one
+dataset shared by every problem posed on it, and its content digest
+(:func:`corpus_digest`) into the manifest. The problem -- loss, penalty,
+`lam` -- is the run's model block. A convex problem's `x*` has no closed form:
+it is solved once (FISTA to identify an L1 support, then Newton on it; damped
+Newton for the squared L2 penalty), certified by its KKT residual on the full
+vector, and kept in one table (:data:`OPTIMA_TABLE`) keyed by the corpus's
+digest, the loss, the penalty and `lam` (:func:`certify`, ``certify.py``). The
+task looks `F*` up there and refuses a convex problem without an entry
+(:func:`find_optimum`): the one structural difference from fed-lasso, whose
+task re-derives its closed form.
 
 What this file registers
 ------------------------
@@ -74,16 +79,17 @@ Three names, at ``register()`` time, and nothing at import::
     tasks       "fed_logistic_l1"    FedLogisticL1Task
     models      "logistic_vector"    LogisticModel, a d-vector plus its penalty
 
-The problem's `lam`, loss and penalty are on the model as well as in the data,
-because they are part of the objective the client descends and
-``model.extra`` is where a run config carries them; the task is the one object
-handed both, so it is where they are cross-checked.
+The problem's `lam`, loss and penalty are on the model, because they are the
+objective the client descends and ``model.extra`` is where a run config
+carries them; the task is the one object handed both them and the corpus, so
+it is where the optimum is looked up.
 """
 
 from __future__ import annotations
 
 import bz2
 import csv
+import ctypes
 import hashlib
 import json
 import math
@@ -827,15 +833,17 @@ def partition_reference(source: SourceSpec, dim: int, rows: int, lam: float) -> 
 # The problem
 # ---------------------------------------------------------------------------
 
-_MODEL_KEYS = ("penalty_strength", "loss", "penalty", "support_tolerance", "x_init")
+_MODEL_KEYS = ("penalty_strength", "loss", "penalty", "support_tolerance", "x_init", "optima")
 
 
 @dataclass(frozen=True, slots=True)
 class ProblemSpec:
-    """The whole problem, as its dials, plus everything they determine.
+    """A corpus, as its dials, and a problem posed on it: the loss, the penalty, `lam`.
 
-    Everything here but :meth:`optimum` is closed form and cheap. The optimum
-    is a solve, computed once at generation and read back from the manifest.
+    The corpus dials are what the generator writes; the problem is the run's,
+    from its model block. Everything here but :meth:`optimum` is closed form
+    and cheap. The optimum is a solve, done once per corpus and problem by
+    ``certify.py`` and kept in the optima table (:data:`OPTIMA_TABLE`).
     """
 
     num_clients: int = 32
@@ -850,7 +858,7 @@ class ProblemSpec:
     #: the widest recovering `lam`; at 2.0 the recovering window is `lam` in
     #: `[0.02, 0.07]` (measured 2026-09-20).
     signal_scale: float = 2.0
-    #: `lam`.
+    #: `lam`. A problem dial, not a corpus one.
     penalty_strength: float = 0.03
     #: How the margin-sorted rows are dealt: blocks of this many, round robin.
     partition_block: int = 32
@@ -872,6 +880,8 @@ class ProblemSpec:
     partition_reference_lambda: float | None = None
     #: How that margin is taken (:data:`PARTITION_KEYS`).
     partition_key: str = "float"
+    #: The corpus's name, as the optima table records it beside its digest.
+    corpus: str = ""
 
     def __post_init__(self) -> None:
         """Refuse a spec that cannot express what it claims to."""
@@ -1042,46 +1052,6 @@ class ProblemSpec:
         labels = self.labels()
         return [float((labels[index] > 0).to(DTYPE).mean()) for index in self.client_indices()]
 
-    def client_gradient_dispersion(self, optimum: Tensor) -> float:
-        """`zeta^2 = mean_c ||grad l_c(x*) - grad l(x*)||^2`."""
-
-        features, labels = self.design(), self.labels()
-        pooled = smooth_gradient(optimum, features, labels, self.loss)
-        spread = [
-            float(
-                (
-                    (smooth_gradient(optimum, features[index], labels[index], self.loss) - pooled)
-                    ** 2
-                ).sum()
-            )
-            for index in self.client_indices()
-        ]
-        return sum(spread) / len(spread)
-
-    def client_support_sizes(self, iterations: int = 4_000) -> list[int]:
-        """How many non-zeros each client's *own* L1-logistic solution has.
-
-        A reported property of the partition, solved at a short budget with no
-        polish, and not something a run is scored against.
-        """
-
-        features, labels = self.design(), self.labels()
-        return [
-            int(
-                (
-                    solve_reference(
-                        features[index],
-                        labels[index],
-                        self.penalty_strength,
-                        iterations=iterations,
-                        polish_steps=0,
-                    )[0]
-                    != 0.0
-                ).sum()
-            )
-            for index in self.client_indices()
-        ]
-
 
 # ---------------------------------------------------------------------------
 # The model: one d-vector, and the penalty it is scored with
@@ -1108,13 +1078,12 @@ class LogisticModel(nn.Module):  # type: ignore[misc]
 
         Args:
             dim: Problem dimension `d`, from ``model.input_dim``.
-            penalty_strength: `lam`, checked against the manifest's.
+            penalty_strength: `lam`.
             support_tolerance: The threshold the support metrics use. Not part
                 of the objective.
             x_init: Starting value in every coordinate.
-            loss: The loss of the margin, checked against the manifest's.
-            penalty: The penalty `lam` multiplies, checked against the
-                manifest's.
+            loss: The loss of the margin.
+            penalty: The penalty `lam` multiplies.
         """
 
         super().__init__()
@@ -1164,24 +1133,23 @@ def build_logistic_vector(config: Mapping[str, Any] | None = None) -> LogisticMo
 
 
 # ---------------------------------------------------------------------------
-# The generator
+# The generator: one dataset per corpus
 # ---------------------------------------------------------------------------
 
 #: The name of this problem's generator and task, as configs write it.
 DATASET_NAME = "fed_logistic_l1"
 
-#: The ``problem`` keys a generator config may state.
+#: The ``problem`` keys a generator config may state: the corpus's dials. The
+#: loss, the penalty and `lam` are not among them -- they are the run's, and
+#: every problem on a corpus shares its one generated dataset.
 PROBLEM_KEYS = {
+    "corpus",
     "dim",
     "rows_per_client",
     "sparsity",
     "signal_scale",
-    "penalty_strength",
     "partition_block",
-    "loss",
-    "penalty",
     "condition_number",
-    "client_support_sizes",
     "partition_reference_lambda",
     "partition_key",
 }
@@ -1205,7 +1173,7 @@ class GenerationSummary:
 
 
 def _spec_from_config(config: Mapping[str, Any]) -> ProblemSpec:
-    """Read the spec out of a generator config's ``problem`` and ``partition``."""
+    """Read the corpus out of a generator config's ``problem``, ``partition`` and ``source``."""
 
     problem = dict(config.get("problem", {}))
     partition = dict(config.get("partition", {}))
@@ -1219,14 +1187,12 @@ def _spec_from_config(config: Mapping[str, Any]) -> ProblemSpec:
         rows_per_client=int(problem.get("rows_per_client", 64)),
         sparsity=int(problem.get("sparsity", 3)),
         signal_scale=float(problem.get("signal_scale", 2.0)),
-        penalty_strength=float(problem.get("penalty_strength", 0.03)),
         partition_block=int(problem.get("partition_block", 32)),
-        loss=str(problem.get("loss", "logistic")),
-        penalty=str(problem.get("penalty", "l1")),
         condition_number=_optional_float(problem.get("condition_number")),
         source=_source_from_config(config),
         partition_reference_lambda=_optional_float(problem.get("partition_reference_lambda")),
         partition_key=str(problem.get("partition_key", "float")),
+        corpus=str(problem.get("corpus", "")),
     )
 
 
@@ -1263,43 +1229,42 @@ def _optional_float(value: Any) -> float | None:
     return None if value is None else float(value)
 
 
-def _spec_from_reference(reference: Mapping[str, Any]) -> ProblemSpec:
-    """Rebuild the *dials* from the manifest's ``reference``.
+def _spec_from_reference(
+    reference: Mapping[str, Any], model_config: Mapping[str, Any] | None = None
+) -> ProblemSpec:
+    """The corpus from the manifest's ``reference``, and the problem from the model block."""
 
-    `x*` and `F*` are not among them: they are a solve, stored as values.
-    """
-
-    problem = reference["problem"]
+    corpus = reference["problem"]
+    model = dict(model_config or {})
     return ProblemSpec(
-        num_clients=int(problem["clients"]),
-        dim=int(problem["dim"]),
-        rows_per_client=int(problem["rows_per_client"]),
-        sparsity=int(problem.get("sparsity", 3)),
-        signal_scale=float(problem.get("signal_scale", 2.0)),
-        penalty_strength=float(problem["penalty_strength"]),
-        partition_block=int(problem["partition_block"]),
-        loss=str(problem.get("loss", "logistic")),
-        penalty=str(problem.get("penalty", "l1")),
-        condition_number=_optional_float(problem.get("condition_number")),
-        source=None if problem.get("source") is None else _source_of(problem["source"]),
-        partition_reference_lambda=_optional_float(problem.get("partition_reference_lambda")),
-        partition_key=str(problem.get("partition_key", "float")),
+        num_clients=int(corpus["clients"]),
+        dim=int(corpus["dim"]),
+        rows_per_client=int(corpus["rows_per_client"]),
+        sparsity=int(corpus.get("sparsity", 3)),
+        signal_scale=float(corpus.get("signal_scale", 2.0)),
+        penalty_strength=float(model.get("penalty_strength", 0.03)),
+        partition_block=int(corpus["partition_block"]),
+        loss=str(model.get("loss", "logistic")),
+        penalty=str(model.get("penalty", "l1")),
+        condition_number=_optional_float(corpus.get("condition_number")),
+        source=None if corpus.get("source") is None else _source_of(corpus["source"]),
+        partition_reference_lambda=_optional_float(corpus.get("partition_reference_lambda")),
+        partition_key=str(corpus.get("partition_key", "float")),
+        corpus=str(corpus.get("corpus", "")),
     )
 
 
-def _problem_record(spec: ProblemSpec) -> dict[str, Any]:
-    """The dials, as the manifest's ``reference.problem`` records them."""
+def _corpus_record(spec: ProblemSpec) -> dict[str, Any]:
+    """The corpus dials, as the manifest's ``reference.problem`` records them."""
 
     record: dict[str, Any] = {
+        "corpus": spec.corpus,
         "clients": spec.num_clients,
         "dim": spec.dim,
         "rows_per_client": spec.rows_per_client,
         "sparsity": spec.sparsity,
         "signal_scale": spec.signal_scale,
-        "penalty_strength": spec.penalty_strength,
         "partition_block": spec.partition_block,
-        "loss": spec.loss,
-        "penalty": spec.penalty,
     }
     if spec.condition_number is not None:
         record["condition_number"] = spec.condition_number
@@ -1320,28 +1285,38 @@ def _problem_record(spec: ProblemSpec) -> dict[str, Any]:
     return record
 
 
-def reference_of(
-    spec: ProblemSpec,
-    iterations: int = 20_000,
-    client_iterations: int = 4_000,
-    client_supports: bool = False,
-) -> dict[str, Any]:
-    """Everything a run on this data is scored against.
+def corpus_digest(features: Tensor, labels: Tensor, clients: int) -> str:
+    """The SHA-256 of a corpus as its global shard holds it: every row, dealt, and its label.
 
-    Written into the manifest, copied into ``run.json``, and read back by
-    :class:`FedLogisticL1Task`. A problem that is not convex has no certified
-    optimum, so its reference holds no ``x_star``, ``f_star`` or
-    ``kkt_residual``, and its runs report no gap. The two budgets are lowered
-    by ``_self_check``, which checks this block's plumbing and not the shipped
-    accuracy. ``client_supports`` adds each client's own L1 solution's support
-    size (``problem.client_support_sizes``): a solve per client, which is the
-    whole cost of generation at 1,000 clients, so it is asked for.
+    Over the float64 bytes of the stacked rows and labels, in the order the
+    global shard stacks them, after a header naming the client count and the
+    shape. It is what the optima table keys `F*` by: a certified optimum
+    belongs to exactly these rows, and rows that differ in one bit -- another
+    LAPACK's QR, another file -- are another corpus.
+    """
+
+    digest = hashlib.sha256(
+        f"fed_logistic_l1 corpus: {clients} clients, rows {tuple(features.shape)}\n".encode()
+    )
+    for tensor in (features, labels):
+        block = tensor.detach().to(device="cpu", dtype=DTYPE).contiguous()
+        digest.update(ctypes.string_at(block.data_ptr(), block.numel() * block.element_size()))
+    return digest.hexdigest()
+
+
+def corpus_reference(spec: ProblemSpec) -> dict[str, Any]:
+    """What the manifest records of a corpus: its dials, its digest, and what they determine.
+
+    Copied into ``run.json`` and read back by :class:`FedLogisticL1Task`. No
+    optimum: that belongs to a problem posed on the corpus, and lives in the
+    optima table under this reference's ``corpus_digest``.
     """
 
     features, labels = spec.design(), spec.labels()
     stacked = torch.cat(spec.client_indices())
     reference: dict[str, Any] = {
-        "problem": _problem_record(spec),
+        "problem": _corpus_record(spec),
+        "corpus_digest": corpus_digest(features[stacked], labels[stacked], spec.num_clients),
         "rows": spec.rows,
         "rows_per_client": spec.rows_per_client,
         "lipschitz": spec.lipschitz(),
@@ -1354,43 +1329,9 @@ def reference_of(
             truth_support=sorted(spec.truth_support()),
         )
     else:
-        lambda_max = spec.lambda_max()
-        reference.update(lambda_max=lambda_max, lambda_fraction=spec.penalty_strength / lambda_max)
+        reference["lambda_max"] = spec.lambda_max()
     if spec.condition_number is not None:
         reference.update(_gram_record(features))
-    if not spec.certified:
-        return reference
-    optimum, residual = spec.optimum(iterations=iterations)
-    if residual > CERTIFICATE:
-        raise ValueError(
-            f"the reference solve reached a KKT residual of {residual:.3e}, above the "
-            f"{CERTIFICATE:g} this generator certifies to. Every optimality gap on this data "
-            "would be measured against a point that is not the minimiser."
-        )
-    reference.update(
-        {
-            # Stored by its non-zeros on real data: run.json copies the whole
-            # reference into every run, and d is 5,000 on Gisette.
-            "x_star": optimum.tolist() if spec.source is None else _sparse(optimum),
-            # In the order the global shard stacks the rows, which is the order
-            # the task's pooled objective sums in.
-            "f_star": objective(
-                optimum,
-                features[stacked],
-                labels[stacked],
-                spec.penalty_strength,
-                spec.loss,
-                spec.penalty,
-            ),
-            "kkt_residual": residual,
-            "optimum_support": sorted(support_of(optimum, 0.0)),
-            "client_gradient_dispersion": spec.client_gradient_dispersion(optimum),
-        }
-    )
-    if spec.source is None:
-        reference["support_recoverable"] = support_of(optimum, 0.0) == spec.truth_support()
-    if client_supports and spec.penalty == "l1":
-        reference["client_support_sizes"] = spec.client_support_sizes(iterations=client_iterations)
     return reference
 
 
@@ -1401,10 +1342,10 @@ def _sparse(values: Tensor) -> dict[str, list[Any]]:
     return {"indices": indices.tolist(), "values": values[indices].tolist()}
 
 
-def _x_star_of(reference: Mapping[str, Any], dim: int) -> Tensor:
-    """The stored `x*`, dense or by its non-zeros, as a `d`-vector."""
+def _x_star_of(entry: Mapping[str, Any], dim: int) -> Tensor:
+    """A stored `x*`, dense or by its non-zeros, as a `d`-vector."""
 
-    stored = reference["x_star"]
+    stored = entry["x_star"]
     if not isinstance(stored, Mapping):
         return torch.tensor(stored, dtype=DTYPE)
     optimum = torch.zeros(dim, dtype=DTYPE)
@@ -1433,7 +1374,8 @@ def generate_fed_logistic_l1_from_config(
 ) -> GenerationSummary:
     """Write one shard per client, plus the manifest a run reads.
 
-    ``seed`` fixes no draw -- the data is a deterministic function of the spec
+    One dataset per corpus: every problem posed on it runs on these shards.
+    ``seed`` fixes no draw -- the data is a deterministic function of the dials
     -- and is recorded because every dataset records the seed it was made at.
     ``client_splits`` describe a cut and there is nothing to cut: `F_c` is
     defined over all `m` of a client's rows, so all three splits hold them,
@@ -1442,14 +1384,13 @@ def generate_fed_logistic_l1_from_config(
 
     del client_splits
     spec = _spec_from_config(config)
-    client_supports = bool(dict(config.get("problem", {})).get("client_support_sizes", False))
     features = spec.design()
     labels = spec.labels()
     partition = spec.client_indices()
     output_dir = Path(output_dir)
     shards_dir = output_dir / "shards"
     shards_dir.mkdir(parents=True, exist_ok=True)
-    reference = reference_of(spec, client_supports=client_supports)
+    reference = corpus_reference(spec)
 
     clients: list[dict[str, Any]] = []
     for index, rows in enumerate(partition):
@@ -1457,18 +1398,17 @@ def generate_fed_logistic_l1_from_config(
         x = features[rows].clone()
         y = labels[rows].clone()
         save_split_client_shard(shards_dir / f"{client_id}.pt", x, y, x, y, x, y)
-        entry = {
-            "client_id": client_id,
-            "shard": f"shards/{client_id}.pt",
-            "num_examples": 3 * spec.rows_per_client,
-            "num_train_examples": spec.rows_per_client,
-            "num_eval_examples": spec.rows_per_client,
-            "num_test_examples": spec.rows_per_client,
-            "positive_label_fraction": reference["client_label_balance"][index],
-        }
-        if "client_support_sizes" in reference:
-            entry["own_support_size"] = reference["client_support_sizes"][index]
-        clients.append(entry)
+        clients.append(
+            {
+                "client_id": client_id,
+                "shard": f"shards/{client_id}.pt",
+                "num_examples": 3 * spec.rows_per_client,
+                "num_train_examples": spec.rows_per_client,
+                "num_eval_examples": spec.rows_per_client,
+                "num_test_examples": spec.rows_per_client,
+                "positive_label_fraction": reference["client_label_balance"][index],
+            }
+        )
 
     # The server's central pass evaluates F in one go, so the pooled shard is
     # every client's rows stacked: exactly the federated objective, because
@@ -1525,15 +1465,11 @@ def _write_partition_stats(
         "max_examples_per_client": 3 * spec.rows_per_client,
         "mean_examples_per_client": 3.0 * spec.rows_per_client,
         "global_label_counts": {"-1": spec.rows - positives, "1": positives},
-        "penalty_strength": spec.penalty_strength,
         "partition_block": spec.partition_block,
         "min_positive_label_fraction": min(balance),
         "max_positive_label_fraction": max(balance),
         "clients": [dict(client) for client in clients],
     }
-    for key in ("client_gradient_dispersion", "kkt_residual"):
-        if key in reference:
-            payload[key] = reference[key]
     # allow_nan=False: every float here is measured, and a non-finite one is
     # not JSON.
     (output_dir / "partition_stats.json").write_text(
@@ -1541,13 +1477,117 @@ def _write_partition_stats(
         encoding="utf-8",
     )
     columns = ["client_id", "num_examples", "positive_label_fraction"]
-    if "client_support_sizes" in reference:
-        columns.append("own_support_size")
     with (output_dir / "client_stats.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(columns)
         for client in clients:
             writer.writerow([client[column] for column in columns])
+
+
+# ---------------------------------------------------------------------------
+# The certified optima: one table, keyed by corpus digest, loss, penalty, lam
+# ---------------------------------------------------------------------------
+
+#: The shipped table of certified optima, beside this file. A run config may
+#: name another with ``model.optima``.
+OPTIMA_TABLE = Path(__file__).resolve().parent / "optima.json"
+
+
+def certify(spec: ProblemSpec) -> dict[str, Any]:
+    """Solve a convex problem on its corpus, certified, as the table's entry for it.
+
+    `x*` by :meth:`ProblemSpec.optimum`, on the rows in source order; `F*` is
+    `F` at it over the rows as the global shard stacks them, which is the order
+    the task's gap is computed in. Refused above :data:`CERTIFICATE`.
+    """
+
+    if not spec.certified:
+        raise ValueError(f"{spec.loss}+{spec.penalty} is not convex: it has no certified F*")
+    features, labels = spec.design(), spec.labels()
+    stacked = torch.cat(spec.client_indices())
+    optimum, residual = spec.optimum()
+    if residual > CERTIFICATE:
+        raise ValueError(
+            f"the reference solve reached a KKT residual of {residual:.3e}, above the "
+            f"{CERTIFICATE:g} a table entry is certified to"
+        )
+    return {
+        "corpus": spec.corpus,
+        "digest": corpus_digest(features[stacked], labels[stacked], spec.num_clients),
+        "loss": spec.loss,
+        "penalty": spec.penalty,
+        "lam": spec.penalty_strength,
+        "f_star": objective(
+            optimum,
+            features[stacked],
+            labels[stacked],
+            spec.penalty_strength,
+            spec.loss,
+            spec.penalty,
+        ),
+        "kkt_residual": residual,
+        "optimum_support": sorted(support_of(optimum, 0.0)),
+        "x_star": _sparse(optimum),
+    }
+
+
+def read_optima(path: Path) -> list[dict[str, Any]]:
+    """The entries of an optima table; an absent file is an empty table."""
+
+    if not path.is_file():
+        return []
+    return list(json.loads(path.read_text(encoding="utf-8"))["optima"])
+
+
+def write_optimum(path: Path, entry: Mapping[str, Any]) -> None:
+    """Add an entry to a table, replacing the one with the same key, sorted by corpus."""
+
+    key = _key_of(entry)
+    entries = [old for old in read_optima(path) if _key_of(old) != key] + [dict(entry)]
+    entries.sort(key=lambda item: (item["corpus"], item["loss"], item["penalty"], item["lam"]))
+    payload = {
+        "about": (
+            "Certified optima of examples/fed-logistic-l1's convex problems, keyed by the "
+            "corpus's content digest (corpus_digest), the loss, the penalty and lam. "
+            "Written by examples/fed-logistic-l1/certify.py."
+        ),
+        "optima": entries,
+    }
+    path.write_text(json.dumps(payload, indent=1, allow_nan=False) + "\n", encoding="utf-8")
+
+
+def _key_of(entry: Mapping[str, Any]) -> tuple[str, str, str, float]:
+    return (str(entry["digest"]), str(entry["loss"]), str(entry["penalty"]), float(entry["lam"]))
+
+
+def find_optimum(
+    entries: Sequence[Mapping[str, Any]], digest: str, spec: ProblemSpec
+) -> Mapping[str, Any]:
+    """The table's entry for this corpus digest and problem, or a refusal saying why not.
+
+    A convex setting without one is refused rather than run without a gap: an
+    entry for the same corpus name at another digest means the rows are not
+    the ones `F*` was solved on, and no entry means it was never certified.
+    """
+
+    wanted = (digest, spec.loss, spec.penalty, float(spec.penalty_strength))
+    for entry in entries:
+        if _key_of(entry) == wanted:
+            return entry
+    problem = f"{spec.loss}+{spec.penalty} at lam={spec.penalty_strength}"
+    for entry in entries:
+        if entry["corpus"] == spec.corpus and _key_of(entry)[1:] == wanted[1:]:
+            raise ValueError(
+                f"the optima table certifies {problem} on corpus {spec.corpus!r} at digest "
+                f"{entry['digest']}, and this data's digest is {digest}: F* was solved on other "
+                "rows, so it is not this data's optimum. Regenerate the corpus where the table "
+                "was certified, or certify it here with examples/fed-logistic-l1/certify.py."
+            )
+    raise ValueError(
+        f"the optima table has no certified F* for {problem} on corpus {spec.corpus!r} "
+        f"(digest {digest}), and the problem is convex, so every run on it reports a gap. "
+        "Certify it with examples/fed-logistic-l1/certify.py."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1558,8 +1598,9 @@ def _write_partition_stats(
 class FedLogisticL1Task(TaskAdapter):
     """Bridge between the composite objective and the generic FL orchestration.
 
-    Reads `x*` and `F*` out of the manifest as values, where the problem has
-    them: there is no closed form to rebuild them from.
+    Looks `x*` and `F*` up in the optima table by the corpus's digest and the
+    problem, where the problem is convex: there is no closed form to rebuild
+    them from.
     """
 
     def __init__(
@@ -1572,51 +1613,59 @@ class FedLogisticL1Task(TaskAdapter):
         """Build the adapter, and refuse a run whose two halves disagree.
 
         Args:
-            model_config: The resolved ``model`` block: `d`, `lam`, the loss
-                and the penalty.
+            model_config: The resolved ``model`` block: `d`, and the problem --
+                the loss, the penalty and `lam` -- and optionally ``optima``,
+                a table of certified optima other than the shipped one.
             dataset_metadata: The manifest, as ``manifest_dataset`` reports it.
-                Carries ``reference``, written by the generator.
+                Carries the corpus's ``reference``, written by the generator.
             device: The resolved ``runtime.device``.
             **unused: The rest of the task contract, ignored because the loader
                 is built per call.
 
         Raises:
-            ValueError: If the data carries no reference, a convex problem's
-                data carries no optimum, or the model block and the data
-                describe different problems.
+            ValueError: If the data carries no corpus reference, its rows are
+                not the digest it records, the model block's `d` is not the
+                data's, or a convex problem has no certified optimum for this
+                corpus in the table (:func:`find_optimum`).
         """
 
         del unused
         self.device = torch.device(device)
-        self.reference = dict((dataset_metadata or {}).get("reference") or {})
-        if "problem" not in self.reference:
+        metadata = dataset_metadata or {}
+        self.reference = dict(metadata.get("reference") or {})
+        if "corpus_digest" not in self.reference:
             raise ValueError(
                 "fed_logistic_l1 task needs a manifest written by its own generator: the "
-                "problem lives in the manifest's `reference` and this data has none."
+                "corpus and its digest live in the manifest's `reference`, and this data has "
+                "none. Regenerate it with this example's generator."
             )
-        spec = _spec_from_reference(self.reference)
-        _check_model_against_reference(model_config or {}, spec)
-        missing = [key for key in ("x_star", "f_star") if key not in self.reference]
-        if spec.certified and missing:
-            raise ValueError(
-                f"fed_logistic_l1 data for a convex problem is missing {missing}: x* is a "
-                "solve done once at generation. Regenerate the data with this example's "
-                "generator."
-            )
+        model_config = model_config or {}
+        spec = _spec_from_reference(self.reference, model_config)
+        _check_model_against_reference(model_config, spec)
         self.spec = spec
+        pooled = _pooled_rows(spec, metadata)
+        digest = corpus_digest(pooled[0], pooled[1], spec.num_clients)
+        if digest != self.reference["corpus_digest"]:
+            raise ValueError(
+                f"the rows on disk have digest {digest}, and the manifest records "
+                f"{self.reference['corpus_digest']}: the shards are not the corpus it describes."
+            )
         self._optimum: Tensor | None = None
         self._optimal_objective: float | None = None
+        entry: Mapping[str, Any] = {}
         if spec.certified:
-            self._optimum = _x_star_of(self.reference, spec.dim).to(self.device)
-            self._optimal_objective = float(self.reference["f_star"])
+            table = Path(str(model_config.get("optima") or OPTIMA_TABLE))
+            entry = find_optimum(read_optima(table), digest, spec)
+            self._optimum = _x_star_of(entry, spec.dim).to(self.device)
+            self._optimal_objective = float(entry["f_star"])
+        self.optimum_entry = dict(entry)
         # The support a run's is scored against: the planted one, or on real
         # data -- nothing planted -- x*'s own, where the problem has one.
         self._truth: Tensor | None = None
-        self._truth_support: set[int] = set(self.reference.get("optimum_support", ()))
+        self._truth_support: set[int] = set(entry.get("optimum_support", ()))
         if spec.source is None:
             self._truth = spec.truth().to(self.device)
             self._truth_support = spec.truth_support()
-        pooled = _pooled_rows(spec, dataset_metadata or {})
         self._pooled_features = pooled[0].to(self.device)
         self._pooled_labels = pooled[1].to(self.device)
         self._support_mask = torch.tensor(
@@ -1912,23 +1961,14 @@ def _pooled_rows(spec: ProblemSpec, metadata: Mapping[str, Any]) -> tuple[Tensor
 
 
 def _check_model_against_reference(model_config: Mapping[str, Any], spec: ProblemSpec) -> None:
-    """Refuse a model block that describes a different problem than the data."""
+    """Refuse a model block sized for other data than the corpus."""
 
-    stated = (
-        int(model_config.get("input_dim", 0)),
-        float(model_config.get("penalty_strength", 0.03)),
-        str(model_config.get("loss", "logistic")),
-        str(model_config.get("penalty", "l1")),
-    )
-    data = (spec.dim, spec.penalty_strength, spec.loss, spec.penalty)
-    if stated == data:
-        return
-    raise ValueError(
-        "model config describes d={}, lam={}, loss={!r}, penalty={!r}, but the generated "
-        "data is d={}, lam={}, loss={!r}, penalty={!r} (manifest reference). The rows come "
-        "from the shards and the objective from the model block, so a disagreement scores "
-        "the run against the wrong optimum.".format(*stated, *data)
-    )
+    dim = int(model_config.get("input_dim", 0))
+    if dim != spec.dim:
+        raise ValueError(
+            f"model config describes d={dim}, but the corpus is d={spec.dim} (manifest "
+            "reference): the model is sized for other data."
+        )
 
 
 def _loader_config(config: Mapping[str, Any] | bool | None) -> dict[str, Any]:
@@ -1982,9 +2022,10 @@ def _self_check() -> None:
     against the wrong objective. If the partition dropped or duplicated a row,
     `F` would not be the pooled objective. If the certificate were not checked
     on the full vector, a polish off the support would look clean. If autograd
-    disagreed with :func:`gradient`, the run would descend something else. And
-    if the spec did not survive the manifest, the task would rebuild a
-    different problem than the generator wrote.
+    disagreed with :func:`gradient`, the run would descend something else. If
+    the spec did not survive the manifest, the task would rebuild a different
+    corpus than the generator wrote. And if a certified entry's digest were not
+    the generator's, no run could find its `F*`.
     """
 
     spec = ProblemSpec(num_clients=4, dim=8, rows_per_client=16, partition_block=4)
@@ -2041,16 +2082,20 @@ def _check_solve(spec: ProblemSpec) -> str | None:
         return "the KKT residual does not increase away from the optimum"
     if spec.objective_at(optimum) > spec.objective_at(probe):
         return "the reference solve is not the better of two points"
-    reference = reference_of(spec, iterations=400, client_iterations=200, client_supports=True)
-    if _spec_from_reference(reference) != spec:
+    reference = corpus_reference(spec)
+    model_config = {"penalty_strength": spec.penalty_strength, "loss": "logistic", "penalty": "l1"}
+    if _spec_from_reference(reference, model_config) != spec:
         return "the spec does not survive the round trip through the manifest"
     _, residual = solve_l2sq(features, labels, spec.penalty_strength)
     if residual > CERTIFICATE:
         return f"the squared-L2 Newton solve is not certified: residual {residual}"
-    stored = torch.tensor(reference["x_star"], dtype=DTYPE)
+    entry = certify(spec)
+    if entry["digest"] != reference["corpus_digest"]:
+        return "the table's digest is not the one the generator records"
+    stored = _x_star_of(entry, spec.dim)
     stacked = torch.cat(spec.client_indices())
     at_stored = objective(stored, features[stacked], labels[stacked], spec.penalty_strength)
-    if reference["f_star"] != at_stored:
+    if entry["f_star"] != at_stored:
         return "the stored f_star is not F at the stored x_star"
     return None
 

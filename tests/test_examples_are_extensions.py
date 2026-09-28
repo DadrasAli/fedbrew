@@ -51,11 +51,12 @@ ARMS = (
     "fedlalr",
 )
 
-#: examples/fed-logistic-l1's settings: one problem on one dataset each.
+#: examples/fed-logistic-l1's corpora: one generated dataset each, and one
+#: arm per problem posed on it.
 FED_LOGISTIC_SETTINGS = tuple(
     sorted(
         path.stem
-        for path in (REPO_ROOT / "data" / "configs" / "examples").glob("fed-*-lambda*.yaml")
+        for path in (REPO_ROOT / "data" / "configs" / "examples").glob("fed-logistic-l1-*.yaml")
     )
 )
 

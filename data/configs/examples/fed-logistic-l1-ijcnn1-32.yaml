@@ -1,0 +1,52 @@
+# examples/fed-logistic-l1, corpus fed-logistic-l1-ijcnn1-32.
+#
+# The data: LIBSVM ijcnn1, its first 32,000 rows; 32 clients x 1,000 rows, d = 22.
+#
+# One dataset, shared by every problem posed on it; each is an arm under
+# configs/examples/fed-logistic-l1-ijcnn1-32/, and a convex one's F* is in the optima table
+# (examples/fed-logistic-l1/optima.json) under this corpus's digest:
+#
+#   logistic+l1 at lam = 0.01
+#   logistic+l2sq at lam = 0.01
+#   logistic+nonconvex at lam = 0.01
+#   tanh+l2sq at lam = 0.01
+#
+#   fedbrew generate --config data/configs/examples/fed-logistic-l1-ijcnn1-32.yaml
+#   fedbrew inspect-data data/generated/examples/fed-logistic-l1-ijcnn1-32/manifest.json
+#
+# The rows are a public LIBSVM file, which this generator never downloads.
+# Fetch it once; the sha256 below is what pins it:
+#
+#   mkdir -p data/raw/datasets/libsvm
+#   curl -L -o data/raw/datasets/libsvm/ijcnn1.bz2 \
+#     https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary/ijcnn1.bz2
+#
+# See examples/fed-logistic-l1/README.md.
+
+dataset:
+  name: fed_logistic_l1
+  output_dir: data/generated/examples/fed-logistic-l1-ijcnn1-32
+  # No draw for it to fix; recorded because every dataset records its seed.
+  seed: 42
+  extensions:
+    - examples/fed-logistic-l1/problem.py
+
+source:
+  format: libsvm
+  path: data/raw/datasets/libsvm/ijcnn1.bz2
+  sha256: 450dee8470b168e47b9fae1fc160396b8a809c675737837fce3acd51dcdc0481
+  url: https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary/ijcnn1.bz2
+  row_normalize: false
+
+partition:
+  strategy: analytic
+  num_clients: 32
+
+problem:
+  # The corpus's name, recorded beside its digest in the optima table.
+  corpus: fed-logistic-l1-ijcnn1-32
+  dim: 22
+  rows_per_client: 1000
+  partition_block: 50
+  partition_reference_lambda: 0.01
+  partition_key: exact

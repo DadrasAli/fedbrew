@@ -1,17 +1,18 @@
 #!/usr/bin/env python
-"""Run one setting's arms through `fedbrew run`, then table what they produced.
+"""Run one corpus's arms through `fedbrew run`, then table what they produced.
 
 Not a runner. Every arm is a shipped config under
-``configs/examples/<setting>/``, run by the ``fedbrew`` CLI as a subprocess,
-against data written by ``fedbrew generate`` from
-``data/configs/examples/<setting>.yaml``. Nothing here composes a config,
+``configs/examples/<corpus>/``, one problem at one `lam` each, run by the
+``fedbrew`` CLI as a subprocess, against the corpus written by ``fedbrew
+generate`` from ``data/configs/examples/<corpus>.yaml``. Nothing here composes a config,
 registers a component or touches the loop: it runs a directory of arms in
 order, and tables their final round from ``outputs/`` afterwards.
 
 Usage
 -----
-    python examples/fed-logistic-l1/run.py                    # the synthetic setting
-    python examples/fed-logistic-l1/run.py --setting fed-logistic-l2sq-a9a-lambda0.001
+    python examples/fed-logistic-l1/run.py                    # the synthetic corpus
+    python examples/fed-logistic-l1/run.py --corpus fed-logistic-l1-a9a \\
+        --arm logistic-l2sq-lambda0.001
     python examples/fed-logistic-l1/run.py --table-only       # re-table outputs/
 """
 
@@ -29,7 +30,7 @@ import yaml
 
 EXAMPLE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = EXAMPLE_DIR.parent.parent
-DEFAULT_SETTING = "fed-logistic-l1-synthetic-lambda0.03"
+DEFAULT_CORPUS = "fed-logistic-l1-synthetic"
 
 #: The columns tabled, as (central_test_ column, label, format). A problem
 #: without a certified optimum writes no gap and no distance to it.
@@ -44,17 +45,17 @@ COLUMNS = (
 )
 
 
-def config_paths(setting: str, arm: str | None) -> list[Path]:
-    """The setting's arm configs to run, sorted, or the one asked for."""
+def config_paths(corpus: str, arm: str | None) -> list[Path]:
+    """The corpus's arm configs to run, sorted, or the one asked for."""
 
-    directory = REPO_ROOT / "configs" / "examples" / setting
+    directory = REPO_ROOT / "configs" / "examples" / corpus
     if not directory.is_dir():
         raise SystemExit(f"{directory} does not exist")
     available = {path.stem: path for path in sorted(directory.glob("*.yaml"))}
     if arm is None:
         return list(available.values())
     if arm not in available:
-        raise SystemExit(f"unknown arm {arm!r}; {setting} has: {', '.join(available)}")
+        raise SystemExit(f"unknown arm {arm!r}; {corpus} has: {', '.join(available)}")
     return [available[arm]]
 
 
@@ -113,7 +114,7 @@ def main(argv: list[str] | None = None) -> None:
     """Run the arms, then print the table built from outputs/."""
 
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--setting", default=DEFAULT_SETTING, help="The setting's directory name.")
+    parser.add_argument("--corpus", default=DEFAULT_CORPUS, help="The corpus's directory name.")
     parser.add_argument("--arm", help="One arm, rather than the whole directory.")
     parser.add_argument(
         "--table-only", action="store_true", help="Table whatever outputs/ already holds."
@@ -121,13 +122,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--quiet", action="store_true", help="Suppress each run's surface.")
     args = parser.parse_args(argv)
 
-    paths = config_paths(args.setting, args.arm)
+    paths = config_paths(args.corpus, args.arm)
     if not args.table_only:
-        manifest = REPO_ROOT / "data" / "generated" / "examples" / args.setting / "manifest.json"
+        manifest = REPO_ROOT / "data" / "generated" / "examples" / args.corpus / "manifest.json"
         if not manifest.is_file():
             raise SystemExit(
                 f"{manifest} does not exist. Generate it first:\n"
-                f"  fedbrew generate --config data/configs/examples/{args.setting}.yaml"
+                f"  fedbrew generate --config data/configs/examples/{args.corpus}.yaml"
             )
         for path in paths:
             run_arm(path, args.quiet)

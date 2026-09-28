@@ -1,0 +1,35 @@
+# examples/fed-logistic-l1, corpus fed-logistic-l1-synthetic.
+#
+# The data: the planted 3-sparse signal on the Halton design; 32 clients x 64 rows, d = 32.
+#
+# One dataset, shared by every problem posed on it; each is an arm under
+# configs/examples/fed-logistic-l1-synthetic/, and a convex one's F* is in the optima table
+# (examples/fed-logistic-l1/optima.json) under this corpus's digest:
+#
+#   logistic+l1 at lam = 0.03
+#
+#   fedbrew generate --config data/configs/examples/fed-logistic-l1-synthetic.yaml
+#   fedbrew inspect-data data/generated/examples/fed-logistic-l1-synthetic/manifest.json
+#
+# See examples/fed-logistic-l1/README.md.
+
+dataset:
+  name: fed_logistic_l1
+  output_dir: data/generated/examples/fed-logistic-l1-synthetic
+  # No draw for it to fix; recorded because every dataset records its seed.
+  seed: 42
+  extensions:
+    - examples/fed-logistic-l1/problem.py
+
+partition:
+  strategy: analytic
+  num_clients: 32
+
+problem:
+  # The corpus's name, recorded beside its digest in the optima table.
+  corpus: fed-logistic-l1-synthetic
+  dim: 32
+  rows_per_client: 64
+  sparsity: 3
+  signal_scale: 2.0
+  partition_block: 32

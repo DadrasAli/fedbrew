@@ -28,40 +28,14 @@ examples/    pl-1d/                     (7 arms)
              fed-lasso/  fed-lasso-l2/  fed-lasso-smooth/  (9 arms each, 1 arm)
              simplex-lsq/  simplex-lsq-feasible/               (8 arms, 3 arms)
              nonconvex-simplex/                                       (8 arms)
-             fed-logistic-l1-a9a-lambda0.001/                         (1 arm)
-             fed-logistic-l1-a9a-lambda0.03/                          (1 arm)
-             fed-logistic-l1-a9a-lambda0.05/                          (1 arm)
-             fed-logistic-l1-gisette-lambda0.001/                     (1 arm)
-             fed-logistic-l1-gisette-lambda5e-4/                      (1 arm)
-             fed-logistic-l1-gisette-lambda5e-5/                      (1 arm)
-             fed-logistic-l1-ijcnn1-32-lambda0.01/                    (1 arm)
-             fed-logistic-l1-synthetic-1000-lambda0.001/              (1 arm)
-             fed-logistic-l1-synthetic-1000-lambda0.03/               (1 arm)
-             fed-logistic-l1-synthetic-kappa1-lambda0.01/             (1 arm)
-             fed-logistic-l1-synthetic-kappa10-lambda0.01/            (1 arm)
-             fed-logistic-l1-synthetic-kappa100-lambda0.01/           (1 arm)
-             fed-logistic-l1-synthetic-lambda0.03/                    (1 arm)
-             fed-logistic-l2sq-a9a-lambda0.001/                       (1 arm)
-             fed-logistic-l2sq-gisette-lambda0.001/                   (1 arm)
-             fed-logistic-l2sq-ijcnn1-32-lambda0.01/                  (1 arm)
-             fed-logistic-l2sq-synthetic-1000-lambda0.001/            (1 arm)
-             fed-logistic-l2sq-synthetic-kappa1-lambda0.01/           (1 arm)
-             fed-logistic-l2sq-synthetic-kappa10-lambda0.01/          (1 arm)
-             fed-logistic-l2sq-synthetic-kappa100-lambda0.01/         (1 arm)
-             fed-logistic-nonconvex-a9a-lambda0.001/                  (1 arm)
-             fed-logistic-nonconvex-gisette-lambda0.001/              (1 arm)
-             fed-logistic-nonconvex-ijcnn1-32-lambda0.01/             (1 arm)
-             fed-logistic-nonconvex-synthetic-1000-lambda0.001/       (1 arm)
-             fed-logistic-nonconvex-synthetic-kappa1-lambda0.01/      (1 arm)
-             fed-logistic-nonconvex-synthetic-kappa10-lambda0.01/     (1 arm)
-             fed-logistic-nonconvex-synthetic-kappa100-lambda0.01/    (1 arm)
-             fed-tanh-l2sq-a9a-lambda0.001/                           (1 arm)
-             fed-tanh-l2sq-gisette-lambda0.001/                       (1 arm)
-             fed-tanh-l2sq-ijcnn1-32-lambda0.01/                      (1 arm)
-             fed-tanh-l2sq-synthetic-1000-lambda0.001/                (1 arm)
-             fed-tanh-l2sq-synthetic-kappa1-lambda0.01/               (1 arm)
-             fed-tanh-l2sq-synthetic-kappa10-lambda0.01/              (1 arm)
-             fed-tanh-l2sq-synthetic-kappa100-lambda0.01/             (1 arm)
+             fed-logistic-l1-a9a/                                     (6 arms)
+             fed-logistic-l1-gisette/                                 (6 arms)
+             fed-logistic-l1-ijcnn1-32/                               (4 arms)
+             fed-logistic-l1-synthetic/                               (1 arm)
+             fed-logistic-l1-synthetic-1000/                          (5 arms)
+             fed-logistic-l1-synthetic-kappa1/                        (4 arms)
+             fed-logistic-l1-synthetic-kappa10/                       (4 arms)
+             fed-logistic-l1-synthetic-kappa100/                      (4 arms)
 ```
 
 `examples/` is one directory per *dial setting* rather than per dataset,
@@ -69,9 +43,9 @@ because those examples turn a dial by generating different data:
 `drift-quad-rate/` and `drift-quad-floor/` hold the same eight arms as
 `drift-quad/` against a second and a third generated dataset, and the `-l2`,
 `-smooth` and `-feasible` directories are controls of the same shape. The
-`fed-<loss>-<penalty>-<dataset>-lambda<λ>` directories are
-`examples/fed-logistic-l1`'s settings, one problem on one dataset each, with
-one untuned FedAvg arm. Their task, model and generator are defined
+`fed-logistic-l1-<corpus>` directories are `examples/fed-logistic-l1`'s
+corpora, one generated dataset each; each arm is one problem at one `λ` on it,
+an untuned FedAvg run. Their task, model and generator are defined
 outside the package, in each example's `problem.py`, which every config names
 — the key that does that is [chapter 04](../docs/04-configuration.md)'s, and
 what it is for is [chapter 12](../docs/12-extending.md)'s.

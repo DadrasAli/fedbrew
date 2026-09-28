@@ -1,0 +1,54 @@
+# examples/fed-logistic-l1, corpus fed-logistic-l1-gisette.
+#
+# The data: LIBSVM gisette_scale, its first 6,000 rows scaled to unit norm; 100 clients x 60 rows, d = 5,000.
+#
+# One dataset, shared by every problem posed on it; each is an arm under
+# configs/examples/fed-logistic-l1-gisette/, and a convex one's F* is in the optima table
+# (examples/fed-logistic-l1/optima.json) under this corpus's digest:
+#
+#   logistic+l1 at lam = 0.001
+#   logistic+l1 at lam = 5.0e-04
+#   logistic+l1 at lam = 5.0e-05
+#   logistic+l2sq at lam = 0.001
+#   logistic+nonconvex at lam = 0.001
+#   tanh+l2sq at lam = 0.001
+#
+#   fedbrew generate --config data/configs/examples/fed-logistic-l1-gisette.yaml
+#   fedbrew inspect-data data/generated/examples/fed-logistic-l1-gisette/manifest.json
+#
+# The rows are a public LIBSVM file, which this generator never downloads.
+# Fetch it once; the sha256 below is what pins it:
+#
+#   mkdir -p data/raw/datasets/libsvm
+#   curl -L -o data/raw/datasets/libsvm/gisette_scale.bz2 \
+#     https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary/gisette_scale.bz2
+#
+# See examples/fed-logistic-l1/README.md.
+
+dataset:
+  name: fed_logistic_l1
+  output_dir: data/generated/examples/fed-logistic-l1-gisette
+  # No draw for it to fix; recorded because every dataset records its seed.
+  seed: 42
+  extensions:
+    - examples/fed-logistic-l1/problem.py
+
+source:
+  format: libsvm
+  path: data/raw/datasets/libsvm/gisette_scale.bz2
+  sha256: 26d95cd35c9c51d1b25f5741dc95c0482278aab85a90f1920aa6152616b23d41
+  url: https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary/gisette_scale.bz2
+  row_normalize: true
+
+partition:
+  strategy: analytic
+  num_clients: 100
+
+problem:
+  # The corpus's name, recorded beside its digest in the optima table.
+  corpus: fed-logistic-l1-gisette
+  dim: 5000
+  rows_per_client: 60
+  partition_block: 30
+  partition_reference_lambda: 5.0e-04
+  partition_key: float

@@ -1,0 +1,114 @@
+# examples/fed-logistic-l1, corpus fed-logistic-l1-a9a: logistic+l1 at lam = 0.05, fedavg arm.
+#
+# The problem and the generator that writes its data are
+# examples/fed-logistic-l1/problem.py, loaded below. Generate the data first:
+#
+#   fedbrew generate --config data/configs/examples/fed-logistic-l1-a9a.yaml
+#   fedbrew run --config configs/examples/fed-logistic-l1-a9a/logistic-l1-lambda0.05.yaml
+#
+# client.learning_rate is 1/L, L = 1.57222 the smoothness bound of the loss
+# (plus the penalty's, where it has one), rounded to three figures. It is not
+# tuned: this arm is here to run the problem, not to rank anything. A convex
+# problem's F* is looked up in examples/fed-logistic-l1/optima.json by the
+# corpus's digest, the loss, the penalty and lam, and the run is refused
+# without one.
+
+experiment:
+  # Set rather than left to the filename stem: every corpus ships arms of
+  # the same problem names, so the stem alone would collide in runs_index.jsonl.
+  name: fed-logistic-l1-a9a-logistic-l1-lambda0.05-fedavg
+  seed: 42
+  output_dir: outputs/examples/fed-logistic-l1-a9a/logistic-l1-lambda0.05
+  use_run_subdir: false
+  tags:
+    - examples
+    - fed-logistic-l1-a9a
+    - logistic-l1-lambda0.05
+    - fedavg
+  notes: "logistic loss + lam ||x||_1 at lam=0.05 on a9a; lr = 1/L, untuned."
+  extensions:
+    - examples/fed-logistic-l1/problem.py
+
+server:
+  strategy: fedavg
+  participation_rate: 1.0
+  metrics: []
+
+client:
+  update_rule: fedavg
+  learning_rate: 0.636
+  # One step on each client's whole split a round.
+  batch_size: 32
+  update_mode: full_gradient
+  frozen_gradient_weighting: examples
+  learning_rate_schedule: constant
+  min_learning_rate: 0.0
+  momentum: 0.0
+  weight_decay: 0.0
+  nesterov: false
+  metrics: []
+
+data:
+  path: data/generated/examples/fed-logistic-l1-a9a/manifest.json
+
+model:
+  name: logistic_vector
+  input_dim: 123
+  loss: logistic
+  penalty: l1
+  penalty_strength: 0.05
+  support_tolerance: 1.0e-3
+  x_init: 0.0
+
+runtime:
+  device: cpu
+  use_amp: false
+  deterministic: true
+  deterministic_warn_only: false
+  checkpointing:
+    enabled: true
+    interval: 100000
+    save_last: true
+    save_best: false
+    save_every_round: false
+    keep_last: 0
+  performance:
+    # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
+    # mantissa bits. This model is float64, so it is irrelevant here; written
+    # out because a config that omits it is not comparable with one that sets it.
+    matmul_precision: highest
+    cudnn_benchmark: false
+    precision: reference
+    torch_num_threads: 1
+    reuse_model: false
+    fast_batching: false
+
+evaluation:
+  train:
+    every: never
+  val:
+    every: never
+  test:
+    every: never
+  central_test:
+    every: 1
+
+client_statistics:
+  per_client_csv: true
+  std: true
+  variance: false
+  min: true
+  max: true
+  worst_percent: 10
+
+divergence:
+  metric: fit_loss
+  non_finite: true
+  blowup_factor: 100.0
+  blowup_absolute: 10000.0
+  patience: null
+  min_delta: 0.0
+
+defaults:
+  global_rounds: 100
+  local_iterations: 1
