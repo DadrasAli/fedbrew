@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import gc
 import math
 import random
 import statistics
@@ -232,171 +233,207 @@ def run_fl_loop(
         )
         return state
 
-    for round_id in range(start_round, global_rounds + 1):
-        round_started = time.perf_counter()
-        round_info = RoundInfo(round_id=round_id, total_rounds=global_rounds)
-        requests = _fit_requests(
-            server,
-            round_info,
-            client_infos,
-            post_fit_evaluation=evaluates_round(fit_schedule, round_id, global_rounds),
-        )
-        selected_clients = [request.client_id for request in requests]
-
-        # Announced before the first client trains: under participation_probability
-        # the selection varies by round and can be empty, and a footer waiting for
-        # a finished client would show the previous round's count until one did.
-        if on_client_progress is not None:
-            on_client_progress(round_id, 0, len(requests), "fit")
-        fit_totals = _FitPhaseTotals()
-        observer = _RoundFitObserver(state, fit_totals, round_id, on_client_progress)
-        fit_phase_started = time.perf_counter()
-        try:
-            # Skipped when no client was selected: the model and every server
-            # state carry over unchanged, rather than each strategy defining an
-            # update over no results.
-            if requests:
-                server_payload = aggregator.aggregate(
-                    server, round_info, executor.fit(client, requests, observer)
-                )
-        except NonFiniteStateError as error:
-            # Same contract as the monitor below: a model that went non-finite
-            # is a recorded outcome, not a crash, so the job exits zero and the
-            # sweep index keeps the row. Recorded here rather than one round
-            # later because aggregation is where the damage would become
-            # permanent -- the server's second-moment/control state would carry
-            # the NaN forever, and _update_checkpoints would write it to disk.
-            # The round is abandoned before either, so the last checkpoint is
-            # the last healthy one.
-            state.status = STATUS_DIVERGED
-            verdict = DivergenceVerdict(
-                status=STATUS_DIVERGED,
-                detector="non_finite_client_state",
-                round_id=round_id,
-                metric="client_model_state",
-                value=float("nan"),
-                threshold=None,
-                reason=(
-                    f"round {round_id} aggregation refused a non-finite client "
-                    f"state ({error}); the model cannot recover from it"
-                ),
+    # Everything built so far -- the clients, their data, the model -- lives
+    # for the whole run, so it is set aside from the collector once the first
+    # round has built it (_LongLivedObjects).
+    long_lived = _LongLivedObjects()
+    try:
+        for round_id in range(start_round, global_rounds + 1):
+            round_started = time.perf_counter()
+            round_info = RoundInfo(round_id=round_id, total_rounds=global_rounds)
+            requests = _fit_requests(
+                server,
+                round_info,
+                client_infos,
+                post_fit_evaluation=evaluates_round(fit_schedule, round_id, global_rounds),
             )
-            state.termination = verdict.as_dict()
-            if on_termination is not None:
-                on_termination(verdict)
-            break
-        fit_phase_seconds = time.perf_counter() - fit_phase_started
-        # The clients' own post-fit loss and accuracy used to be dropped here:
-        # named "loss" and "accuracy" they were indistinguishable from the
-        # global model's numbers on the same round. Prefixed "fit_" they are
-        # unambiguous and worth keeping -- they are the only view of what the
-        # local models did before averaging.
+            selected_clients = [request.client_id for request in requests]
 
-        # Each split has its own schedule and its own client set, so a client
-        # may be due for one split and not another. Grouping by client keeps
-        # the one-load-per-client property: a client evaluated for two splits
-        # is still visited once.
-        splits_by_client, infos_by_client = _round_evaluation_plan(
-            evaluation_clients,
-            schedules,
-            round_id,
-            global_rounds,
-            selected_clients,
-        )
-        client_eval_started = time.perf_counter()
-        evaluated = evaluator.evaluate_clients(
-            client,
-            round_id,
-            [
-                (infos_by_client[client_id], splits)
-                for client_id, splits in splits_by_client.items()
-            ],
-            server_payload,
-            evaluation.model_scope,
-            on_client_progress,
-        )
-        client_eval_seconds = time.perf_counter() - client_eval_started
-        selected_client_set = set(selected_clients)
-        state.client_metrics_history.extend(
-            _build_client_evaluation_record(
-                result,
-                participated=result.client_id in selected_client_set,
-                evaluated_splits=splits,
-                model_scope=evaluation.model_scope,
-            )
-            for result, splits in evaluated
-        )
-        for split in ("train", "val", "test"):
-            subset = [result for result, splits in evaluated if split in splits]
-            if not subset:
-                continue
-            # One aggregation per scope. The personal pass is just another
-            # split name, so this is the same call with a different key.
-            for metric_split in _scope_split_names(evaluation.model_scope, [split]):
-                round_info.metrics.update(
-                    _aggregate_client_split_metrics(subset, metric_split, statistics)
+            # Announced before the first client trains: under participation_probability
+            # the selection varies by round and can be empty, and a footer waiting for
+            # a finished client would show the previous round's count until one did.
+            if on_client_progress is not None:
+                on_client_progress(round_id, 0, len(requests), "fit")
+            fit_totals = _FitPhaseTotals()
+            observer = _RoundFitObserver(state, fit_totals, round_id, on_client_progress)
+            fit_phase_started = time.perf_counter()
+            try:
+                # Skipped when no client was selected: the model and every server
+                # state carry over unchanged, rather than each strategy defining an
+                # update over no results.
+                if requests:
+                    server_payload = aggregator.aggregate(
+                        server, round_info, executor.fit(client, requests, observer)
+                    )
+            except NonFiniteStateError as error:
+                # Same contract as the monitor below: a model that went non-finite
+                # is a recorded outcome, not a crash, so the job exits zero and the
+                # sweep index keeps the row. Recorded here rather than one round
+                # later because aggregation is where the damage would become
+                # permanent -- the server's second-moment/control state would carry
+                # the NaN forever, and _update_checkpoints would write it to disk.
+                # The round is abandoned before either, so the last checkpoint is
+                # the last healthy one.
+                state.status = STATUS_DIVERGED
+                verdict = DivergenceVerdict(
+                    status=STATUS_DIVERGED,
+                    detector="non_finite_client_state",
+                    round_id=round_id,
+                    metric="client_model_state",
+                    value=float("nan"),
+                    threshold=None,
+                    reason=(
+                        f"round {round_id} aggregation refused a non-finite client "
+                        f"state ({error}); the model cannot recover from it"
+                    ),
                 )
-        global_eval_started = time.perf_counter()
-        if evaluates_round(central_schedule, round_id, global_rounds):
-            round_info.metrics.update(evaluator.evaluate_central(server, dataset))
-        global_eval_seconds = time.perf_counter() - global_eval_started
+                state.termination = verdict.as_dict()
+                if on_termination is not None:
+                    on_termination(verdict)
+                break
+            fit_phase_seconds = time.perf_counter() - fit_phase_started
+            # The clients' own post-fit loss and accuracy used to be dropped here:
+            # named "loss" and "accuracy" they were indistinguishable from the
+            # global model's numbers on the same round. Prefixed "fit_" they are
+            # unambiguous and worth keeping -- they are the only view of what the
+            # local models did before averaging.
 
-        num_examples = fit_totals.num_examples
-        metrics = dict(round_info.metrics)
-        if isinstance(server_payload, dict):
-            server_payload["metrics"] = metrics
-        # Judged before the round is written, so a round that stops the run is
-        # always a flush round; acted on below, once the round is recorded.
-        verdict = monitor.update(round_id, metrics)
-        flush_due = _flush_due(round_id, global_rounds, flush_every, verdict)
-        checkpoint_started = time.perf_counter()
-        # Written now, so checkpoint_sec times the write; visible only at the
-        # commit below, after the CSV rows and run.json. POST-F24.
-        staged = _update_checkpoints(
-            _checkpoint_payload_builder(server, client, server_payload, metrics, round_id),
-            metrics,
-            output_dir,
-            round_id,
-            checkpoint_policy,
-            checkpoint_tracker,
-            staged,
-            write_latest=flush_due,
-        )
-        checkpoint_seconds = time.perf_counter() - checkpoint_started
+            # Each split has its own schedule and its own client set, so a client
+            # may be due for one split and not another. Grouping by client keeps
+            # the one-load-per-client property: a client evaluated for two splits
+            # is still visited once.
+            splits_by_client, infos_by_client = _round_evaluation_plan(
+                evaluation_clients,
+                schedules,
+                round_id,
+                global_rounds,
+                selected_clients,
+            )
+            client_eval_started = time.perf_counter()
+            evaluated = evaluator.evaluate_clients(
+                client,
+                round_id,
+                [
+                    (infos_by_client[client_id], splits)
+                    for client_id, splits in splits_by_client.items()
+                ],
+                server_payload,
+                evaluation.model_scope,
+                on_client_progress,
+            )
+            client_eval_seconds = time.perf_counter() - client_eval_started
+            selected_client_set = set(selected_clients)
+            state.client_metrics_history.extend(
+                _build_client_evaluation_record(
+                    result,
+                    participated=result.client_id in selected_client_set,
+                    evaluated_splits=splits,
+                    model_scope=evaluation.model_scope,
+                )
+                for result, splits in evaluated
+            )
+            for split in ("train", "val", "test"):
+                subset = [result for result, splits in evaluated if split in splits]
+                if not subset:
+                    continue
+                # One aggregation per scope. The personal pass is just another
+                # split name, so this is the same call with a different key.
+                for metric_split in _scope_split_names(evaluation.model_scope, [split]):
+                    round_info.metrics.update(
+                        _aggregate_client_split_metrics(subset, metric_split, statistics)
+                    )
+            global_eval_started = time.perf_counter()
+            if evaluates_round(central_schedule, round_id, global_rounds):
+                round_info.metrics.update(evaluator.evaluate_central(server, dataset))
+            global_eval_seconds = time.perf_counter() - global_eval_started
 
-        # server_payload is deliberately not stored here: nothing reads it back,
-        # and retaining one global model state per round grew without bound over
-        # a long run. state.final_payload carries the model the run ends with.
-        timings = RoundTimings(
-            fit=fit_totals.fit_seconds,
-            # The server consumes fit results as they stream in, so the wall
-            # time of aggregate_stream contains the client fits. Subtracting
-            # them leaves the server's own aggregation cost.
-            aggregate=max(fit_phase_seconds - fit_totals.fit_seconds, 0.0),
-            client_eval=client_eval_seconds,
-            global_eval=global_eval_seconds,
-            checkpoint=checkpoint_seconds,
-            total=time.perf_counter() - round_started,
-        )
-        state.rounds.append(
-            RoundState(
+            num_examples = fit_totals.num_examples
+            metrics = dict(round_info.metrics)
+            if isinstance(server_payload, dict):
+                server_payload["metrics"] = metrics
+            # Judged before the round is written, so a round that stops the run is
+            # always a flush round; acted on below, once the round is recorded.
+            verdict = monitor.update(round_id, metrics)
+            flush_due = _flush_due(round_id, global_rounds, flush_every, verdict)
+            checkpoint_started = time.perf_counter()
+            # Written now, so checkpoint_sec times the write; visible only at the
+            # commit below, after the CSV rows and run.json. POST-F24.
+            staged = _update_checkpoints(
+                _checkpoint_payload_builder(server, client, server_payload, metrics, round_id),
+                metrics,
+                output_dir,
+                round_id,
+                checkpoint_policy,
+                checkpoint_tracker,
+                staged,
+                write_latest=flush_due,
+            )
+            checkpoint_seconds = time.perf_counter() - checkpoint_started
+
+            # server_payload is deliberately not stored here: nothing reads it back,
+            # and retaining one global model state per round grew without bound over
+            # a long run. state.final_payload carries the model the run ends with.
+            timings = RoundTimings(
+                fit=fit_totals.fit_seconds,
+                # The server consumes fit results as they stream in, so the wall
+                # time of aggregate_stream contains the client fits. Subtracting
+                # them leaves the server's own aggregation cost.
+                aggregate=max(fit_phase_seconds - fit_totals.fit_seconds, 0.0),
+                client_eval=client_eval_seconds,
+                global_eval=global_eval_seconds,
+                checkpoint=checkpoint_seconds,
+                total=time.perf_counter() - round_started,
+            )
+            state.rounds.append(
+                RoundState(
+                    round_id=round_id,
+                    metrics=metrics,
+                    num_clients=len(selected_clients),
+                    num_examples=num_examples,
+                    timings=timings,
+                )
+            )
+            metric_record = MetricRecord(
                 round_id=round_id,
                 metrics=metrics,
                 num_clients=len(selected_clients),
                 num_examples=num_examples,
                 timings=timings,
             )
-        )
-        metric_record = MetricRecord(
-            round_id=round_id,
-            metrics=metrics,
-            num_clients=len(selected_clients),
-            num_examples=num_examples,
-            timings=timings,
-        )
-        state.metrics_history.append(metric_record)
-        staged = _flush_rounds(
-            flush_due,
+            state.metrics_history.append(metric_record)
+            staged = _flush_rounds(
+                flush_due,
+                state,
+                output_dir,
+                statistics,
+                csv_cursor,
+                on_round_flush,
+                staged,
+                checkpoint_policy,
+            )
+            unflushed = not flush_due
+            if round_id == start_round:
+                long_lived.freeze()
+            if on_round_end is not None:
+                on_round_end(metric_record)
+
+            # Acted on last, so the round that triggers the stop is still fully
+            # recorded: its metrics, timings and checkpoint are the evidence of
+            # what went wrong. Breaking rather than raising keeps the exit code
+            # zero, which is what stops a packed SLURM job from reporting a
+            # diverged arm as a failed one.
+            if verdict is not None:
+                state.status = verdict.status
+                state.termination = verdict.as_dict()
+                if on_termination is not None:
+                    on_termination(verdict)
+                break
+
+        # Only an aggregation refusal leaves rounds unflushed: every other way out
+        # of the loop ends on a flush round. latest.pt stays at the last flush, the
+        # refused round's state being neither complete nor healthy.
+        _flush_rounds(
+            unflushed,
             state,
             output_dir,
             statistics,
@@ -405,51 +442,72 @@ def run_fl_loop(
             staged,
             checkpoint_policy,
         )
-        unflushed = not flush_due
-        if on_round_end is not None:
-            on_round_end(metric_record)
 
-        # Acted on last, so the round that triggers the stop is still fully
-        # recorded: its metrics, timings and checkpoint are the evidence of
-        # what went wrong. Breaking rather than raising keeps the exit code
-        # zero, which is what stops a packed SLURM job from reporting a
-        # diverged arm as a failed one.
-        if verdict is not None:
-            state.status = verdict.status
-            state.termination = verdict.as_dict()
-            if on_termination is not None:
-                on_termination(verdict)
-            break
+        if divergence is not None and divergence.active and not monitor.observed:
+            # Every detector reads one metric name; a name nothing emits silences
+            # all of them -- including non_finite -- for the whole run, with no
+            # error, because "absent" is indistinguishable from "not evaluated this
+            # round".
+            print(
+                f"Warning: divergence.metric={monitor.metric!r} was never present in "
+                "any round's metrics, so no divergence detector ran. Check the name "
+                "against the metrics this config emits.",
+                flush=True,
+            )
 
-    # Only an aggregation refusal leaves rounds unflushed: every other way out
-    # of the loop ends on a flush round. latest.pt stays at the last flush, the
-    # refused round's state being neither complete nor healthy.
-    _flush_rounds(
-        unflushed,
-        state,
-        output_dir,
-        statistics,
-        csv_cursor,
-        on_round_flush,
-        staged,
-        checkpoint_policy,
-    )
-
-    if divergence is not None and divergence.active and not monitor.observed:
-        # Every detector reads one metric name; a name nothing emits silences
-        # all of them -- including non_finite -- for the whole run, with no
-        # error, because "absent" is indistinguishable from "not evaluated this
-        # round".
-        print(
-            f"Warning: divergence.metric={monitor.metric!r} was never present in "
-            "any round's metrics, so no divergence detector ran. Check the name "
-            "against the metrics this config emits.",
-            flush=True,
+        state.final_payload = server_payload
+        state.checkpointing = _checkpointing_summary(
+            output_dir, checkpoint_policy, checkpoint_tracker
         )
+        return state
+    finally:
+        long_lived.release()
 
-    state.final_payload = server_payload
-    state.checkpointing = _checkpointing_summary(output_dir, checkpoint_policy, checkpoint_tracker)
-    return state
+
+class _LongLivedObjects:
+    """The objects a run builds in its first round, set aside from the garbage collector.
+
+    A run's clients, their shards and models are built in its first round and
+    live until it ends, and Python's collector traverses every one of them in
+    each full collection: at 1000 resident MNIST clients, about 276,000
+    objects and 27 ms of every round (measured on 2026-09-27). ``gc.freeze``
+    moves every object tracked at that moment to a permanent generation that
+    no collection visits, so later collections traverse only what later rounds
+    build. ``release`` puts them back when the run ends, however it ends.
+
+    The trade-off: a reference cycle that was already garbage when the objects
+    were frozen, or that a frozen object is part of, is not collected until the
+    run ends -- a client evicted from the shard cache, say, whose objects
+    refer to each other. Plain reference counting still frees every object
+    outside a cycle as it always did. One collection just before the freeze
+    clears the cycles the first round left behind, so what is set aside is
+    what the run still holds.
+
+    Nothing is frozen when the collector is off, or when something else in
+    the process has already frozen objects: their owner releases them, not
+    this run.
+    """
+
+    __slots__ = ("frozen",)
+
+    def __init__(self) -> None:
+        self.frozen = False
+
+    def freeze(self) -> None:
+        """Collect once, then freeze every tracked object."""
+
+        if self.frozen or not gc.isenabled() or gc.get_freeze_count():
+            return
+        gc.collect()
+        gc.freeze()
+        self.frozen = True
+
+    def release(self) -> None:
+        """Return what ``freeze`` set aside to the collector."""
+
+        if self.frozen:
+            gc.unfreeze()
+            self.frozen = False
 
 
 def _initialize_or_resume(

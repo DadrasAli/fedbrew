@@ -104,6 +104,19 @@ every client is released after its evaluation, as before.
 `tests/test_resident_clients.py` pins the trajectory against released clients
 and the bound at a small cap.
 
+**What lives for the whole run is frozen out of the garbage collector.** Every
+full collection traverses every tracked object, and resident clients are many:
+about 276,000 objects at 1000 MNIST clients, 27 ms of every round (measured on
+2026-09-27). `run_fl_loop` therefore collects once and calls `gc.freeze()` when
+its first round is done, and `gc.unfreeze()` when the run ends, by any exit, for
+either executor (`_LongLivedObjects`, `fedbrew/core/loop.py`). Later
+collections traverse only what later rounds build. The trade-off: a reference
+cycle among frozen objects — a client the shard cache evicts, whose objects
+refer to each other — is not collected until the run ends; everything outside
+a cycle is still freed by reference counting as it was. A process that froze
+objects itself, or turned the collector off, is left alone.
+`tests/test_long_lived_objects_are_frozen.py`.
+
 **The two per-client histories are held in memory for the whole run.** One
 record per client per round. At thousands of clients with `clients: all` over
 hundreds of rounds this is the dominant memory cost, and it is not streamed.
@@ -549,6 +562,7 @@ python tools/bench_compare_runs.py --help
 | `tests/test_client_csv_append.py` | The per-client CSVs append rather than rewrite. |
 | `tests/test_round_metrics_are_appended.py` | `round_metrics.csv` appends rather than rewrites. |
 | `tests/test_resident_clients.py` | §3: a client stays built while its shard is cached, at the released trajectory and within the cache's budget. |
+| `tests/test_long_lived_objects_are_frozen.py` | §3: what the first round built is frozen out of the collector from the second round to the run's end, by any exit, and a process's own freeze or disabled collector is left alone. |
 | `tests/test_finiteness_is_checked_on_the_aggregate.py` | One finiteness check per round on the average, still naming the client. |
 | `tests/test_optimizer_is_reused.py` | §2: one optimizer per worker, reset for each update, and the trajectory of one per update. |
 | `tests/test_evaluation_cadence.py` | `evaluation.fit.every` skips the post-fit forward pass and changes no training number. |
