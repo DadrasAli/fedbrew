@@ -36,6 +36,26 @@ with `L = ‖A‖₂²/4n`, which the manifest records as `reference.lipschitz`.
 is coercive, so a minimiser exists without a box. `F*` is certified at
 generation (below).
 
+### Logistic loss with a squared-L2 penalty
+
+```
+F(x) = (1/n) Σ_i log(1 + exp(-b_i xᵀa_i)) + (λ/2)‖x‖²      (loss: logistic, penalty: l2sq)
+```
+
+Convex, smooth and `λ`-strongly convex: `∇F = ∇ℓ + λx` is Lipschitz with
+`L + λ`, and the minimiser is unique. `F*` is certified at generation. The
+settings, at the `λ` each corpus's `F*` was certified at:
+
+| Setting | `λ` | `F*` |
+| --- | --- | --- |
+| `fed-logistic-l2sq-synthetic-1000-lambda0.001` | 0.001 | 0.42893336113321356 |
+| `fed-logistic-l2sq-synthetic-kappa1-lambda0.01` | 0.01 | 0.4409334313437286 |
+| `fed-logistic-l2sq-synthetic-kappa10-lambda0.01` | 0.01 | 0.4593573490876512 |
+| `fed-logistic-l2sq-synthetic-kappa100-lambda0.01` | 0.01 | 0.47750977596974997 |
+| `fed-logistic-l2sq-a9a-lambda0.001` | 0.001 | 0.3330952806480848 |
+| `fed-logistic-l2sq-ijcnn1-32-lambda0.01` | 0.01 | 0.4154526395889211 |
+| `fed-logistic-l2sq-gisette-lambda0.001` | 0.001 | 0.4580582604022483 |
+
 ## How it is federated
 
 Clients `c = 1..N` hold disjoint row sets `I_c`, all of the same size `m`, and
@@ -157,6 +177,10 @@ them as values and reports `central_test_optimality_gap = F(x) − F*`.
   `max_k |∇ℓ(x)_k + λ sign(x_k)|` on the support and `max(|∇ℓ(x)_k| − λ, 0)` off
   it, and generation refuses a reference above `1e-12`.
 
+- **Squared L2.** Damped Newton from 0 on the Hessian
+  `Aᵀdiag(s(1 − s))A/n + λI`, `s = σ(−b aᵀx)`, with a backtracking line search,
+  until `max_k |∇F(x)_k|` is under `1e-12`.
+
 `F*` is `F` at the stored `x*`, summed in the order the global shard stacks the
 rows, which is the order the gap is computed in.
 
@@ -170,6 +194,12 @@ round of each problem, batched, to the sequential run within the executor's
 `1e-12`.
 
 ## Which shipped algorithms can solve it
+
+**The squared-L2 problem: gradient arms**, at a small enough step: `F` is
+smooth and strongly convex. The shipped FedAvg arm, one full-split step per
+client a round at full participation, is gradient descent on `F` at step
+`1/(L + λ)` and converges to `x*`; with more local steps, client drift moves
+its fixed point, and the gap measures by how much.
 
 **The L1 problem: none**, for fed-lasso's reason. There is no proximal
 operator anywhere in fedbrew, so every arm runs subgradient descent on a

@@ -41,6 +41,13 @@ examples/    pl-1d/                     (7 arms)
              fed-logistic-l1-synthetic-kappa10-lambda0.01/            (1 arm)
              fed-logistic-l1-synthetic-kappa100-lambda0.01/           (1 arm)
              fed-logistic-l1-synthetic-lambda0.03/                    (1 arm)
+             fed-logistic-l2sq-a9a-lambda0.001/                       (1 arm)
+             fed-logistic-l2sq-gisette-lambda0.001/                   (1 arm)
+             fed-logistic-l2sq-ijcnn1-32-lambda0.01/                  (1 arm)
+             fed-logistic-l2sq-synthetic-1000-lambda0.001/            (1 arm)
+             fed-logistic-l2sq-synthetic-kappa1-lambda0.01/           (1 arm)
+             fed-logistic-l2sq-synthetic-kappa10-lambda0.01/          (1 arm)
+             fed-logistic-l2sq-synthetic-kappa100-lambda0.01/         (1 arm)
 ```
 
 `examples/` is one directory per *dial setting* rather than per dataset,

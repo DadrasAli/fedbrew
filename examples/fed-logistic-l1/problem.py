@@ -263,19 +263,28 @@ def _l1_gradient(x: Tensor, lam: float) -> Tensor:
     return lam * torch.sign(x)
 
 
+def _l2sq(x: Tensor, lam: float) -> Tensor:
+    return 0.5 * lam * (x * x).sum()
+
+
+def _l2sq_gradient(x: Tensor, lam: float) -> Tensor:
+    return lam * x
+
+
 #: The penalties, each as (its value, its (sub)gradient, whether it is convex,
 #: and the bound on its second derivative, None where it has none).
 PENALTIES: dict[
     str, tuple[Callable[[Tensor, float], Tensor], Callable[[Tensor, float], Tensor], bool, Any]
 ] = {
     "l1": (_l1, _l1_gradient, True, None),
+    "l2sq": (_l2sq, _l2sq_gradient, True, 1.0),
 }
 
 
 #: The problems this example poses, as (loss, penalty) pairs: each has
 #: generator configs and an arm, and is held by the tests batched against
 #: sequential.
-PROBLEMS: tuple[tuple[str, str], ...] = (("logistic", "l1"),)
+PROBLEMS: tuple[tuple[str, str], ...] = (("logistic", "l1"), ("logistic", "l2sq"))
 
 
 def convex(loss: str, penalty: str) -> bool:
@@ -341,10 +350,13 @@ def kkt_residual(
     For the L1 penalty, per coordinate: `|grad l(x)_k + lam sign(x_k)|` where
     `x_k != 0`, and `max(|grad l(x)_k| - lam, 0)` where it is 0. Zero exactly at
     the minimiser, and with `l` convex a point at residual `r` has
-    `F(x) - F* <= r ||x - x*||_1`: the whole certificate.
+    `F(x) - F* <= r ||x - x*||_1`: the whole certificate. For the squared L2
+    penalty `F` is smooth, and the residual is `max_k |grad F(x)_k|`.
     """
 
     smooth = smooth_gradient(x, features, labels)
+    if penalty == "l2sq":
+        return float((smooth + penalty_strength * x).abs().max())
     if penalty == "l1":
         violations = torch.where(
             x != 0.0,
@@ -705,6 +717,62 @@ def certified_optimum(
     )
 
 
+#: The Newton solve's iteration budget: from 0 it certifies in about ten.
+NEWTON_ITERATIONS = 100
+
+
+def solve_l2sq(features: Tensor, labels: Tensor, penalty_strength: float) -> tuple[Tensor, float]:
+    """`(x*, residual)` of the logistic problem with the squared L2 penalty.
+
+    Damped Newton from 0 on the smooth, strongly convex `F`: the Hessian
+    `A' diag(s (1 - s)) A / n + lam I`, `s = sigma(-b a.x)`, and a backtracking
+    (Armijo) line search, until `max |grad F|` is under :data:`CERTIFICATE`.
+    Near machine precision the objective stops decreasing before the residual
+    does, and the full step is then taken and the residual left to decide.
+    """
+
+    rows = features.shape[0]
+    current = torch.zeros(features.shape[1], dtype=DTYPE)
+    value = objective(current, features, labels, penalty_strength, penalty="l2sq")
+    for _ in range(NEWTON_ITERATIONS):
+        grad = gradient(current, features, labels, penalty_strength, penalty="l2sq")
+        residual = float(grad.abs().max())
+        if residual < CERTIFICATE:
+            return current, residual
+        probabilities = torch.sigmoid(-labels * (features @ current))
+        curvature = probabilities * (1.0 - probabilities)
+        hessian = (features * curvature.unsqueeze(1)).T @ features / rows
+        hessian.diagonal().add_(penalty_strength)
+        step = torch.linalg.solve(hessian, grad)
+        current, value = _armijo(features, labels, penalty_strength, current, value, grad, step)
+    return current, kkt_residual(current, features, labels, penalty_strength, "l2sq")
+
+
+def _armijo(
+    features: Tensor,
+    labels: Tensor,
+    penalty_strength: float,
+    current: Tensor,
+    value: float,
+    grad: Tensor,
+    step: Tensor,
+) -> tuple[Tensor, float]:
+    """The Newton step, halved until it decreases `F` enough, or taken whole at the floor."""
+
+    size = 1.0
+    decrease = float(grad @ step)
+    while True:
+        candidate = current - size * step
+        found = objective(candidate, features, labels, penalty_strength, penalty="l2sq")
+        if found <= value - 1e-4 * size * decrease or size < 1e-12:
+            break
+        size *= 0.5
+    if found >= value and float(grad.abs().max()) < 1e3 * CERTIFICATE:
+        candidate = current - step
+        found = objective(candidate, features, labels, penalty_strength, penalty="l2sq")
+    return candidate, found
+
+
 @lru_cache(maxsize=2)
 def partition_reference(source: SourceSpec, dim: int, rows: int, lam: float) -> Tensor:
     """`w_ref`: the certified L1 `x*` at the lam a real dataset's deal sorts by."""
@@ -881,11 +949,14 @@ class ProblemSpec:
     def optimum(self, iterations: int = 20_000) -> tuple[Tensor, float]:
         """`(x*, its KKT residual)`. **A solve, not a formula.**
 
-        The fixed-budget solve first; where it stops short of
-        :data:`CERTIFICATE`, the certified one.
+        The squared L2 problem by damped Newton (:func:`solve_l2sq`). The L1
+        problem by the fixed-budget solve first and, where it stops short of
+        :data:`CERTIFICATE` or the rows are real, the certified one.
         """
 
         features, labels = self.design(), self.labels()
+        if self.penalty == "l2sq":
+            return solve_l2sq(features, labels, self.penalty_strength)
         if self.source is not None:
             return certified_optimum(features, labels, self.penalty_strength)
         optimum, residual = solve_reference(
@@ -1931,6 +2002,9 @@ def _check_solve(spec: ProblemSpec) -> str | None:
     reference = reference_of(spec, iterations=400, client_iterations=200, client_supports=True)
     if _spec_from_reference(reference) != spec:
         return "the spec does not survive the round trip through the manifest"
+    _, residual = solve_l2sq(features, labels, spec.penalty_strength)
+    if residual > CERTIFICATE:
+        return f"the squared-L2 Newton solve is not certified: residual {residual}"
     stored = torch.tensor(reference["x_star"], dtype=DTYPE)
     stacked = torch.cat(spec.client_indices())
     at_stored = objective(stored, features[stacked], labels[stacked], spec.penalty_strength)
