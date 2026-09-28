@@ -591,8 +591,16 @@ for bit its run alone; what the tests hold is:
 | each setting of a group | its run alone, within §9's tolerance; the generator state in its checkpoints, exactly |
 | a setting that diverges or is refused | stops alone; the others bit-identical to the group without it |
 
-The evaluator is each setting's own: evaluation is not batched across
-settings. A group is not resumed as a group.
+A combined chunk's stacked rows are kept for the next chunk that trains the
+same tensors: with the shared dataset every setting is served its own
+mappings over the same shard tensors, so at the default budget, where one
+setting's round of the MNIST MLP at 1000 clients fills a chunk alone, each
+setting's chunk reuses the rows the first stacked, and each setting's
+evaluator is handed them as its own. The evaluator is each setting's own:
+evaluation is not batched across settings. A setting's timing columns
+(`fit_sec`, `aggregate_sec`, `duration_sec`) are its own wall clock, which
+includes the other settings' turns: its fold waits for the round's other
+settings to plan. A group is not resumed as a group.
 
 ## For agents
 

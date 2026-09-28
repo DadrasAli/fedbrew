@@ -44,6 +44,7 @@ work is done.
 
 from __future__ import annotations
 
+import copy
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -600,6 +601,20 @@ class _Rows:
         first = self.tensors[0]
         self.device = first.device
         self.bytes = sum(tensor.numel() * tensor.element_size() for tensor in self.tensors)
+
+    def serving(self, sources: list[Any]) -> _Rows:
+        """These rows, held as the rows of other splits over the same tensors, unedited.
+
+        A group's settings are served their clients' splits as mappings of
+        their own over the dataset's shared tensors
+        (``fedbrew/core/settings_group.py``); each setting's evaluator asks
+        for its rows by its own splits (``holds``).
+        """
+
+        rows = copy.copy(self)
+        rows.sources = sources
+        rows.versions = [data_versions(source) for source in sources]
+        return rows
 
     def holds(self, sources: list[Any]) -> bool:
         """Whether these are the rows of ``sources``: the same objects, not edited since."""

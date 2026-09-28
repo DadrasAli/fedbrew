@@ -48,13 +48,13 @@ import torch
 from torch import Tensor, nn
 
 from fedbrew.clients.batch_orders import RoundOrders
-from fedbrew.clients.batched_update import ClientBatchPlan, plan_round
+from fedbrew.clients.batched_update import ClientBatchPlan, data_versions, plan_round
 from fedbrew.core.batched_executor import (
     DEFAULT_EXECUTOR_CHUNK_BYTES,
     TrainedChunk,
+    _Bucket,
     _plans,
     _Rows,
-    _run_bucket,
     chunk_fit_stacked,
     chunk_fits,
     client_costs,
@@ -199,10 +199,15 @@ class SettingsGroup:
         self._rounds: dict[int, _Round] = {}
         self._orders: dict[int, _Prep] = {}
         self._dataset: tuple[Any, dict[str, Any], dict[str, Any], str] | None = None
-        #: Stacked rows of the last combined chunk, reused by the next chunk
-        #: that trains the same splits: with a shared dataset, every
-        #: setting's same clients.
-        self.rows: dict[tuple[int, ...], _Rows] = {}
+        #: Stacked rows of the last combined chunk, by the identity of the
+        #: tensors stacked, with their version counters: reused by the next
+        #: chunk that trains the same tensors -- with a shared dataset, every
+        #: setting's same clients, each served its own mapping over them.
+        self.rows: dict[tuple[int, ...], tuple[_Rows, list[tuple[int, ...]]]] = {}
+        #: Per setting, its rows of this round as its own splits, for its
+        #: evaluator -- as an executor alone keeps them, when the round is
+        #: one chunk (``BatchedEvaluator``).
+        self.served: dict[int, dict[tuple[int, ...], _Rows]] = {}
 
     def setting(self, position: int) -> GroupSetting:
         return GroupSetting(self, position)
@@ -314,7 +319,7 @@ class SettingsGroup:
             return
         started = time.perf_counter()
         try:
-            shares = self._train_parts([(round_.preps[p], u) for p, u in parts])
+            shares = self._train_parts([(p, round_.preps[p], u) for p, u in parts])
         except Exception as error:
             round_.results = dict.fromkeys(parts, error)
             return
@@ -327,7 +332,7 @@ class SettingsGroup:
         }
 
     def _train_parts(
-        self, parts: list[tuple[_Prep, int]]
+        self, parts: list[tuple[int, _Prep, int]]
     ) -> list[tuple[list[str], list[int], list[tuple[list[int], dict[str, Tensor], Any, Any]]]]:
         """Train several settings' units as one chunk; per unit, what ``_train_buckets`` returns.
 
@@ -337,59 +342,64 @@ class SettingsGroup:
         executor alone forms them.
         """
 
-        first = parts[0][0]
+        first = parts[0][1]
         task, template = first.task, first.template
         assert template is not None
         state_keys = trained_state_keys(task, template)
         buffers = dict(template.named_buffers())
-        buckets: dict[tuple[Any, ...], list[tuple[int, int]]] = {}
-        orders_of: dict[tuple[Any, ...], tuple[RoundOrders, RoundOrders]] = {}
-        order: list[list[tuple[Any, ...]]] = []
-        for number, (prep, unit) in enumerate(parts):
-            start, stop = prep.units[unit]
-            assert prep.orders is not None
-            seen: list[tuple[Any, ...]] = []
-            for index in range(start, stop):
-                key = (prep.plans[index].bucket, id(prep.orders[0]), start, stop)
-                buckets.setdefault(key, []).append((number, index))
-                orders_of[key] = prep.orders
-                if key not in seen:
-                    seen.append(key)
-            order.append(seen)
-        needed = {
-            tuple(id(parts[n][0].plans[i].train_data) for n, i in rows) for rows in buckets.values()
+        buckets, orders_of, order = _buckets(parts)
+        rows_of = self._stacked_rows(task, parts, buckets)
+        trained = {
+            key: _Bucket(
+                task,
+                template,
+                buffers,
+                [parts[number][1].plans[index] for number, index in rows],
+                rows_of[key],
+                orders_of[key],
+                _ranges(rows),
+            ).run()
+            for key, rows in buckets.items()
         }
-        kept = {key: rows for key, rows in self.rows.items() if key in needed}
+        return [
+            (state_keys, *_share(number, parts[number], order[number], buckets, trained))
+            for number in range(len(parts))
+        ]
+
+    def _stacked_rows(
+        self,
+        task: Any,
+        parts: list[tuple[int, _Prep, int]],
+        buckets: Mapping[tuple[Any, ...], list[tuple[int, int]]],
+    ) -> dict[tuple[Any, ...], _Rows]:
+        """Each bucket's stacked rows: the last chunk's, where they stack the same tensors.
+
+        A bucket of one setting's single unit is also served to that
+        setting's evaluator as rows of its own splits.
+        """
+
+        sources = {
+            key: [parts[number][1].plans[index].train_data for number, index in rows]
+            for key, rows in buckets.items()
+        }
+        stacked = {key: _tensor_key(task, split) for key, split in sources.items()}
+        kept = {key: held for key, held in self.rows.items() if key in stacked.values()}
         self.rows = {}
-        trained: dict[tuple[Any, ...], tuple[dict[str, Tensor], Any, Any]] = {}
+        for position, _, _ in parts:
+            self.served[position] = {}
+        rows_of = {}
         for key, rows in buckets.items():
-            plans = [parts[number][0].plans[index] for number, index in rows]
-            trained[key] = _run_bucket(
-                task, template, buffers, plans, orders_of[key], kept, self.rows, _ranges(rows)
-            )
-        shares = []
-        for number, (prep, unit) in enumerate(parts):
-            start, _ = prep.units[unit]
-            share: list[tuple[list[int], dict[str, Tensor], Any, Any]] = []
-            rows_of: list[int] = []
-            for key in order[number]:
-                rows = buckets[key]
-                mine = [row for row, (owner, _) in enumerate(rows) if owner == number]
-                positions = [rows[row][1] - start for row in mine]
-                owners = sorted({owner for owner, _ in rows})
-                share.append(
-                    _cut(
-                        trained[key],
-                        mine[0],
-                        mine[-1] + 1,
-                        len(rows),
-                        positions,
-                        owners.index(number),
-                    )
-                )
-                rows_of.extend(positions)
-            shares.append((state_keys, rows_of, share))
-        return shares
+            versions = [data_versions(source) for source in sources[key]]
+            held = kept.get(stacked[key])
+            if held is None or held[1] != versions:
+                held = (_Rows(task, sources[key]), versions)
+            self.rows[stacked[key]] = held
+            rows_of[key] = held[0]
+            owners = {parts[number][0] for number, _ in rows}
+            if len(owners) == 1 and len(parts[rows[0][0]][1].units) == 1:
+                split = tuple(id(source) for source in sources[key])
+                self.served[owners.pop()][split] = held[0].serving(sources[key])
+        return rows_of
 
     def leave(self, position: int) -> None:
         """A setting ended: drop what it had not taken, and hand over for good."""
@@ -398,6 +408,67 @@ class SettingsGroup:
         for round_ in self._rounds.values():
             round_.drop(position)
         self.baton.leave(position)
+
+
+def _buckets(
+    parts: list[tuple[int, _Prep, int]],
+) -> tuple[
+    dict[tuple[Any, ...], list[tuple[int, int]]],
+    dict[tuple[Any, ...], tuple[RoundOrders, RoundOrders]],
+    list[list[tuple[Any, ...]]],
+]:
+    """A combined chunk's buckets: each a list of (part, plan index) rows, part by part.
+
+    Also each bucket's orders, and per part its buckets in the order its
+    executor alone forms them.
+    """
+
+    buckets: dict[tuple[Any, ...], list[tuple[int, int]]] = {}
+    orders_of: dict[tuple[Any, ...], tuple[RoundOrders, RoundOrders]] = {}
+    order: list[list[tuple[Any, ...]]] = []
+    for number, (_, prep, unit) in enumerate(parts):
+        start, stop = prep.units[unit]
+        assert prep.orders is not None
+        seen: list[tuple[Any, ...]] = []
+        for index in range(start, stop):
+            key = (prep.plans[index].bucket, id(prep.orders[0]), start, stop)
+            buckets.setdefault(key, []).append((number, index))
+            orders_of[key] = prep.orders
+            if key not in seen:
+                seen.append(key)
+        order.append(seen)
+    return buckets, orders_of, order
+
+
+def _share(
+    number: int,
+    part: tuple[int, _Prep, int],
+    order: list[tuple[Any, ...]],
+    buckets: Mapping[tuple[Any, ...], list[tuple[int, int]]],
+    trained: Mapping[tuple[Any, ...], tuple[dict[str, Tensor], Any, Any]],
+) -> tuple[list[int], list[tuple[list[int], dict[str, Tensor], Any, Any]]]:
+    """One part's rows of the chunk, and its buckets cut out as its executor alone holds them."""
+
+    _, prep, unit = part
+    start, _ = prep.units[unit]
+    share: list[tuple[list[int], dict[str, Tensor], Any, Any]] = []
+    rows_of: list[int] = []
+    for key in order:
+        rows = buckets[key]
+        mine = [row for row, (owner, _) in enumerate(rows) if owner == number]
+        positions = [rows[row][1] - start for row in mine]
+        owners = sorted({owner for owner, _ in rows})
+        share.append(
+            _cut(trained[key], mine[0], mine[-1] + 1, len(rows), positions, owners.index(number))
+        )
+        rows_of.extend(positions)
+    return rows_of, share
+
+
+def _tensor_key(task: Any, sources: list[Any]) -> tuple[int, ...]:
+    """The identity of every tensor a bucket's rows are stacked from."""
+
+    return tuple(id(tensor) for source in sources for tensor in task.split_rows(source))
 
 
 def _ranges(rows: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -521,9 +592,9 @@ class GroupExecutor:
 
     @property
     def _rows(self) -> dict[tuple[int, ...], _Rows]:
-        """The rows the group keeps, which the batched evaluator reuses (``BatchedEvaluator``)."""
+        """This setting's rows of the round, which its batched evaluator reuses."""
 
-        return self.setting.group.rows
+        return self.setting.group.served.get(self.setting.position, {})
 
     def fit(
         self, clients: ClientPool, requests: Sequence[FitRequest], observer: FitObserver
