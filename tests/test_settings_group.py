@@ -240,6 +240,24 @@ class RunJsonRecordsTheGroupTest(GroupRuns):
         executor = records[0]["reproducibility"]["executor"]
         self.assertEqual(executor, {"used": "batched", "largest_chunk_clients": 8})
 
+    def test_an_auto_budget_is_the_first_settings(self) -> None:
+        from fedbrew.core import batched_executor
+
+        base = _batched(_lasso(), executor_chunk_bytes="auto")
+        frees = iter((8 << 30, 1 << 20))
+        with mock.patch.object(batched_executor, "free_memory", side_effect=lambda _: next(frees)):
+            outputs, _ = self.group(
+                [_edited(base, client={"learning_rate": lr}) for lr in (0.05, 0.1)]
+            )
+        budgets = [
+            json.loads((output / "run.json").read_text())["reproducibility"]["executor"][
+                "chunk_bytes"
+            ]
+            for output in outputs
+        ]
+        self.assertEqual(budgets[0], budgets[1])
+        self.assertEqual(budgets[0]["used"], 4 << 30)
+
     def test_a_run_alone_records_none(self) -> None:
         output = self.alone(_lasso())
         record = json.loads((output / "run.json").read_text())

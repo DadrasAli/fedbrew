@@ -944,11 +944,11 @@ def _validate_executor_values(performance: Mapping[str, Any]) -> None:
         )
     _validate_step_modes(performance)
     chunk_bytes = performance.get("executor_chunk_bytes")
-    if chunk_bytes is not None and (
+    if chunk_bytes not in (None, "auto") and (
         isinstance(chunk_bytes, bool) or not isinstance(chunk_bytes, int) or chunk_bytes <= 0
     ):
         raise RunRefused(
-            "runtime.performance.executor_chunk_bytes must be a positive integer, "
+            "runtime.performance.executor_chunk_bytes must be a positive integer or auto, "
             f"got {chunk_bytes!r}"
         )
 

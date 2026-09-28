@@ -268,7 +268,20 @@ def _executor_rows(executor: Mapping[str, Any] | None) -> list[Row]:
         rows = [Row("Executor", "batched")]
     else:
         return []
-    return rows + _mode_rows(executor)
+    return rows + _budget_rows(executor) + _mode_rows(executor)
+
+
+def _budget_rows(executor: Mapping[str, Any]) -> list[Row]:
+    """``executor_chunk_bytes: auto``: the budget it gave, or why it took the default."""
+
+    budget = executor.get("chunk_bytes")
+    if not isinstance(budget, Mapping):
+        return []
+    used = f"{int(budget['used']) / (1 << 30):.2f} GiB"
+    if budget.get("fallback"):
+        return [Row("Chunk budget", f"{used}; auto falls back: {budget['fallback']}", tone=AMBER)]
+    free = int(budget["free"]) / (1 << 30)
+    return [Row("Chunk budget", f"{used}, auto: {budget['fraction']} of {free:.2f} GiB free")]
 
 
 def _mode_rows(executor: Mapping[str, Any]) -> list[Row]:

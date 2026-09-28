@@ -338,7 +338,7 @@ are folded in one weighted reduction per tensor (chapter 07 §3.3).
 | Key | Type | Default | Effect |
 | --- | --- | --- | --- |
 | `executor` | `sequential` \| `batched` | `sequential` | How a round's sampled clients are run. |
-| `executor_chunk_bytes` | int > 0 | `1073741824` (1 GiB) | The memory one chunk of clients may take. Read only by `batched`. |
+| `executor_chunk_bytes` | int > 0 \| `auto` | `1073741824` (1 GiB) | The memory one chunk of clients may take. Read only by `batched`. `auto`: half the device's free memory at the start of the run, below. |
 
 **What it computes.** Per client, what the sequential executor computes:
 
@@ -435,6 +435,20 @@ stacked, so what is held at once is one chunk's stack, and the previous one's
 while the aggregator still holds that chunk's last result, as the sequential
 executor's previous client state is held while the next client fits.
 `run.json` records the most clients one chunk held (`largest_chunk_clients`).
+`executor_chunk_bytes: auto` measures the free memory of the model's device
+once, when the executor is chosen (after the dataset and model are built):
+CUDA's free memory, or on the host the smaller of the kernel's `MemAvailable`
+and the headroom of every memory cgroup the process is in, which is a batch
+job's limit. A chunk gets half (`AUTO_CHUNK_FRACTION`): the estimate leaves
+out a forward pass's activations and the allocator's slack, and the previous
+chunk's stack can be alive while the next is built. `run.json` records
+`chunk_bytes: {asked: auto, used, free, fraction}`, and the plan header prints
+it; where free memory cannot be read the run takes the 1 GiB default and
+records why. A settings group (§10) takes its first setting's budget for
+every setting. Since the budget decides the chunks, and they the order of the
+same sums, two `auto` runs on machines with different free memory agree to
+the executor's tolerance, not bit for bit; setting the recorded `used` as the
+budget repeats a run.
 A bucket's rows are held padded to its longest split and stacked, so a batch
 that is every client's whole split, as the post-fit pass usually is, is used
 in place. When a round is one chunk its stacked rows are kept for the next

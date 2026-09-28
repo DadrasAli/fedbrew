@@ -79,6 +79,12 @@ from fedbrew.tasks.base import BatchableTask
 #: ``runtime.performance.executor_chunk_bytes`` when unset: 1 GiB.
 DEFAULT_EXECUTOR_CHUNK_BYTES = 1 << 30
 
+#: The share of the device's free memory ``executor_chunk_bytes: auto`` gives
+#: one chunk. The estimate counts parameters, optimizer state and rows but not
+#: a forward pass's activations or the allocator's slack, and the previous
+#: chunk's stack can be alive while the next is built, so half is left over.
+AUTO_CHUNK_FRACTION = 0.5
+
 #: Model-sized tensors a client holds while it is stepped, beside its
 #: optimizer's: its parameters, one gradient, and one sum or update.
 _WORKING_SLOTS = 3
@@ -1704,9 +1710,105 @@ def select_executor(components: Any) -> tuple[BatchedExecutor | None, dict[str, 
     assert model is not None
     precision, why = _precision_for(precision_asked, model)
     _record_modes(record, compile_asked, precision_asked, precision, why)
-    chunk_bytes = performance.get("executor_chunk_bytes", DEFAULT_EXECUTOR_CHUNK_BYTES)
+    chunk_bytes = chunk_budget(performance.get("executor_chunk_bytes"), model, record)
     context = StepContext(compile_asked, precision, record)
     return BatchedExecutor(chunk_bytes, record=record, context=context), record
+
+
+def chunk_budget(asked: Any, model: nn.Module, record: dict[str, Any]) -> int:
+    """``executor_chunk_bytes``: the number, the 1 GiB default, or ``auto``'s share of free memory.
+
+    ``auto`` measures the free memory of the model's device once, at the start
+    of the run, and records it with the budget it gave under
+    ``chunk_bytes`` in run.json: the budget decides the chunks, and with them
+    the order of the same sums. Where free memory cannot be read, the run takes
+    the default and records why.
+    """
+
+    if asked != "auto":
+        return DEFAULT_EXECUTOR_CHUNK_BYTES if asked is None else int(asked)
+    device = next(model.parameters()).device
+    free = free_memory(device)
+    if free is None:
+        record["chunk_bytes"] = {
+            "asked": "auto",
+            "used": DEFAULT_EXECUTOR_CHUNK_BYTES,
+            "fallback": f"the free memory of {device.type} could not be read",
+        }
+        return DEFAULT_EXECUTOR_CHUNK_BYTES
+    budget = max(1, int(free * AUTO_CHUNK_FRACTION))
+    record["chunk_bytes"] = {
+        "asked": "auto",
+        "used": budget,
+        "free": free,
+        "fraction": AUTO_CHUNK_FRACTION,
+    }
+    return budget
+
+
+def free_memory(device: torch.device) -> int | None:
+    """Bytes free on ``device`` now: CUDA's free memory, or the host's available memory.
+
+    On the host, the smaller of the kernel's ``MemAvailable`` and the headroom
+    of every memory cgroup the process is in (a batch job's limit); None where
+    neither can be read.
+    """
+
+    if device.type == "cuda":
+        return int(torch.cuda.mem_get_info(device)[0])
+    return _host_available()
+
+
+def _host_available() -> int | None:
+    available = _meminfo_available()
+    headroom = [room for room in _cgroup_headrooms() if room is not None]
+    candidates = ([available] if available is not None else []) + headroom
+    return min(candidates) if candidates else None
+
+
+def _meminfo_available() -> int | None:
+    try:
+        with open("/proc/meminfo", encoding="ascii") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        return None
+    return None
+
+
+def _cgroup_headrooms() -> Iterator[int | None]:
+    """Limit minus usage of the process's memory cgroup and each of its ancestors (v1 or v2)."""
+
+    try:
+        with open("/proc/self/cgroup", encoding="ascii") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return
+    for line in lines:
+        _, controllers, path = line.split(":", 2)
+        if controllers == "":
+            files = ("/sys/fs/cgroup", "memory.max", "memory.current")
+        elif "memory" in controllers.split(","):
+            files = ("/sys/fs/cgroup/memory", "memory.limit_in_bytes", "memory.usage_in_bytes")
+        else:
+            continue
+        parts = [part for part in path.split("/") if part]
+        for depth in range(len(parts), -1, -1):
+            directory = "/".join((files[0], *parts[:depth]))
+            yield _headroom(f"{directory}/{files[1]}", f"{directory}/{files[2]}")
+
+
+def _headroom(limit_file: str, usage_file: str) -> int | None:
+    try:
+        with open(limit_file, encoding="ascii") as limit, open(usage_file, encoding="ascii") as use:
+            text, usage = limit.read().strip(), int(use.read().strip())
+    except (OSError, ValueError):
+        return None
+    # "max" (v2) and v1's page-rounded 2**63 both mean no limit.
+    if text == "max" or int(text) >= 1 << 62:
+        return None
+    return max(0, int(text) - usage)
 
 
 def compile_mode(value: Any) -> bool:

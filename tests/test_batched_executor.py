@@ -4,7 +4,8 @@
 sequential executor's. What is pinned here (chapter 11 §9):
 
 - selection: ``runtime.performance.executor`` takes ``sequential`` or
-  ``batched`` and ``executor_chunk_bytes`` a positive integer; a batchable
+  ``batched`` and ``executor_chunk_bytes`` a positive integer or ``auto``,
+  half the device's free memory at the start, recorded; a batchable
   run records ``used: batched`` and its largest chunk in run.json, and one
   that is not runs sequentially, says why in the plan header, and records the
   reason;
@@ -86,6 +87,7 @@ class TheKeysAreCheckedTest(unittest.TestCase):
     def test_the_two_executors_and_a_positive_budget_are_accepted(self) -> None:
         self._validate(executor="sequential")
         self._validate(executor="batched", executor_chunk_bytes=1 << 20)
+        self._validate(executor="batched", executor_chunk_bytes="auto")
 
     def test_anything_else_is_refused(self) -> None:
         for performance in (
@@ -95,6 +97,8 @@ class TheKeysAreCheckedTest(unittest.TestCase):
             {"executor_chunk_bytes": -1},
             {"executor_chunk_bytes": True},
             {"executor_chunk_bytes": 1.5},
+            {"executor_chunk_bytes": "Auto"},
+            {"executor_chunk_bytes": "half"},
         ):
             with self.subTest(**performance), self.assertRaises(RunRefused):
                 self._validate(**performance)
@@ -278,6 +282,61 @@ class OneChunkAtATimeTest(ExecutorRuns):
         train, _ = plan_round([plan], 1)
         budget = _client_cost(components, template, plan, train) * 3
         self.assertAgree(*self.both(example_config("fed-lasso"), executor_chunk_bytes=budget))
+
+
+class AnAutoBudgetIsHalfTheFreeMemoryTest(ExecutorRuns):
+    def _record(self, output: Path) -> dict[str, Any]:
+        return json.loads((output / "run.json").read_text())["reproducibility"]["executor"]
+
+    def _cost(self) -> int:
+        components = _components(example_config("fed-lasso"), self.root)
+        template = components.task.build_model(components.clients["client_0"].model_config)
+        plan = components.clients["client_0"].batched_plan(_requests(components)[0], template)
+        train, _ = plan_round([plan], 1)
+        return _client_cost(components, template, plan, train)
+
+    def test_the_budget_is_measured_and_recorded(self) -> None:
+        free = self._cost() * 3 * 2 + 1
+        with mock.patch.object(batched_executor, "free_memory", return_value=free):
+            auto = self.run_config(
+                example_config("fed-lasso"), "batched", executor_chunk_bytes="auto"
+            )
+        record = self._record(auto)
+        self.assertEqual(
+            record["chunk_bytes"],
+            {"asked": "auto", "used": free // 2, "free": free, "fraction": 0.5},
+        )
+        self.assertEqual(record["largest_chunk_clients"], 3)
+        self.assertIn("auto: 0.5 of", _executor_rows(record)[1].value)
+
+    def test_a_budget_as_large_as_the_default_runs_as_the_default(self) -> None:
+        auto = self.run_config(example_config("fed-lasso"), "batched", executor_chunk_bytes="auto")
+        self.assertAgree(auto, self.run_config(example_config("fed-lasso"), "batched"), exact=True)
+        self.assertGreater(self._record(auto)["chunk_bytes"]["free"], 0)
+
+    def test_unreadable_free_memory_takes_the_default_and_says_so(self) -> None:
+        with mock.patch.object(batched_executor, "free_memory", return_value=None):
+            auto = self.run_config(
+                example_config("fed-lasso"), "batched", executor_chunk_bytes="auto"
+            )
+        record = self._record(auto)["chunk_bytes"]
+        self.assertEqual(record["used"], batched_executor.DEFAULT_EXECUTOR_CHUNK_BYTES)
+        self.assertIn("could not be read", record["fallback"])
+
+    def test_a_cgroup_limit_is_headroom_and_no_limit_is_none(self) -> None:
+        for limit, usage, headroom in (
+            ("1000", "400", 600),
+            ("max", "400", None),
+            (str(1 << 63), "400", None),
+            ("300", "400", 0),
+        ):
+            with self.subTest(limit=limit):
+                (self.root / "limit").write_text(limit + "\n")
+                (self.root / "usage").write_text(usage + "\n")
+                self.assertEqual(
+                    batched_executor._headroom(str(self.root / "limit"), str(self.root / "usage")),
+                    headroom,
+                )
 
 
 def _client_cost(components: Any, template: Any, plan: Any, train: Any) -> int:

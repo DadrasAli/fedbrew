@@ -194,6 +194,8 @@ class SettingsGroup:
         self.varies = list(varies)
         self.identity = hashlib.sha256("\0".join(self.configs).encode()).hexdigest()[:12]
         self.chunk_bytes = DEFAULT_EXECUTOR_CHUNK_BYTES
+        #: The first setting's ``chunk_bytes`` record, which is every setting's.
+        self.budget_record: dict[str, Any] | None = None
         #: How the combined steps run: the settings' ``StepContext``.
         self.context: StepContext | None = None
         #: The group's record, shared by every setting's run.json.
@@ -581,7 +583,14 @@ class GroupSetting:
         executor, record = select_executor(components)
         if executor is None:
             return None, record
-        self.group.chunk_bytes = executor.chunk_bytes
+        if self.group.budget_record is None:
+            # The first setting's budget is the group's: an ``auto`` budget
+            # measured again by a later setting would see the memory the
+            # first one already holds.
+            self.group.chunk_bytes = executor.chunk_bytes
+            self.group.budget_record = record.get("chunk_bytes", {})
+        elif self.group.budget_record:
+            record["chunk_bytes"] = dict(self.group.budget_record)
         # Every setting asks for the same modes; the first's context steps
         # them all, and a fallback it records is every setting's.
         if self.group.context is None:
@@ -589,7 +598,7 @@ class GroupSetting:
         elif executor.context is not None and self.group.context is not None:
             self.group.context.records.append(record)
         self.record["largest_chunk_rows"] = 0
-        return GroupExecutor(self, executor.chunk_bytes, record), record
+        return GroupExecutor(self, self.group.chunk_bytes, record), record
 
 
 class GroupExecutor:
