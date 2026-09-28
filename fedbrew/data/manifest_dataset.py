@@ -88,6 +88,17 @@ class ManifestFederatedDataset(FederatedDataset):
 
         self._eviction_listeners.append(listener)
 
+    def caches_every_shard(self) -> bool:
+        """Whether every client's shard is in the shard cache, so none can be evicted.
+
+        Once each is cached nothing more is read into the cache -- the global
+        test shard is read past it -- so from then on no client is released by
+        an eviction. The resident round (``fedbrew/core/resident.py``) holds
+        its clients on that condition.
+        """
+
+        return self.shard_cache_bytes > 0 and len(self._shard_cache) == len(self._clients)
+
     def touch_shard(self, client_id: str) -> bool:
         """Whether the client's shard is cached; if it is, mark it most recently used.
 

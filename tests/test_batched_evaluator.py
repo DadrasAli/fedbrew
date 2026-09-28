@@ -28,6 +28,7 @@ from tests.test_batched_executor_tolerance import (
     example_config,
     float64_classification,
 )
+from tests.test_resident_round import per_round
 
 
 def ragged_evaluation_splits() -> Any:
@@ -161,7 +162,9 @@ class KeptRowsTest(ExecutorRuns):
             built.append(len(sources))
             real(self, task, sources)
 
-        with mock.patch.object(batched_executor._Rows, "__init__", counted):
+        # The per-round path, whose evaluator reads the executor's kept rows;
+        # a resident run stacks its training rows once for the run instead.
+        with mock.patch.object(batched_executor._Rows, "__init__", counted), per_round():
             self.run_config(config, "batched")
         # Round 1 stacks the training rows, val's and test's, once each.
         self.assertEqual(built, [8, 8, 8])

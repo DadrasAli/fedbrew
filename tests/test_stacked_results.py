@@ -51,6 +51,7 @@ from tests.test_batched_executor_tolerance import (
     with_client,
 )
 from tests.test_reproducibility import TIMING
+from tests.test_resident_round import per_round
 
 METADATA = {"model_state_scope": "full"}
 
@@ -270,7 +271,8 @@ class TheStackedPathIsTakenTest(ExecutorRuns):
                 taken.setdefault(label, set()).add(stacks is not None)
                 return stacks
 
-            with mock.patch.object(BatchedExecutor, "fit_stacked", spy):
+            # The per-round path, which hands its rounds to fit_stacked.
+            with mock.patch.object(BatchedExecutor, "fit_stacked", spy), per_round():
                 self.run_config(config, "batched")
         self.assertEqual(
             taken,

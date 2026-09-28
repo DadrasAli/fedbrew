@@ -36,6 +36,7 @@ from tests.test_batched_executor_tolerance import (
     classification_rule_config,
     example_config,
 )
+from tests.test_resident_round import per_round
 
 
 def _batched(config: dict[str, Any], **performance: Any) -> dict[str, Any]:
@@ -181,8 +182,11 @@ class EachSettingDrawsItsOwnNumbersTest(GroupRuns):
             mock.patch.object(settings_group, "_plans", drawing),
         ):
             grouped, _ = self.group(configs)
-            for config, output in zip(configs, grouped, strict=True):
-                self.assertSameGenerators(output, self.alone(config))
+            # Alone on the per-round path, which calls the drawing _plans; a
+            # resident run plans no client of its own.
+            with per_round():
+                for config, output in zip(configs, grouped, strict=True):
+                    self.assertSameGenerators(output, self.alone(config))
 
 
 class ASettingThatStopsStopsAloneTest(GroupRuns):

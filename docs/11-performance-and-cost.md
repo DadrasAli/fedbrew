@@ -560,6 +560,60 @@ seeded run. `tests/test_batched_executor.py` pins each, and
 `tests/test_batched_executor_tolerance.py` that two batched runs are
 identical.
 
+### 9.1 The resident round
+
+A batched run whose rounds allow it holds them on its device for the whole
+run (`fedbrew/core/resident.py`), and computes what the per-round path above
+computes, bit for bit on the same device:
+
+- **Rows.** Every client's training rows are stacked once, at the start. A
+  bucket's rows are its clients' rows gathered from that stack, padded to the
+  bucket's longest split: the tensors the round's own stacking gives, so the
+  step reads the same values in the same layout.
+- **Model.** The server's state is the round's mean, where the fold left it.
+  The next round's clients start from it without a copy, and the host holds
+  it only as the checkpoints and the evaluation read it.
+- **The fold.** Each bucket's `weights @ rows` is added into sums on the
+  device, and the sums are divided there by the total weight as a device
+  tensor. Float addition rounds the same on either device, and so does that
+  division: a division by a CPU scalar is not the same on CUDA, which
+  multiplies by the reciprocal -- 12,111 of the MNIST MLP's 50,176 first-layer
+  weights differed that way, and none by a device tensor (measured on an A100,
+  2026-09-28). A round with a bucket of one client is folded on the CPU, as
+  the accumulator adds one client's row.
+- **Plans and records.** A round's clients and orders are the planner's
+  (§9, planned ahead), and its program the first client's rule's, which every
+  client shares; no per-client object exists while the round trains. Each
+  round's per-client outputs wait on the device until the flush, which reads
+  every round since the last back in one copy and records each, in order,
+  with the code the per-round path runs: the rule's `batched_stacked_results`,
+  the loop's observer, the server's metric sums, and then the round's
+  evaluation, verdict, checkpoints and flush, as `run_fl_loop` does them.
+  A client is taken from the pool when the round would first touch it, so a
+  checkpoint lists the clients it lists on the per-round path.
+- **Stops.** A divergence verdict or a refusal inside a flush window ends the
+  run at that round, exactly as the per-round loop ends it; the rounds
+  trained after it are dropped. An aggregate that is not finite is run once
+  more through the per-round path from the model before it, which refuses it
+  naming the client and tensor it names; a client with no training batches is
+  refused after the rounds before it are recorded.
+
+It applies when the run is batched with a planner (§9); does not compile;
+uses FedAvg's server, fold and payload, the streaming aggregator and the
+batched evaluator at the global scope; trains `fedavg`, `local_sgd` or
+`local_adamw` (no per-client state); holds every client's rows in a quarter of
+the device's free memory; and has a client pool that cannot release a client
+behind the round's back -- built clients, or a manifest dataset whose shard
+cache holds every client's shard. Otherwise the per-round path runs it.
+`run.json` records which: `executor.rounds`, `used: resident` or
+`used: per_round` with the reason. `tests/test_resident_round.py` runs each
+arm both ways and compares every CSV cell but the timings, every checkpoint
+file -- model, server and client states, metrics and RNG state -- and how the
+run ended: full and Bernoulli participation, clients of different sizes and
+several buckets (some of one client), the own-loop rules, uniform weighting,
+a post-fit pass on some rounds, a flush every third round, a manifest
+dataset, and a stall and a non-finite aggregate inside a flush window.
+
 ## 10. Settings run as one group
 
 Runs whose configs differ only in numeric hyperparameters -- a learning-rate
@@ -722,6 +776,7 @@ Accuracy cells under `bf16` move by whole examples and are not held.
 | `fedbrew/clients/batched_update.py` | §9: a rule's update as steps over a stack, the plan a rule declares, and the round's planning |
 | `fedbrew/clients/batch_orders.py` | §9: every client's batch order for a round, from the loaders' declarations: seeds, permutations, batches |
 | `fedbrew/core/round_planner.py` | §9: each round's sampled clients and orders planned from the roster, ahead of the loop, by worker processes |
+| `fedbrew/core/resident.py` | §9.1: the resident round: rows, model and records held on the device, recorded at the flush |
 | `fedbrew/core/batched_evaluator.py` | §9: the due clients' splits measured together, and the central pass's kept model and shard |
 | `tools/` | the benchmark and profiling scripts |
 

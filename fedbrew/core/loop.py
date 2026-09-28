@@ -236,6 +236,44 @@ def run_fl_loop(
         )
         return state
 
+    # A batched run whose rounds can be held on its device runs them there
+    # (fedbrew/core/resident.py), computing what the rounds below compute.
+    from fedbrew.core.resident import resident_rounds_for, run_resident_loop
+
+    context = LoopContext(
+        server=server,
+        client=client,
+        dataset=dataset,
+        global_rounds=global_rounds,
+        output_dir=output_dir,
+        flush_every=flush_every,
+        evaluation=evaluation,
+        statistics=statistics,
+        monitor=monitor,
+        schedules=schedules,
+        central_schedule=central_schedule,
+        fit_schedule=fit_schedule,
+        executor=executor,
+        aggregator=aggregator,
+        evaluator=evaluator,
+        server_payload=server_payload,
+        start_round=start_round,
+        checkpoint_policy=checkpoint_policy,
+        checkpoint_tracker=checkpoint_tracker,
+        state=state,
+        csv_cursor=csv_cursor,
+        client_infos=client_infos,
+        evaluation_clients=evaluation_clients,
+        divergence=divergence,
+        on_round_end=on_round_end,
+        on_round_flush=on_round_flush,
+        on_client_progress=on_client_progress,
+        on_termination=on_termination,
+    )
+    resident = resident_rounds_for(context)
+    if resident is not None:
+        return run_resident_loop(context, resident)
+
     # Everything built so far -- the clients, their data, the model -- lives
     # for the whole run, so it is set aside from the collector once the first
     # round has built it (_LongLivedObjects).
@@ -465,6 +503,44 @@ def run_fl_loop(
         return state
     finally:
         long_lived.release()
+
+
+@dataclass(slots=True)
+class LoopContext:
+    """What ``run_fl_loop`` has set up before its first round, for a loop that runs them its way.
+
+    The resident round (``fedbrew/core/resident.py``) runs the same rounds and
+    records them with this loop's own functions, from this state.
+    """
+
+    server: ServerStrategy
+    client: ClientPool
+    dataset: FederatedDataset
+    global_rounds: int
+    output_dir: str | Path | None
+    flush_every: int
+    evaluation: EvaluationConfig
+    statistics: ClientStatisticsConfig
+    monitor: DivergenceMonitor
+    schedules: dict[str, int | None]
+    central_schedule: int | None
+    fit_schedule: int | None
+    executor: ClientExecutor
+    aggregator: Aggregator
+    evaluator: Evaluator
+    server_payload: dict[str, Any]
+    start_round: int
+    checkpoint_policy: dict[str, Any]
+    checkpoint_tracker: dict[str, Any]
+    state: ExperimentState
+    csv_cursor: dict[str, Any]
+    client_infos: list[ClientInfo]
+    evaluation_clients: dict[str, Callable[[int, list[str]], list[ClientInfo]]]
+    divergence: DivergenceConfig | None
+    on_round_end: Callable[[MetricRecord], None] | None
+    on_round_flush: Callable[[ExperimentState], None] | None
+    on_client_progress: Callable[[int, int, int, str], None] | None
+    on_termination: Callable[[DivergenceVerdict], None] | None
 
 
 #: Objects already in the permanent generation when this module was imported:

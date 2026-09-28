@@ -118,6 +118,8 @@ class SelectionIsRecordedTest(ExecutorRuns):
                 # Planned from the roster in this process: a CPU run starts no
                 # planner workers (round_planner).
                 "planner": {"used": "on", "workers": 0, "waited_sec": 0.0},
+                # Its rounds held on the device (fedbrew/core/resident.py).
+                "rounds": {"used": "resident"},
             },
         )
 

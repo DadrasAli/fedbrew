@@ -527,10 +527,40 @@ def chunk_fit_stacked(
 ) -> ChunkFit:
     """A trained chunk (``_train_buckets``) as its buckets' columns, for stacked results."""
 
+    parts, columns, layout = staged_chunk(task, [(members, *rest) for members, _, *rest in trained])
+    groups, values = host_values(parts, columns)
+    states = [StateStack({key: stack[key] for key in state_keys}) for _, stack, _, _ in trained]
+    return finished_chunk(
+        groups,
+        values,
+        layout,
+        states,
+        task.federated_model_state_metadata(template),
+        trainable_parameter_count(template),
+    )
+
+
+#: Per bucket: its clients (positions in the chunk), and where its step
+#: totals, its post-fit part and its folded metric names are in a staged copy.
+ChunkLayout = list[tuple[list[int], int | None, int | None, list[str], bool]]
+
+
+def staged_chunk(
+    task: Any, trained: list[tuple[list[int], Any, Any]]
+) -> tuple[list[Any], list[Tensor], ChunkLayout]:
+    """What a chunk's stacked results read of its buckets' passes, still on the device.
+
+    Per bucket (its clients, its training outputs and counts, its post-fit
+    outputs or None): each training step's ``total``, as one column, and the
+    post-fit pass's metrics and example counts as the task folds them
+    (``stacked_metrics``), or, for a bucket it does not fold -- one client, or
+    a task without the hook -- its outputs themselves.
+    """
+
     parts: list[Any] = []
     columns: list[Tensor] = []
-    layout: list[tuple[int | None, int | None, list[str], bool]] = []
-    for _, _, (outputs, counts), evaluated in trained:
+    layout: ChunkLayout = []
+    for members, (outputs, counts), evaluated in trained:
         totals = None
         if outputs and "total" in outputs[0]:
             totals = len(columns)
@@ -546,16 +576,28 @@ def chunk_fit_stacked(
             else:
                 eval_part = len(parts)
                 parts.append(evaluated)
-        layout.append((totals, eval_part, names, folded))
+        layout.append((members, totals, eval_part, names, folded))
         del counts
-    groups, values = host_values(parts, columns)
+    return parts, columns, layout
+
+
+def finished_chunk(
+    groups: list[Any],
+    values: list[list[float]],
+    layout: ChunkLayout,
+    states: Sequence[StateStack],
+    metadata: dict[str, Any],
+    trainable: int,
+) -> ChunkFit:
+    """A chunk's ``ChunkFit`` from its staged values read back, one state stack per bucket."""
+
     buckets = []
-    for (members, stack, _, _), (totals, eval_part, names, folded) in zip(
-        trained, layout, strict=True
+    for (members, totals, eval_part, names, folded), bucket_states in zip(
+        layout, states, strict=True
     ):
         bucket = BucketFit(
             positions=members,
-            states=StateStack({key: stack[key] for key in state_keys}),
+            states=bucket_states,
             step_totals=None if totals is None else values[totals],
         )
         if folded:
@@ -567,11 +609,7 @@ def chunk_fit_stacked(
         elif eval_part is not None:
             bucket.eval_outputs = groups[eval_part]
         buckets.append(bucket)
-    return ChunkFit(
-        buckets=buckets,
-        model_state_metadata=task.federated_model_state_metadata(template),
-        trainable_parameters=trainable_parameter_count(template),
-    )
+    return ChunkFit(buckets=buckets, model_state_metadata=metadata, trainable_parameters=trainable)
 
 
 @dataclass(slots=True)
@@ -912,28 +950,61 @@ def host_values(
     """``host_floats`` of ``parts``, and each of ``columns`` as a list of floats, in one copy.
 
     A column is read in its own order, flattened: a ``(steps, clients)``
-    tensor becomes its values step by step.
+    tensor becomes its values step by step. :func:`staged_values` and
+    :func:`finished_values` back to back: the resident round
+    (``fedbrew/core/resident.py``) stages a round's values and finishes them
+    after the flush's one copy.
+    """
+
+    staged, layout = staged_values(parts, columns)
+    values = staged.cpu().tolist() if staged is not None else []
+    return finished_values(values, layout)
+
+
+#: How a staged copy is read back: per part its keys, positions and splits
+#: and its splits' counts, then the columns' sizes.
+StagedLayout = tuple[list[tuple[list[str], int, int, list[int]]], list[int]]
+
+
+def staged_values(
+    parts: Sequence[tuple[list[dict[str, Tensor]], Sequence[int]]],
+    columns: Sequence[Tensor],
+) -> tuple[Tensor | None, StagedLayout]:
+    """Every value of ``parts`` and ``columns`` joined in one float64 tensor on their device.
+
+    Every value is widened to float64 where it is: a float32 value and a
+    count below 2**53 are exact in float64, so each float read back is the
+    one its own ``float()`` would give. None when there is nothing to copy.
     """
 
     pieces: list[Tensor] = []
-    layout: list[tuple[list[str], int, int]] = []
+    layout: list[tuple[list[str], int, int, list[int]]] = []
     for outputs, counts in parts:
         keys = list(outputs[0]) if outputs else []
         for key in keys:
             pieces.append(
                 torch.stack([output[key] for output in outputs]).reshape(-1).to(torch.float64)
             )
-        layout.append((keys, len(outputs), len(counts)))
+        layout.append((keys, len(outputs), len(counts), list(counts)))
     for column in columns:
         pieces.append(column.reshape(-1).to(torch.float64))
-    values: list[float] = []
-    if pieces:
-        # Joined where they are, so a GPU round is one device-to-host copy.
-        device = pieces[0].device
-        values = torch.cat([piece.to(device) for piece in pieces]).cpu().tolist()
+    sizes = [int(column.numel()) for column in columns]
+    if not pieces:
+        return None, (layout, sizes)
+    # Joined where they are, so a GPU round is one device-to-host copy.
+    device = pieces[0].device
+    return torch.cat([piece.to(device) for piece in pieces]), (layout, sizes)
+
+
+def finished_values(
+    values: Sequence[float], layout: StagedLayout
+) -> tuple[list[list[list[dict[str, float]]]], list[list[float]]]:
+    """A staged copy read back (``staged_values``): the parts' dicts and the columns' lists."""
+
+    part_layout, sizes = layout
     groups: list[list[list[dict[str, float]]]] = []
     offset = 0
-    for (keys, positions, size), (_, counts) in zip(layout, parts, strict=True):
+    for keys, positions, size, counts in part_layout:
         read = {}
         for key in keys:
             read[key] = values[offset : offset + positions * size]
@@ -945,9 +1016,9 @@ def host_values(
             ]
         )
     lists: list[list[float]] = []
-    for column in columns:
-        lists.append(values[offset : offset + column.numel()])
-        offset += column.numel()
+    for size in sizes:
+        lists.append(list(values[offset : offset + size]))
+        offset += size
     return groups, lists
 
 
@@ -976,6 +1047,7 @@ class _Bucket:
         orders: tuple[RoundOrders, RoundOrders],
         parts: Sequence[tuple[int, int]] | None = None,
         context: StepContext | None = None,
+        values: ProgramValues | None = None,
     ) -> None:
         self.task = task
         self.plans = plans
@@ -1017,7 +1089,7 @@ class _Bucket:
         self._weights_on_device: Tensor | None = None
         #: Each client's own learning rate, momentum, ...: the bucket shares
         #: its program's shape, not its values.
-        self.values = ProgramValues(
+        self.values = values or ProgramValues(
             [plan.program for plan in plans],
             len(self.structure),
             self.dtype,
