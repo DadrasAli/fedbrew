@@ -45,6 +45,7 @@ work is done.
 from __future__ import annotations
 
 import copy
+import sys
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
@@ -103,8 +104,9 @@ class BatchedExecutor:
             At least one client is taken whatever it costs.
         record: Kept current with ``largest_chunk_clients``, the most
             clients one chunk has held -- run.json's record of the executor.
-        context: How the training step runs (``runtime.performance.precision``);
-            None is the reference, at the model's own precision.
+        context: How the training step runs (``runtime.performance.compile``
+            and ``precision``); None is the reference: eager, at the model's
+            own precision.
         """
 
         if isinstance(chunk_bytes, bool) or int(chunk_bytes) <= 0:
@@ -952,15 +954,21 @@ class _Bucket:
         first = next(model.parameters())
         self.device, self.model_dtype = first.device, first.dtype
         self.parameters = dict(model.named_parameters())
-        #: The reference unless the run asks for a precision: the step then
-        #: runs at ``dtype`` (float32 under f32_f64), under autocast or TF32,
-        #: and the post-fit pass as the reference runs it.
+        #: The reference unless the run asks for a mode: the step then runs at
+        #: ``dtype`` (float32 under f32_f64), under autocast or TF32, or
+        #: compiled, and the post-fit pass as the reference runs it.
         self.context = context or StepContext()
         self.dtype = self.context.train_dtype(self.model_dtype)
+        self.compiled = self.context.compiling and self.stacked
         self.model = model
         self.buffers = buffers
         # The pass measures the model as trained, at its own precision.
         self.eval_model, self.eval_buffers = model, buffers
+        if self.compiled:
+            # One module per structure for the whole run: the compiled step
+            # is specialised to it, and the round's template is a new object.
+            self.model = self.context.module(model)
+            self.buffers = dict(self.model.named_buffers())
         self.buffers = {
             name: value.to(self.dtype) if value.is_floating_point() else value
             for name, value in self.buffers.items()
@@ -982,12 +990,14 @@ class _Bucket:
             len(self.structure),
             self.dtype,
             self.device,
+            per_step=self.compiled,
         )
         #: Whether a step's gradients are taken as one backward through the
         #: stacked losses' sum rather than vmap(grad): the form the task
         #: declares, by measurement (``batched_gradient``); one client is
         #: never vmapped, and takes the sequential gradient either way.
-        self.summed = self.stacked and gradient_form(task) == "summed"
+        #: Compiled, the step is always vmap(grad), which compiles whole.
+        self.summed = self.stacked and gradient_form(task) == "summed" and not self.compiled
 
     # -- the tensors every client starts from --------------------------------
 
@@ -1056,6 +1066,8 @@ class _Bucket:
         if not self.stacked:
             return function(*values)
         dims = tuple(dim if value is not None else None for value, dim in arguments)
+        if self.compiled:
+            return self.context.call(function, dims, values)
         return torch.func.vmap(function, in_dims=dims)(*values)
 
     def _weights(self, step: int) -> tuple[Any, int | None]:
@@ -1100,9 +1112,16 @@ class _Bucket:
         """Every step: the trained stack, each step's outputs, and how many batches were taken."""
 
         program = self.program
-        batch_update, gradient_sum, combined_update = step_functions(
-            self.task, self.model, self.buffers, program, self.context.autocast(self.device)
-        )
+        if self.compiled:
+            steps = self.context.functions(self.task, self.model, self.buffers, program)
+        else:
+            steps = step_functions(
+                self.task, self.model, self.buffers, program, self.context.autocast(self.device)
+            )
+        batch_update, gradient_sum, combined_update = steps
+        # Compiled, a step is told only whether it is the first, which is
+        # all SGD's arithmetic reads; AdamW's corrections are then values.
+        numbered = (lambda number: 1 if number == 1 else 2) if self.compiled else (lambda n: n)
         client_dim = 0 if self.stacked else None
         params = self._start()
         state: Any = initial_optimizer_state(program.optimizer, params)
@@ -1133,7 +1152,7 @@ class _Bucket:
                         (mask, client_dim),
                         *corrections,
                         self._values(number),
-                        (number, None),
+                        (numbered(number), None),
                     ],
                 )
                 outputs.append(step_outputs)
@@ -1163,7 +1182,7 @@ class _Bucket:
                     self._denominators(first, count),
                     *corrections,
                     self._values(number),
-                    (number, None),
+                    (numbered(number), None),
                 ],
             )
 
@@ -1454,16 +1473,31 @@ def _autocast(device_type: str | None) -> Any:
 
 
 class StepContext:
-    """How a run's batched training step runs: the reference, or the precision it asks for.
+    """How a run's batched training step runs: the reference, or the modes it asks for.
 
-    ``f32_f64`` steps a float64 model in float32; ``tf32`` lets float32
-    matmuls and convolutions on CUDA use TensorFloat32; ``bf16`` runs the loss
-    under bfloat16 autocast. The update arithmetic and every evaluation stay
-    at the model's precision.
+    ``compile``: each stacked step is ``torch.compile``d; a step whose
+    compilation fails -- no C++ compiler, an unsupported operation, the
+    recompilation limit -- is run eagerly, as is every later one, and the
+    record says so. ``precision``: ``f32_f64`` steps a float64 model in
+    float32; ``tf32`` lets float32 matmuls and convolutions on CUDA use
+    TensorFloat32; ``bf16`` runs the loss under bfloat16 autocast. The update
+    arithmetic and every evaluation stay at the model's precision.
     """
 
-    def __init__(self, precision: str = "reference") -> None:
+    def __init__(
+        self,
+        compile: bool = False,
+        precision: str = "reference",
+        record: dict[str, Any] | None = None,
+    ) -> None:
+        self.compiling = bool(compile)
         self.precision = precision
+        #: The executor records a fallback is written to: the run's, or
+        #: every setting's of a group (``fedbrew/core/settings_group.py``).
+        self.records = [record if record is not None else {}]
+        self._modules: dict[tuple[Any, ...], nn.Module] = {}
+        self._functions: dict[tuple[Any, ...], Any] = {}
+        self._compiled: Callable[..., Any] | None = None
 
     def train_dtype(self, dtype: torch.dtype) -> torch.dtype:
         """The dtype a model of ``dtype`` is stepped in."""
@@ -1491,6 +1525,80 @@ class StepContext:
             yield
         finally:
             torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = held
+
+    def module(self, template: nn.Module) -> nn.Module:
+        """One module per model structure for the run, the first built."""
+
+        key = (type(template),) + tuple(
+            (name, tuple(parameter.shape), parameter.dtype, str(parameter.device))
+            for name, parameter in template.named_parameters()
+        )
+        return self._modules.setdefault(key, template)
+
+    def functions(
+        self, task: Any, model: nn.Module, buffers: Mapping[str, Tensor], program: Any
+    ) -> tuple[Callable[..., Any], Callable[..., Any], Callable[..., Any]]:
+        """``step_functions``, made once per task, module and program shape for the run.
+
+        The compiled step is specialised to the functions it is handed, so
+        they must be the same objects every round.
+        """
+
+        key = (id(task), id(model), program.shape)
+        if key not in self._functions:
+            device = next(model.parameters()).device
+            self._functions[key] = step_functions(
+                task, model, buffers, program, self.autocast(device)
+            )
+        return self._functions[key]
+
+    def call(self, function: Callable[..., Any], dims: tuple[Any, ...], values: list[Any]) -> Any:
+        """``function`` vmapped over ``values``: compiled, or eagerly once compiling has failed."""
+
+        if self.compiling:
+            try:
+                return self._compiler()(function, dims, *values)
+            except Exception as error:
+                result = torch.func.vmap(function, in_dims=dims)(*values)
+                # The step runs eagerly, so what failed was compiling it.
+                self._fail(error)
+                return result
+        return torch.func.vmap(function, in_dims=dims)(*values)
+
+    def _compiler(self) -> Callable[..., Any]:
+        if self._compiled is None:
+            import torch._dynamo
+
+            config = torch._dynamo.config
+            # Each step function specialises on its step (first or later),
+            # its mask and its shapes; the rounds of a run stay within this.
+            config.cache_size_limit = max(config.cache_size_limit, 64)
+            config.accumulated_cache_size_limit = max(config.accumulated_cache_size_limit, 512)
+            if hasattr(config, "fail_on_cache_limit_hit"):
+                # Past the limit dynamo would run the step eagerly and say so
+                # only in a log; raising lets the record say what ran.
+                config.fail_on_cache_limit_hit = True
+            self._compiled = torch.compile(_vmapped)
+        return self._compiled
+
+    def _fail(self, error: BaseException) -> None:
+        lines = str(error).strip().splitlines()
+        reason = f"{type(error).__name__}: {lines[0] if lines else ''}"[:300]
+        self.compiling = False
+        for record in self.records:
+            record.setdefault("compile", {}).update(used="off", fallback=reason)
+        print(
+            "runtime.performance.compile: compiling the batched step failed, "
+            f"so it runs eagerly -- {reason}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def _vmapped(function: Callable[..., Any], dims: tuple[Any, ...], *values: Any) -> Any:
+    """What a compiled step is: ``function`` vmapped over ``values``."""
+
+    return torch.func.vmap(function, in_dims=dims)(*values)
 
 
 def _placed(value: Tensor, like: Tensor) -> Tensor:
@@ -1585,19 +1693,26 @@ def select_executor(components: Any) -> tuple[BatchedExecutor | None, dict[str, 
     performance = components.config.runtime.extra.get("performance") or {}
     if performance.get("executor", "sequential") != "batched":
         return None, {"used": "sequential"}
+    compile_asked = compile_mode(performance.get("compile"))
     precision_asked = str(performance.get("precision", "reference"))
     reason, model = _batched_check(components)
     if reason is not None:
         record = {"used": "sequential", "fallback": reason}
-        _record_modes(record, precision_asked, "reference", "the run is sequential")
+        _record_modes(record, compile_asked, precision_asked, "reference", "the run is sequential")
         return None, record
     record = {"used": "batched", "largest_chunk_clients": 0}
     assert model is not None
     precision, why = _precision_for(precision_asked, model)
-    _record_modes(record, precision_asked, precision, why)
+    _record_modes(record, compile_asked, precision_asked, precision, why)
     chunk_bytes = performance.get("executor_chunk_bytes", DEFAULT_EXECUTOR_CHUNK_BYTES)
-    context = StepContext(precision)
+    context = StepContext(compile_asked, precision, record)
     return BatchedExecutor(chunk_bytes, record=record, context=context), record
+
+
+def compile_mode(value: Any) -> bool:
+    """``runtime.performance.compile`` as a bool: YAML reads ``on`` and ``off`` as booleans."""
+
+    return value is True or value == "on"
 
 
 def _precision_for(asked: str, model: nn.Module) -> tuple[str, str | None]:
@@ -1614,9 +1729,15 @@ def _precision_for(asked: str, model: nn.Module) -> tuple[str, str | None]:
     return asked, None
 
 
-def _record_modes(record: dict[str, Any], asked: str, precision: str, why: str | None) -> None:
-    """What run.json records of the precision a run asked for: what ran, and why, if not that."""
+def _record_modes(
+    record: dict[str, Any], compile_asked: bool, asked: str, precision: str, why: str | None
+) -> None:
+    """What run.json records of the modes a run asked for: what ran, and why, if not that."""
 
+    if compile_asked:
+        record["compile"] = (
+            {"used": "on"} if record["used"] == "batched" else {"used": "off", "fallback": why}
+        )
     if asked != "reference":
         record["precision"] = (
             {"used": precision} if precision == asked else {"used": precision, "fallback": why}

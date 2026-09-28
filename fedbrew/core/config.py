@@ -772,6 +772,7 @@ _KNOWN_EXTRA_KEYS: dict[str, frozenset[str]] = {
             "shard_cache_bytes",
             "executor",
             "executor_chunk_bytes",
+            "compile",
             "precision",
         }
     ),
@@ -953,13 +954,16 @@ def _validate_executor_values(performance: Mapping[str, Any]) -> None:
 
 
 def _validate_step_modes(performance: Mapping[str, Any]) -> None:
-    """Refuse a precision the executor does not have, or one without it.
+    """Refuse a compile or precision value the executor does not have, or one without it.
 
-    A precision changes how the batched executor's step runs, so a config
-    that asks for one without ``executor: batched`` would record a mode that
+    Both modes change how the batched executor's step runs, so a config that
+    asks for either without ``executor: batched`` would record a mode that
     never ran.
     """
 
+    compiled = performance.get("compile")
+    if compiled is not None and compiled not in (True, False, "on", "off"):
+        raise RunRefused(f"runtime.performance.compile must be on or off, got {compiled!r}")
     precision = performance.get("precision")
     if precision is not None and precision not in PRECISIONS:
         raise RunRefused(
@@ -967,7 +971,14 @@ def _validate_step_modes(performance: Mapping[str, Any]) -> None:
             + ", ".join(PRECISIONS)
             + f", got {precision!r}"
         )
-    asked = ["precision"] if precision not in (None, "reference") else []
+    asked = [
+        key
+        for key, value in (
+            ("compile", compiled in (True, "on")),
+            ("precision", precision not in (None, "reference")),
+        )
+        if value
+    ]
     if asked and performance.get("executor") != "batched":
         raise RunRefused(
             f"runtime.performance.{asked[0]} is a mode of the batched executor's step; "

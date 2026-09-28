@@ -60,7 +60,9 @@ from fedbrew.tasks.base import LoaderOrder
 COMBINES = ("batch", "frozen", "full")
 
 
-@dataclass(frozen=True, slots=True)
+# Not slotted: a compiled step guards on its program, and torch's guards hold a
+# weak reference to it, which a slotted class cannot give.
+@dataclass(frozen=True)
 class OptimizerSpec:
     """The optimizer step, with the hyperparameters of this round.
 
@@ -87,7 +89,7 @@ class OptimizerSpec:
         return 1 if self.momentum != 0.0 else 0
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class LocalProgram:
     """What one applied update does, the same for every client of a round.
 
@@ -472,7 +474,9 @@ class ProgramValues:
     step applies it in -- ``dtype``, the parameters', as torch casts a scalar
     to the tensor it scales -- except the clipping norm the combined modes
     compare in float64. AdamW's step size depends on the step, so it is held
-    for each of ``steps`` steps.
+    for each of ``steps`` steps; with ``per_step``, so is its second-moment
+    correction, which a compiled step, told only whether it is the first,
+    cannot compute from the step's number.
     """
 
     def __init__(
@@ -481,6 +485,7 @@ class ProgramValues:
         steps: int,
         dtype: torch.dtype,
         device: torch.device | str,
+        per_step: bool = False,
     ) -> None:
         first = programs[0]
 
@@ -490,6 +495,14 @@ class ProgramValues:
         specs = [program.optimizer for program in programs]
         self._values: dict[str, Tensor] = {}
         self._step_sizes: Tensor | None = None
+        self._corrections: Tensor | None = None
+        if first.optimizer.kind == "adamw" and per_step:
+            self._corrections = column(
+                [
+                    [(1 - spec.beta2 ** float(step)) ** 0.5 for spec in specs]
+                    for step in range(1, steps + 1)
+                ]
+            )
         if first.optimizer.kind == "adamw":
             self._values["decay"] = column([1 - spec.lr * spec.weight_decay for spec in specs])
             self._step_sizes = column(
@@ -516,7 +529,10 @@ class ProgramValues:
 
         if self._step_sizes is None:
             return self._values
-        return {**self._values, "step_size": self._step_sizes[step - 1]}
+        values = {**self._values, "step_size": self._step_sizes[step - 1]}
+        if self._corrections is not None:
+            values["bias_correction2_sqrt"] = self._corrections[step - 1]
+        return values
 
 
 def _per_client(value: Tensor, like: Tensor) -> Tensor:
@@ -706,7 +722,10 @@ def _adamw_step(
         exp_avg_sq = (
             state["exp_avg_sq"][name].mul(spec.beta2).addcmul(grad, grad, value=1 - spec.beta2)
         )
-        denominator = (exp_avg_sq.sqrt() / bias_correction2_sqrt).add(spec.eps)
+        correction: Any = bias_correction2_sqrt
+        if "bias_correction2_sqrt" in values:
+            correction = _per_client(values["bias_correction2_sqrt"], exp_avg_sq)
+        denominator = (exp_avg_sq.sqrt() / correction).add(spec.eps)
         new_params[name] = torch.addcdiv(
             param, exp_avg * _per_client(values["step_size"], exp_avg), denominator
         )

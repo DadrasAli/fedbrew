@@ -604,15 +604,31 @@ settings to plan. A group is not resumed as a group.
 
 ## 11. Modes of the batched step
 
-An opt-in key, `runtime.performance.precision`, changes how the batched
-executor's training step runs (`StepContext`,
-`fedbrew/core/batched_executor.py`). It needs `executor: batched`, and its
-default, `reference`, leaves the step as §9 describes it. It changes the
-training step only: the update arithmetic stays at the model's precision,
-and the post-fit pass and every evaluation run at the model's own precision,
-so what a run reports is measured the way the reference measures it.
-`run.json` records what ran (`reproducibility.executor`, chapter 09 §3.3),
-and the plan header prints it, in amber when it is not what was asked for.
+Two opt-in keys change how the batched executor's training step runs
+(`StepContext`, `fedbrew/core/batched_executor.py`). Both need
+`runtime.performance.executor: batched`, and the defaults leave the step as
+§9 describes it. They change the training step only: the update arithmetic
+stays at the model's precision, and the post-fit pass and every evaluation
+run eagerly at the model's own precision, so what a run reports is measured
+the way the reference measures it. `run.json` records what ran
+(`reproducibility.executor`, chapter 09 §3.3), and the plan header prints it,
+in amber when it is not what was asked for.
+
+**`compile: on`** hands each stacked step -- a batch's gradient and update, a
+pass's gradient sum, a combined update -- to `torch.compile`. The step
+functions are made once per task, model structure and program shape for the
+run, and a step is told only whether it is the first, so each compiles to a
+few graphs that every later round reuses. The summed gradient form (§9) is
+not compiled; a compiled step always takes `vmap(grad)`, which compiles
+whole. A step that does not compile -- no C++ compiler for inductor, an
+operation dynamo does not trace, more recompilations than the limit -- runs
+eagerly, as does every later one; the run prints why on stderr and records it
+(`compile: {used: off, fallback: ...}`), and is then the reference run bit for
+bit. Inductor needs a C++ compiler: on Berzelius the `g++` first on `PATH` is
+a wrapper that refuses to run without a build-environment module, so set
+`CXX=/usr/bin/g++`.
+
+**`precision`** trains at a lower precision:
 
 | Mode | What the step does | Applies to |
 | --- | --- | --- |
@@ -629,6 +645,8 @@ held by a test at the bound given:
 
 | Mode | Measured, worst model tensor / worst cell | Held to | Test |
 | --- | --- | --- | --- |
+| `compile`, fed-lasso (float64) | 9.6e-18 / 4.2e-16 | `1e-12`, §9's | `tests/test_compile_mode.py` |
+| `compile`, the MLP (float32) | 2.9e-7 / 1.6e-6 | `1e-4`, §9's float32 bound | same |
 | `f32_f64`, fed-lasso-l2, simplex-lsq, pl-1d | at most 5.6e-7 / 6.0e-6 | `1e-4` | `tests/test_precision_modes.py` |
 | `f32_f64`, fed-lasso | 1.1e-3 / 1.4e-4 | not held: the L1 kink (§9) turns float32 rounding into steps `lam` apart | — |
 | `bf16`, the MLP | 9.5e-3 / 9.1e-3 in a loss spread | `5e-2`, model and loss cells | `tests/test_precision_modes.py` |
@@ -721,6 +739,7 @@ python tools/bench_compare_runs.py --help
 | `tests/test_batched_executor.py` | §9: the keys, the fallback and its record, client isolation, the refusals, the generator, and one chunk at a time. |
 | `tests/test_batch_orders.py` | §9: every planned order is its loader's own, for every task, update mode, shuffle, `drop_last` and `max_local_steps`, 520 clients at once included; the bulk seeds are `dataloader_seed`'s. |
 | `tests/test_batched_evaluator.py` | §9: ragged, shuffled and missing evaluation splits through both evaluators, the refusal's words, and the central pass's kept model and shard. |
+| `tests/test_compile_mode.py` | §11: a compiled step is held to §9's bounds on fed-lasso (FedAvg, local_sgd in both modes, local_adamw, SCAFFOLD) and the MLP, dynamo having made its graphs; a step that does not compile runs eagerly, bit for bit the reference, and run.json says why; the key needs the batched executor. |
 | `tests/test_precision_modes.py` | §11: `f32_f64` within `1e-4` on the smooth examples, and in a group of settings each as alone; `bf16` within `5e-2` on the MLP; `tf32` within `5e-2` on CUDA; each mode trained otherwise than the reference; a mode that does not apply runs the reference bit for bit and says why; the key needs the batched executor. |
 | `tests/test_program_values.py` | §9: a bucket shares its program's shape, not its values; a client stepped beside clients with other values is the client stepped alone, bit for bit, in every shape and both float widths, and a client alone is `torch.optim`'s SGD and AdamW step. |
 | `tests/test_sweep.py` | §10: `fedbrew sweep` groups the configs equal but for the run's name and the numeric hyperparameters it lists, runs any other config alone and one that does not load alone, keeps two configs that would write one directory apart, `--plan` runs nothing, `--run-group` refuses configs that are not one group, and a sweep of a group and a config alone writes both, the group recorded; the exit status. |

@@ -582,10 +582,12 @@ class GroupSetting:
         if executor is None:
             return None, record
         self.group.chunk_bytes = executor.chunk_bytes
-        # Every setting asks for the same precision; the first's context
-        # steps them all.
+        # Every setting asks for the same modes; the first's context steps
+        # them all, and a fallback it records is every setting's.
         if self.group.context is None:
             self.group.context = executor.context
+        elif executor.context is not None and self.group.context is not None:
+            self.group.context.records.append(record)
         self.record["largest_chunk_rows"] = 0
         return GroupExecutor(self, executor.chunk_bytes, record), record
 

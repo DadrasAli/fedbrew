@@ -275,7 +275,7 @@ def _mode_rows(executor: Mapping[str, Any]) -> list[Row]:
     """The batched step's modes a run asked for: what runs, in amber when it is not that."""
 
     rows = []
-    for key, label in (("precision", "Precision"),):
+    for key, label in (("compile", "Compile"), ("precision", "Precision")):
         mode = executor.get(key)
         if not isinstance(mode, Mapping):
             continue
