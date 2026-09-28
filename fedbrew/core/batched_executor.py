@@ -814,7 +814,7 @@ class _Steps:
             # several times faster than indexing by (split, row) pairs.
             offsets = torch.arange(self.size, dtype=torch.long) * self.rows.longest
             flat = self._indices + offsets.view(-1, 1, 1)
-            self._on_device = (flat.to(device), self._lengths.to(device))
+            self._on_device = (uploaded(flat, device), uploaded(self._lengths, device))
         return self._on_device
 
     def batch(self, step: int) -> tuple[tuple[Tensor, ...], Tensor | None]:
@@ -827,7 +827,7 @@ class _Steps:
             if self.sliced:
                 first = self.first_starts[step]
                 return tuple(tensor[first : first + length] for tensor in rows.tensors), None
-            index = self._indices[0, step, :length].to(rows.device)
+            index = uploaded(self._indices[0, step, :length], rows.device)
             return tuple(tensor.index_select(0, index) for tensor in rows.tensors), None
         if self.sliced and self.aligned[step]:
             first = self.first_starts[step]
@@ -1180,7 +1180,7 @@ class _Bucket:
         if not self.stacked:
             return float(self.weights[0, step]), None
         if self._weights_on_device is None:
-            self._weights_on_device = self.weights.to(self.device)
+            self._weights_on_device = uploaded(self.weights, self.device)
         return self._weights_on_device[:, step], 0
 
     def _values(self, step: int) -> tuple[dict[str, Tensor], int | None]:
@@ -1197,7 +1197,7 @@ class _Bucket:
         totals = self.weights[:, first : first + count].sum(dim=1)
         if not self.stacked:
             return float(totals[0]), None
-        return totals.to(self.device), 0
+        return uploaded(totals, self.device), 0
 
     # -- the round ------------------------------------------------------------
 
@@ -1713,6 +1713,21 @@ def _vmapped(function: Callable[..., Any], dims: tuple[Any, ...], *values: Any) 
     """What a compiled step is: ``function`` vmapped over ``values``."""
 
     return torch.func.vmap(function, in_dims=dims)(*values)
+
+
+def uploaded(tensor: Tensor, device: torch.device | str) -> Tensor:
+    """A host tensor on ``device``, the same values: on CUDA from pinned memory, without waiting.
+
+    ``tensor.to(cuda)`` from pageable memory returns only once the copy is
+    done, which waits for everything already queued on the device; staged in
+    pinned memory the copy is queued behind that work and the host goes on.
+    The caching host allocator keeps the pinned block until the copy has run.
+    """
+
+    device = torch.device(device)
+    if device.type != "cuda" or tensor.device.type != "cpu":
+        return tensor.to(device)
+    return tensor.pin_memory().to(device, non_blocking=True)
 
 
 def _placed(value: Tensor, like: Tensor) -> Tensor:

@@ -604,6 +604,20 @@ computes, bit for bit on the same device:
   `compute_metrics`, as the evaluator does after its own copy. A rule the
   batched evaluator does not measure, and any other task's central pass, are
   evaluated at the flush by the evaluator itself.
+- **The flush** (`fedbrew/core/resident_flush.py`). Nothing a round does
+  waits on the device: its uploads are staged in pinned memory and copied
+  without blocking (`uploaded`), and its finiteness flag joins its staged
+  values. At a flush round the next round is queued first, so the device has
+  work while the host records; then the window's values and models come to
+  the host in one copy, made on a stream of its own behind the window's last
+  round, and the host waits for that copy alone -- one wait per flush. The
+  flush's writes run on a thread of their own, in the per-round loop's order:
+  the staged checkpoints to their temporary files, the CSV rows, run.json,
+  and only then the checkpoints' commit (POST-F24). The loop waits for them
+  before recording the next window, so a kill loses at most the rounds since
+  the last flush the writer finished, and a resume from that flush's
+  `latest.pt` continues the run bit for bit. A round's timings are its
+  phases on the device's own timeline, from events read back at the flush.
 - **Stops.** A divergence verdict or a refusal inside a flush window ends the
   run at that round, exactly as the per-round loop ends it; the rounds
   trained after it are dropped. An aggregate that is not finite is run once
@@ -625,7 +639,8 @@ file -- model, server and client states, metrics and RNG state -- and how the
 run ended: full and Bernoulli participation, clients of different sizes and
 several buckets (some of one client), the own-loop rules, uniform weighting,
 a post-fit pass on some rounds, a flush every third round, a manifest
-dataset, and a stall and a non-finite aggregate inside a flush window; and of
+dataset, a stall and a non-finite aggregate inside a flush window, and a run
+stopped at a flush and between two and resumed from its `latest.pt`; and of
 the evaluation, that it is measured on the device, under mixed schedules and
 client scopes, a shuffled evaluation loader, a client without a `val` split,
 and a missing `test` split refused in the per-round path's words.
@@ -794,6 +809,7 @@ Accuracy cells under `bf16` move by whole examples and are not held.
 | `fedbrew/core/round_planner.py` | §9: each round's sampled clients and orders planned from the roster, ahead of the loop, by worker processes |
 | `fedbrew/core/resident.py` | §9.1: the resident round: rows, model and records held on the device, recorded at the flush |
 | `fedbrew/core/resident_evaluation.py` | §9.1: the resident round's client splits and central pass, measured on the device at the round |
+| `fedbrew/core/resident_flush.py` | §9.1: the flush's one copy to the host, its writer thread, and the round's device timings |
 | `fedbrew/core/batched_evaluator.py` | §9: the due clients' splits measured together, and the central pass's kept model and shard |
 | `tools/` | the benchmark and profiling scripts |
 

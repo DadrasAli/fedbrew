@@ -59,10 +59,12 @@ from fedbrew.core.batched_executor import (
     staged_chunk,
     staged_values,
     trained_state_keys,
+    uploaded,
 )
 from fedbrew.core.federated_state import model_state_size
 from fedbrew.core.metrics import filter_metrics
 from fedbrew.core.protocol import FitRequest, RoundInfo
+from fedbrew.core.resident_flush import DeferredStaged, FlushWriter, HostCopy, RoundClock
 from fedbrew.core.round_planner import PlannedRound
 from fedbrew.core.stacked_results import StackedFitResults
 from fedbrew.core.torch_utils import StateStack
@@ -230,7 +232,7 @@ class ResidentRows:
         elif places == self._everyone and rows.longest == self.longest:
             rows.tensors = self.tensors
         else:
-            index = torch.tensor(places, dtype=torch.long, device=self.tensors[0].device)
+            index = uploaded(torch.tensor(places, dtype=torch.long), self.tensors[0].device)
             rows.tensors = tuple(
                 tensor.index_select(0, index)[:, : rows.longest].contiguous()
                 for tensor in self.tensors
@@ -296,10 +298,13 @@ class DeviceRound:
     eval_stage: Any = None
     central_due: bool = False
     central_stage: Any = None
-    #: The staged values' sizes: the chunks', then the evaluation's and the
-    #: central pass's.
-    sizes: tuple[int, int, int] = (0, 0, 0)
-    seconds: float = 0.0
+    #: The staged values' sizes: the chunks', the evaluation's, the central
+    #: pass's, and 1 for the aggregate's finiteness flag, when there is one.
+    sizes: tuple[int, int, int, int] = (0, 0, 0, 0)
+    #: The phase boundaries on the device's timeline, and the event the
+    #: flush's copy waits for.
+    clock: Any = None
+    end: Any = None
 
 
 class ResidentRounds:
@@ -344,6 +349,7 @@ class ResidentRounds:
         if self.unsupported is None:
             self.rows = ResidentRows(self.task, self.splits)
         self.model = self._placed(context.server._model_state)
+        self.copier = HostCopy(self.device)
         from fedbrew.core.resident_evaluation import ResidentEvaluation
 
         self.evaluation = ResidentEvaluation(self) if self.unsupported is None else None
@@ -375,7 +381,8 @@ class ResidentRounds:
     def run_round(self, round_id: int, evaluate: bool) -> DeviceRound:
         """Train round ``round_id`` from the model the last round left, and fold it."""
 
-        started = time.perf_counter()
+        clock = RoundClock(self.device)
+        clock.mark("start")
         planned = self.planner.plan(round_id)
         self._refuse_empty(planned)
         program = self.representative.batched_program(
@@ -390,11 +397,13 @@ class ResidentRounds:
             list(planned.train.structure),
             eval_rows,
         )
+        device_round.clock = clock
         if planned.positions:
             self._train(planned, device_round)
+        clock.mark("trained")
         self._evaluate(device_round)
         self._stage(device_round)
-        device_round.seconds = time.perf_counter() - started
+        device_round.end = self.copier.mark()
         return device_round
 
     def _evaluate(self, device_round: DeviceRound) -> None:
@@ -412,11 +421,13 @@ class ResidentRounds:
             (self.roster.where[client], splits) for client, splits in splits_by_client.items()
         ]
         device_round.eval_stage = self.evaluation.enqueue(round_id, device_round.work, self.model)
+        device_round.clock.mark("clients")
         device_round.central_due = evaluates_round(
             context.central_schedule, round_id, context.global_rounds
         )
         if device_round.central_due:
             device_round.central_stage = self.evaluation.enqueue_central(self.model)
+        device_round.clock.mark("evaluated")
 
     def _refuse_empty(self, planned: PlannedRound) -> None:
         """Refuse the first client, in request order, whose loader yields no batch."""
@@ -566,8 +577,12 @@ class ResidentRounds:
             if staged is not None:
                 pieces.append(staged)
                 stage.staged = None
+        flag = 0
+        if device_round.finite is not None:
+            pieces.append(device_round.finite.to(torch.float64).reshape(1))
+            flag = 1
         device_round.staged_layouts = layouts
-        device_round.sizes = (fit_size, extra[0], extra[1])
+        device_round.sizes = (fit_size, extra[0], extra[1], flag)
         device_round.staged = torch.cat(pieces) if pieces else None
 
     # -- the flush's side ----------------------------------------------------
@@ -580,19 +595,30 @@ class ResidentRounds:
             member = self.members[place] = self.context.client[self.roster.client_ids[place]]
         return member
 
-    def read_back(self, rounds: Sequence[DeviceRound]) -> list[list[float]]:
-        """Every round's staged values in one device-to-host copy, split per round."""
+    def read_back(
+        self, rounds: Sequence[DeviceRound]
+    ) -> list[tuple[list[float], dict[str, Tensor] | None]]:
+        """Every round's staged values and mean on the host, in one copy with one wait.
 
-        staged = [device_round.staged for device_round in rounds if device_round.staged is not None]
-        if not staged:
-            return [[] for _ in rounds]
-        values = torch.cat(staged).cpu().tolist()
-        split, offset = [], 0
+        The copy waits for the window's last round alone, not for a round
+        queued after it (``HostCopy``).
+        """
+
+        tensors: list[Tensor] = []
         for device_round in rounds:
-            size = 0 if device_round.staged is None else int(device_round.staged.numel())
-            split.append(values[offset : offset + size])
-            offset += size
-        return split
+            if device_round.staged is not None:
+                tensors.append(device_round.staged)
+            if device_round.mean is not None:
+                tensors.extend(device_round.mean.values())
+        copies = iter(self.copier.copy(tensors, rounds[-1].end))
+        read: list[tuple[list[float], dict[str, Tensor] | None]] = []
+        for device_round in rounds:
+            values = next(copies).tolist() if device_round.staged is not None else []
+            mean = None
+            if device_round.mean is not None:
+                mean = {name: next(copies) for name in device_round.mean}
+            read.append((values, mean))
+        return read
 
     def stacked_results(
         self, device_round: DeviceRound, values: list[float]
@@ -688,12 +714,6 @@ class ResidentRounds:
         round_info.metrics.update(metrics)
         return server._federated_payload(metrics=metrics)
 
-    def host_mean(self, device_round: DeviceRound) -> dict[str, Tensor]:
-        """The round's mean on the host, as the server's state holds it."""
-
-        assert device_round.mean is not None
-        return {name: value.detach().cpu() for name, value in device_round.mean.items()}
-
     def close(self) -> None:
         self.rows = None
 
@@ -750,7 +770,7 @@ class _Fold:
             if len(positions) == 1:
                 total.add_(tensor[0].detach().cpu(), alpha=weights[0])
                 continue
-            scale = torch.tensor(weights, dtype=total.dtype, device=tensor.device)
+            scale = uploaded(torch.tensor(weights, dtype=total.dtype), tensor.device)
             part = (scale @ flat.to(total.dtype)).reshape(total.shape)
             total.add_(part.cpu() if self.host else part)
 
@@ -772,7 +792,7 @@ class _Fold:
                 value = total.div_(self.total_weight).to(dtype)
                 mean[key] = value.to(self.rounds.device)
             else:
-                divisor = torch.tensor(self.total_weight, dtype=total.dtype, device=total.device)
+                divisor = uploaded(torch.tensor(self.total_weight, dtype=total.dtype), total.device)
                 mean[key] = total.div_(divisor).to(dtype)
         finite = torch.stack([torch.isfinite(value).all() for value in mean.values()]).all()
         return mean, finite
@@ -831,152 +851,297 @@ def _pool_unsupported(pool: Any, dataset: Any) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-@dataclass(slots=True)
-class _Flushing:
-    """What the loop carries between rounds: staged checkpoints, and whether rows wait."""
-
-    staged: Any = None
-    unflushed: bool = False
-    #: The server's model before the next round to record, on the host.
-    host_model: dict[str, Tensor] | None = None
-
-
 def run_resident_loop(context: Any, rounds: ResidentRounds) -> Any:
     """``run_fl_loop``'s rounds, trained on the device and recorded at each flush.
 
-    Rounds are trained as they come; at every flush round the rounds since the
-    last are read back in one copy and recorded, in order, by the loop's own
-    bookkeeping (``_record_round``). A round that stops the run -- a
+    Rounds are queued on the device as they come. At a flush round the next
+    round is queued too, so the device has work while the host records; then
+    the rounds since the last flush are read back in one copy and recorded, in
+    order, by the loop's own bookkeeping, and the flush's writes are handed to
+    the writer thread (``resident_flush``). A round that stops the run -- a
     divergence verdict, or an aggregate that is not finite -- ends it exactly
-    where the per-round loop ends it: the rounds trained after it are dropped.
+    where the per-round loop ends it: the rounds queued after it are dropped.
     """
 
-    from fedbrew.core.loop import _checkpointing_summary, _flush_rounds, _LongLivedObjects
+    from fedbrew.core.loop import _checkpointing_summary, _LongLivedObjects
 
-    state = context.state
-    flushing = _Flushing(host_model=dict(context.server._model_state))
-    long_lived = _LongLivedObjects()
+    loop = _Loop(context, rounds, _LongLivedObjects())
     try:
-        _rounds_until_stop(context, rounds, flushing, long_lived)
+        loop.run()
         # Only an aggregation refusal leaves rounds unflushed, as in run_fl_loop.
-        _flush_rounds(
-            flushing.unflushed,
-            state,
-            context.output_dir,
-            context.statistics,
-            context.csv_cursor,
-            context.on_round_flush,
-            flushing.staged,
-            context.checkpoint_policy,
-        )
+        if loop.unflushed:
+            loop.flush()
+        loop.writer.wait()
         _warn_on_an_unobserved_metric(context)
+        state = context.state
         state.final_payload = context.server_payload
         state.checkpointing = _checkpointing_summary(
             context.output_dir, context.checkpoint_policy, context.checkpoint_tracker
         )
         return state
     finally:
-        long_lived.release()
+        loop.writer.close()
+        loop.long_lived.release()
         rounds.close()
 
 
-def _rounds_until_stop(
-    context: Any, rounds: ResidentRounds, flushing: _Flushing, long_lived: Any
-) -> None:
-    """Train and record every round, a flush window at a time, until the last or a stop."""
+class _Loop:
+    """The resident loop's state between rounds: the window, the flush, the writer."""
 
-    from fedbrew.core.config import evaluates_round
+    def __init__(self, context: Any, rounds: ResidentRounds, long_lived: Any) -> None:
+        self.context = context
+        self.rounds = rounds
+        self.long_lived = long_lived
+        self.writer = FlushWriter()
+        #: The checkpoints staged since the last flush, and whether rows wait.
+        self.staged: DeferredStaged | None = None
+        self.unflushed = False
+        #: The server's model before the next round to record, on the host.
+        self.host_model: dict[str, Tensor] = dict(context.server._model_state)
 
-    window: list[DeviceRound] = []
-    for round_id in range(context.start_round, context.global_rounds + 1):
+    def run(self) -> None:
+        """Queue and record every round, a flush window at a time, until the last or a stop."""
+
+        context = self.context
+        window: list[DeviceRound] = []
+        ahead: DeviceRound | None = None
+        for round_id in range(context.start_round, context.global_rounds + 1):
+            try:
+                queued = ahead if ahead is not None else self._queue(round_id)
+            except Exception:
+                # The per-round loop records the rounds before this one first,
+                # and stops at one of them if it stops.
+                if not self.record(window):
+                    raise
+                return
+            ahead = None
+            window.append(queued)
+            if round_id % context.flush_every and round_id != context.global_rounds:
+                continue
+            failed: Exception | None = None
+            if round_id < context.global_rounds:
+                try:
+                    ahead = self._queue(round_id + 1)
+                except Exception as error:  # noqa: BLE001 -- raised once this window is recorded
+                    failed = error
+            if self.record(window):
+                return
+            window = []
+            if failed is not None:
+                raise failed
+
+    def _queue(self, round_id: int) -> DeviceRound:
+        from fedbrew.core.config import evaluates_round
+
+        context = self.context
         evaluate = evaluates_round(context.fit_schedule, round_id, context.global_rounds)
-        try:
-            window.append(rounds.run_round(round_id, evaluate))
-        except Exception:
-            # The per-round loop would have recorded the rounds before this one
-            # first, and stopped at one of them if it stops.
-            if not _record_window(context, rounds, window, flushing, long_lived):
-                raise
-            return
-        if round_id % context.flush_every and round_id != context.global_rounds:
-            continue
-        stopped = _record_window(context, rounds, window, flushing, long_lived)
-        window = []
-        if stopped:
-            return
+        return self.rounds.run_round(round_id, evaluate)
 
+    def record(self, window: list[DeviceRound]) -> bool:
+        """Record every round of a window in order; whether one of them stopped the run."""
 
-def _record_window(
-    context: Any,
-    rounds: ResidentRounds,
-    window: list[DeviceRound],
-    flushing: _Flushing,
-    long_lived: Any,
-) -> bool:
-    """Record every round of a window in order; whether one of them stopped the run."""
-
-    if not window:
+        if not window:
+            return False
+        # The last flush's rows are on disk before any of this window's are
+        # recorded: the writer reads the histories this appends to.
+        self.writer.wait()
+        for device_round, (values, host_mean) in zip(
+            window, self.rounds.read_back(window), strict=True
+        ):
+            if self._record_round(device_round, values, host_mean):
+                return True
         return False
-    values = rounds.read_back(window)
-    for device_round, round_values in zip(window, values, strict=True):
-        if _record_round(context, rounds, device_round, round_values, flushing, long_lived):
-            return True
-    return False
 
+    def _record_round(
+        self, device_round: DeviceRound, values: list[float], host_mean: dict[str, Tensor] | None
+    ) -> bool:
+        """One round, recorded as ``run_fl_loop``'s body records it; whether the run stops here."""
 
-def _split_values(device_round: DeviceRound, values: list[float]) -> tuple[list[float], ...]:
-    """A round's staged values as its chunks', its evaluation's and its central pass's."""
+        from fedbrew.core.loop import _FitPhaseTotals, _RoundFitObserver
 
-    fit, evaluation, _ = device_round.sizes
-    return values[:fit], values[fit : fit + evaluation], values[fit + evaluation :]
-
-
-def _record_round(
-    context: Any,
-    rounds: ResidentRounds,
-    device_round: DeviceRound,
-    values: list[float],
-    flushing: _Flushing,
-    long_lived: Any,
-) -> bool:
-    """One round, recorded as ``run_fl_loop``'s body records it; whether the run stops here."""
-
-    from fedbrew.core.loop import _FitPhaseTotals, _RoundFitObserver
-
-    state, round_id = context.state, device_round.round_id
-    round_started = time.perf_counter()
-    values, eval_values, central_values = _split_values(device_round, values)
-    round_info = RoundInfo(round_id=round_id, total_rounds=context.global_rounds)
-    selected = [rounds.roster.client_ids[place] for place in device_round.positions]
-    if context.on_client_progress is not None:
-        context.on_client_progress(round_id, 0, len(selected), "fit")
-    fit_totals = _FitPhaseTotals()
-    observer = _RoundFitObserver(state, fit_totals, round_id, context.on_client_progress)
-    fit_started = time.perf_counter()
-    if selected:
-        if not bool(device_round.finite):
-            return _refused(context, rounds, device_round, round_info, observer, flushing)
-        host_mean = rounds.host_mean(device_round)
-        context.server_payload = rounds.aggregate(
-            device_round, values, round_info, observer, host_mean
+        context, rounds = self.context, self.rounds
+        state, round_id = context.state, device_round.round_id
+        round_started = time.perf_counter()
+        values, eval_values, central_values, finite = _split_values(device_round, values)
+        round_info = RoundInfo(round_id=round_id, total_rounds=context.global_rounds)
+        selected = [rounds.roster.client_ids[place] for place in device_round.positions]
+        if context.on_client_progress is not None:
+            context.on_client_progress(round_id, 0, len(selected), "fit")
+        fit_totals = _FitPhaseTotals()
+        observer = _RoundFitObserver(state, fit_totals, round_id, context.on_client_progress)
+        fit_started = time.perf_counter()
+        if selected:
+            if not finite:
+                return self._refused(device_round, round_info, observer)
+            assert host_mean is not None
+            context.server_payload = rounds.aggregate(
+                device_round, values, round_info, observer, host_mean
+            )
+            _check_weights(device_round, state)
+            self.host_model = host_mean
+        clock = device_round.clock
+        timings = {
+            "fit": clock.seconds("start", "trained"),
+            "aggregate": time.perf_counter() - fit_started,
+        }
+        evaluated = _client_evaluation(context, rounds, device_round, eval_values, timings)
+        central = _central_evaluation(context, rounds, device_round, central_values, timings)
+        timings["client_eval"] += clock.seconds("trained", "clients")
+        timings["global_eval"] += clock.seconds("clients", "evaluated")
+        return self._record_rest(
+            round_info, selected, (evaluated, central), fit_totals, timings, round_started
         )
-        _check_weights(device_round, state, rounds)
-        flushing.host_model = host_mean
-    timings = {"fit": fit_totals.fit_seconds + device_round.seconds}
-    timings["aggregate"] = max(time.perf_counter() - fit_started - fit_totals.fit_seconds, 0.0)
-    evaluated = _client_evaluation(context, rounds, device_round, eval_values, timings)
-    central = _central_evaluation(context, rounds, device_round, central_values, timings)
-    return _record_evaluation_and_rest(
-        context,
-        round_info,
-        selected,
-        (evaluated, central),
-        fit_totals,
-        timings,
-        round_started,
-        flushing,
-        long_lived,
-    )
+
+    def _refused(self, device_round: DeviceRound, round_info: RoundInfo, observer: Any) -> bool:
+        """A round whose aggregate is not finite, run again by the per-round path to refuse it.
+
+        The per-round loop's refusal names the first non-finite client and
+        tensor, which only its fold reads; so the round is run once more, from
+        the model before it, through that path, which raises it and records
+        what it records.
+        """
+
+        from fedbrew.core.config import evaluates_round
+        from fedbrew.core.loop import _aggregate_round, _fit_requests
+        from fedbrew.core.torch_utils import NonFiniteStateError
+
+        context = self.context
+        server = context.server
+        server._model_state = self.host_model
+        requests = _fit_requests(
+            server,
+            round_info,
+            context.client_infos,
+            post_fit_evaluation=evaluates_round(
+                context.fit_schedule, device_round.round_id, context.global_rounds
+            ),
+        )
+        planner, context.executor.planner = context.executor.planner, None
+        try:
+            _aggregate_round(
+                context.executor,
+                context.aggregator,
+                server,
+                round_info,
+                context.client,
+                requests,
+                observer,
+            )
+        except NonFiniteStateError as error:
+            _diverged(context, device_round.round_id, error)
+            return True
+        finally:
+            context.executor.planner = planner
+        raise RuntimeError(
+            f"round {device_round.round_id}: the resident round's aggregate is not finite, "
+            "and the per-round path's is"
+        )
+
+    def _record_rest(
+        self,
+        round_info: RoundInfo,
+        selected: list[str],
+        measured: tuple[list[tuple[Any, list[str]]], dict[str, float] | None],
+        fit_totals: Any,
+        timings: dict[str, float],
+        round_started: float,
+    ) -> bool:
+        """The rest of ``run_fl_loop``'s body: the evaluation's records, the verdict, the flush."""
+
+        _record_evaluation(self.context, round_info, selected, measured)
+        return self._record_the_round(round_info, selected, fit_totals, timings, round_started)
+
+    def _record_the_round(
+        self,
+        round_info: RoundInfo,
+        selected: list[str],
+        fit_totals: Any,
+        timings: dict[str, float],
+        round_started: float,
+    ) -> bool:
+        """The verdict, checkpoints, records and flush of a round, as ``run_fl_loop`` does them."""
+
+        from fedbrew.core.loop import _checkpoint_payload_builder, _flush_due, _update_checkpoints
+        from fedbrew.core.state import MetricRecord, RoundState, RoundTimings
+
+        context = self.context
+        state, round_id = context.state, round_info.round_id
+        metrics = dict(round_info.metrics)
+        if isinstance(context.server_payload, dict):
+            context.server_payload["metrics"] = metrics
+        verdict = context.monitor.update(round_id, metrics)
+        flush_due = _flush_due(round_id, context.global_rounds, context.flush_every, verdict)
+        checkpoint_started = time.perf_counter()
+        self.staged = _update_checkpoints(
+            _checkpoint_payload_builder(
+                context.server, context.client, context.server_payload, metrics, round_id
+            ),
+            metrics,
+            context.output_dir,
+            round_id,
+            context.checkpoint_policy,
+            context.checkpoint_tracker,
+            self.staged or DeferredStaged(),
+            write_latest=flush_due,
+        )
+        record = {
+            "round_id": round_id,
+            "metrics": metrics,
+            "num_clients": len(selected),
+            "num_examples": fit_totals.num_examples,
+            "timings": RoundTimings(
+                fit=timings["fit"],
+                aggregate=timings["aggregate"],
+                client_eval=timings["client_eval"],
+                global_eval=timings["global_eval"],
+                checkpoint=time.perf_counter() - checkpoint_started,
+                total=time.perf_counter() - round_started + timings["fit"],
+            ),
+        }
+        state.rounds.append(RoundState(**record))
+        metric_record = MetricRecord(**record)
+        state.metrics_history.append(metric_record)
+        if flush_due:
+            self.flush()
+        self.unflushed = not flush_due
+        if round_id == context.start_round:
+            self.long_lived.freeze()
+        if context.on_round_end is not None:
+            context.on_round_end(metric_record)
+        return _stops(context, verdict)
+
+    def flush(self) -> None:
+        """Hand the rounds since the last flush to the writer: CSVs, run.json, then checkpoints."""
+
+        from fedbrew.core.loop import _flush_rounds
+
+        context, staged = self.context, self.staged
+        self.staged = None
+
+        def write() -> None:
+            _flush_rounds(
+                True,
+                context.state,
+                context.output_dir,
+                context.statistics,
+                context.csv_cursor,
+                context.on_round_flush,
+                None if staged is None else staged.written(),
+                context.checkpoint_policy,
+            )
+
+        self.writer.submit(write)
+
+
+def _split_values(
+    device_round: DeviceRound, values: list[float]
+) -> tuple[list[float], list[float], list[float], bool]:
+    """A round's staged values: its chunks', its evaluation's, its central pass's, and its flag."""
+
+    fit, evaluation, central, flag = device_round.sizes
+    finite = True if not flag else values[fit + evaluation + central] != 0.0
+    rest = fit + evaluation
+    return values[:fit], values[fit:rest], values[rest : rest + central], finite
 
 
 def _client_evaluation(
@@ -1038,100 +1203,13 @@ def _central_evaluation(
     return central
 
 
-def _check_weights(device_round: DeviceRound, state: Any, rounds: ResidentRounds) -> None:
-    """The weights the round was folded with are the example counts its records report."""
-
-    records = state.client_update_metrics_history[-len(device_round.positions) :]
-    counts = [record.num_examples for record in records]
-    if counts != device_round.eval_rows:
-        raise RuntimeError(
-            f"round {device_round.round_id}: the resident fold's weights "
-            f"{device_round.eval_rows[:4]}... "
-            f"are not the example counts {counts[:4]}... the clients report"
-        )
-    del rounds
-
-
-def _refused(
-    context: Any,
-    rounds: ResidentRounds,
-    device_round: DeviceRound,
-    round_info: RoundInfo,
-    observer: Any,
-    flushing: _Flushing,
-) -> bool:
-    """A round whose aggregate is not finite, run again by the per-round path to refuse it.
-
-    The per-round loop's refusal names the first non-finite client and tensor,
-    which only its fold reads; so the round is run once more, from the model
-    before it, through that path, which raises it and records what it records.
-    """
-
-    from fedbrew.core.config import evaluates_round
-    from fedbrew.core.divergence import STATUS_DIVERGED, DivergenceVerdict
-    from fedbrew.core.loop import _aggregate_round, _fit_requests
-    from fedbrew.core.torch_utils import NonFiniteStateError
-
-    server = context.server
-    server._model_state = flushing.host_model
-    requests = _fit_requests(
-        server,
-        round_info,
-        context.client_infos,
-        post_fit_evaluation=evaluates_round(
-            context.fit_schedule, device_round.round_id, context.global_rounds
-        ),
-    )
-    planner, context.executor.planner = context.executor.planner, None
-    try:
-        _aggregate_round(
-            context.executor,
-            context.aggregator,
-            server,
-            round_info,
-            context.client,
-            requests,
-            observer,
-        )
-    except NonFiniteStateError as error:
-        state = context.state
-        state.status = STATUS_DIVERGED
-        verdict = DivergenceVerdict(
-            status=STATUS_DIVERGED,
-            detector="non_finite_client_state",
-            round_id=device_round.round_id,
-            metric="client_model_state",
-            value=float("nan"),
-            threshold=None,
-            reason=(
-                f"round {device_round.round_id} aggregation refused a non-finite client "
-                f"state ({error}); the model cannot recover from it"
-            ),
-        )
-        state.termination = verdict.as_dict()
-        if context.on_termination is not None:
-            context.on_termination(verdict)
-        return True
-    finally:
-        context.executor.planner = planner
-    raise RuntimeError(
-        f"round {device_round.round_id}: the resident round's aggregate is not finite, "
-        "and the per-round path's is"
-    )
-
-
-def _record_evaluation_and_rest(
+def _record_evaluation(
     context: Any,
     round_info: RoundInfo,
     selected: list[str],
     measured: tuple[list[tuple[Any, list[str]]], dict[str, float] | None],
-    fit_totals: Any,
-    timings: dict[str, float],
-    round_started: float,
-    flushing: _Flushing,
-    long_lived: Any,
-) -> bool:
-    """The rest of ``run_fl_loop``'s body: the evaluation's records, the verdict, the flush."""
+) -> None:
+    """The evaluation's records and the round's split and central metrics, as ``run_fl_loop``."""
 
     from fedbrew.core.loop import (
         _aggregate_client_split_metrics,
@@ -1139,10 +1217,9 @@ def _record_evaluation_and_rest(
         _scope_split_names,
     )
 
-    state = context.state
     evaluated, central = measured
     selected_client_set = set(selected)
-    state.client_metrics_history.extend(
+    context.state.client_metrics_history.extend(
         _build_client_evaluation_record(
             result,
             participated=result.client_id in selected_client_set,
@@ -1161,90 +1238,56 @@ def _record_evaluation_and_rest(
             )
     if central is not None:
         round_info.metrics.update(central)
-    return _record_the_round(
-        context, round_info, selected, fit_totals, timings, round_started, flushing, long_lived
-    )
 
 
-def _record_the_round(
-    context: Any,
-    round_info: RoundInfo,
-    selected: list[str],
-    fit_totals: Any,
-    timings: dict[str, float],
-    round_started: float,
-    flushing: _Flushing,
-    long_lived: Any,
-) -> bool:
-    """The verdict, checkpoints, records and flush of a round, as ``run_fl_loop`` does them."""
+def _check_weights(device_round: DeviceRound, state: Any) -> None:
+    """The weights the round was folded with are the example counts its records report."""
 
-    from fedbrew.core.loop import (
-        _checkpoint_payload_builder,
-        _flush_due,
-        _flush_rounds,
-        _update_checkpoints,
-    )
-    from fedbrew.core.state import MetricRecord, RoundState, RoundTimings
+    records = state.client_update_metrics_history[-len(device_round.positions) :]
+    counts = [record.num_examples for record in records]
+    if counts != device_round.eval_rows:
+        raise RuntimeError(
+            f"round {device_round.round_id}: the resident fold's weights "
+            f"{device_round.eval_rows[:4]}... are not the example counts {counts[:4]}... "
+            "the clients report"
+        )
 
-    state, round_id = context.state, round_info.round_id
-    metrics = dict(round_info.metrics)
-    if isinstance(context.server_payload, dict):
-        context.server_payload["metrics"] = metrics
-    verdict = context.monitor.update(round_id, metrics)
-    flush_due = _flush_due(round_id, context.global_rounds, context.flush_every, verdict)
-    checkpoint_started = time.perf_counter()
-    flushing.staged = _update_checkpoints(
-        _checkpoint_payload_builder(
-            context.server, context.client, context.server_payload, metrics, round_id
+
+def _diverged(context: Any, round_id: int, error: Exception) -> None:
+    """The per-round loop's record of an aggregation refusal."""
+
+    from fedbrew.core.divergence import STATUS_DIVERGED, DivergenceVerdict
+
+    state = context.state
+    state.status = STATUS_DIVERGED
+    verdict = DivergenceVerdict(
+        status=STATUS_DIVERGED,
+        detector="non_finite_client_state",
+        round_id=round_id,
+        metric="client_model_state",
+        value=float("nan"),
+        threshold=None,
+        reason=(
+            f"round {round_id} aggregation refused a non-finite client "
+            f"state ({error}); the model cannot recover from it"
         ),
-        metrics,
-        context.output_dir,
-        round_id,
-        context.checkpoint_policy,
-        context.checkpoint_tracker,
-        flushing.staged,
-        write_latest=flush_due,
     )
-    round_timings = RoundTimings(
-        fit=timings["fit"],
-        aggregate=timings["aggregate"],
-        client_eval=timings["client_eval"],
-        global_eval=timings["global_eval"],
-        checkpoint=time.perf_counter() - checkpoint_started,
-        total=time.perf_counter() - round_started,
-    )
-    record = {
-        "round_id": round_id,
-        "metrics": metrics,
-        "num_clients": len(selected),
-        "num_examples": fit_totals.num_examples,
-        "timings": round_timings,
-    }
-    state.rounds.append(RoundState(**record))
-    metric_record = MetricRecord(**record)
-    state.metrics_history.append(metric_record)
-    flushing.staged = _flush_rounds(
-        flush_due,
-        state,
-        context.output_dir,
-        context.statistics,
-        context.csv_cursor,
-        context.on_round_flush,
-        flushing.staged,
-        context.checkpoint_policy,
-    )
-    flushing.unflushed = not flush_due
-    if round_id == context.start_round:
-        long_lived.freeze()
-    if context.on_round_end is not None:
-        context.on_round_end(metric_record)
-    if verdict is not None:
-        state.status = verdict.status
-        state.termination = verdict.as_dict()
-        if context.on_termination is not None:
-            context.on_termination(verdict)
-        return True
-    return False
+    state.termination = verdict.as_dict()
+    if context.on_termination is not None:
+        context.on_termination(verdict)
+
+
+def _stops(context: Any, verdict: Any) -> bool:
+    """Record a verdict as ``run_fl_loop`` does; whether there was one."""
+
+    if verdict is None:
+        return False
+    state = context.state
+    state.status = verdict.status
+    state.termination = verdict.as_dict()
+    if context.on_termination is not None:
+        context.on_termination(verdict)
+    return True
 
 
 def _warn_on_an_unobserved_metric(context: Any) -> None:

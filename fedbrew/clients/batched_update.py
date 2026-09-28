@@ -521,7 +521,11 @@ class ProgramValues:
         first = programs[0]
 
         def column(values: list[float], kind: torch.dtype = dtype) -> Tensor:
-            return torch.tensor(values, dtype=torch.float64).to(device=device, dtype=kind)
+            # Cast where it is built, then placed: the cast rounds the same on
+            # either device, and the copy does not wait on the device's queue.
+            from fedbrew.core.batched_executor import uploaded
+
+            return uploaded(torch.tensor(values, dtype=torch.float64).to(dtype=kind), device)
 
         specs = [program.optimizer for program in programs]
         self._values: dict[str, Tensor] = {}

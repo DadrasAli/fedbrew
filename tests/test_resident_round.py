@@ -28,7 +28,9 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+import pytest
 import torch
+import yaml
 
 from fedbrew.core import resident
 from fedbrew.core.checkpointing import load_checkpoint
@@ -357,6 +359,97 @@ class StopsInsideAWindowTest(ResidentRuns):
         self.assertEqual(_run(held)["status"], "diverged")
         self.assertEqual(_run(held)["termination"]["detector"], "non_finite_client_state")
         self.assertSameRun(held, reference)
+
+
+class AResumeFromAnAsynchronousFlushIsTheRunTest(ResidentRuns):
+    """Stopped at a flush or between two, and resumed from latest.pt: the uninterrupted run.
+
+    The flush's writes run on the writer thread; a stop hands the loop's
+    finally the writer to finish, as a kill leaves what it had committed.
+    """
+
+    def _config(self) -> dict[str, Any]:
+        config = classification_config(**FEDAVG, update_mode="single_batch")
+        config["defaults"]["global_rounds"] = 6
+        config["runtime"]["flush_every"] = 2
+        config["runtime"]["checkpointing"].update(save_every_round=True)
+        return _clean(config)
+
+    def test_stopped_at_a_flush_and_between_two(self) -> None:
+        import argparse
+
+        from fedbrew.core import runner
+
+        config = self._config()
+        whole = self.run_config(config, "batched")
+        for stop_at in (4, 5):
+            with self.subTest(stop_at=stop_at):
+                path = self.root / f"stopped-{stop_at}.yaml"
+                config["experiment"]["output_dir"] = str(self.root / f"stopped-{stop_at}")
+                config["runtime"].setdefault("performance", {})["executor"] = "batched"
+                path.write_text(yaml.safe_dump(config), encoding="utf-8")
+                with mock.patch.object(runner, "_round_progress_reporter", _stopping(stop_at)):
+                    with self.assertRaises(KeyboardInterrupt):
+                        runner.run(path, args=None)
+                output = Path(config["experiment"]["output_dir"])
+                latest = load_checkpoint(output / "checkpoints" / "latest.pt")["round_id"]
+                self.assertEqual(latest, 4)
+                self.assertEqual(
+                    max(int(row["round_id"]) for row in _rows(output / "round_metrics.csv")), 4
+                )
+                runner.run(path, args=argparse.Namespace(resume_latest=True))
+                self.assertSameRun(output, whole)
+
+
+def _stopping(round_id: int) -> Any:
+    """A round reporter that interrupts the run as round ``round_id`` is reported."""
+
+    def reporter(config: Any, progress: Any) -> Any:
+        def on_round_end(record: Any) -> None:
+            if record.round_id == round_id:
+                raise KeyboardInterrupt
+
+        return on_round_end
+
+    return reporter
+
+
+@pytest.mark.fast
+class TheFlushsWritesTest(unittest.TestCase):
+    """The writer runs a flush's writes in order, and hands back what one raised."""
+
+    def test_a_path_staged_again_keeps_its_place_and_takes_the_later_payload(self) -> None:
+        from fedbrew.core.resident_flush import DeferredStaged
+
+        staged = DeferredStaged()
+        staged.stage({"round_id": 1}, Path("a/best.pt"))
+        staged.stage({"round_id": 1}, Path("a/latest.pt"))
+        staged.stage({"round_id": 2}, Path("a/best.pt"))
+        self.assertEqual(list(staged.pending), [Path("a/best.pt"), Path("a/latest.pt")])
+        self.assertEqual(staged.pending[Path("a/best.pt")], {"round_id": 2})
+
+    def test_writes_run_in_order_and_an_error_reaches_the_loop(self) -> None:
+        from fedbrew.core.resident_flush import FlushWriter
+
+        writer = FlushWriter()
+        done: list[int] = []
+        try:
+            writer.submit(lambda: done.append(1))
+            writer.submit(lambda: done.append(2))
+            writer.wait()
+            self.assertEqual(done, [1, 2])
+
+            def fails() -> None:
+                raise OSError("disk full")
+
+            writer.submit(fails)
+            writer.submit(lambda: done.append(3))
+            with self.assertRaisesRegex(OSError, "disk full"):
+                writer.wait()
+            # Nothing after a failed flush is written.
+            self.assertEqual(done, [1, 2])
+        finally:
+            writer.close()
 
 
 class WhoTakesItTest(ResidentRuns):
