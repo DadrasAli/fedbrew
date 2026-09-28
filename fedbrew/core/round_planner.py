@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
+from torch import Tensor
 
 from fedbrew.clients.batch_orders import LocalLoop, RoundOrders, plan_orders
 from fedbrew.clients.batched_update import loader_seeds
@@ -148,39 +149,96 @@ def plan_roster_round(roster: RosterPlan, round_id: int) -> PlannedRound:
 _ORDER_FIELDS = ("indices", "lengths", "starts", "steps", "contiguous")
 
 
-def _packed(planned: PlannedRound) -> tuple[Any, ...]:
-    """A planned round as what crosses the queue: tensors, whose storage is shared, and lists."""
+class _Ring:
+    """Slots in shared memory a worker writes a planned round into: made once, shared once.
 
+    Sized for the roster: every client sampled, each with its longest loop
+    and widest batch. A round's orders fill the front of a slot; what crosses
+    the queue is only where (``_header``). The loop copies a slot out as it
+    takes the round, and the slot is handed out again.
+    """
+
+    def __init__(self, roster: RosterPlan, slots: int) -> None:
+        full = _full_orders(roster)
+        clients = len(roster)
+        self.slots = slots
+        self.positions = torch.zeros((slots, clients), dtype=torch.long).share_memory_()
+        self.train = _slot_tensors(full[0], slots, clients)
+        self.evaluation = _slot_tensors(full[1], slots, clients)
+
+    def write(self, slot: int, planned: PlannedRound) -> tuple[int, ...]:
+        """``planned`` into ``slot``; the header that says what of it is the round."""
+
+        count = len(planned.positions)
+        self.positions[slot, :count] = torch.tensor(planned.positions, dtype=torch.long)
+        header: list[int] = [planned.round_id, slot, count]
+        for tensors, orders in ((self.train, planned.train), (self.evaluation, planned.evaluation)):
+            steps, width = orders.indices.shape[1], orders.indices.shape[2]
+            tensors[0][slot, :count, :steps, :width] = orders.indices
+            tensors[1][slot, :count, :steps] = orders.lengths
+            tensors[2][slot, :count, :steps] = orders.starts
+            tensors[3][slot, :count] = orders.steps
+            tensors[4][slot, :count] = orders.contiguous
+            header.extend((steps, width))
+        return tuple(header)
+
+    def read(
+        self, header: tuple[int, ...], structures: tuple[list[Any], list[Any]]
+    ) -> PlannedRound:
+        """The round a header names, copied out of its slot, with each client's structures."""
+
+        round_id, slot, count, train_steps, train_width, eval_steps, eval_width = header
+        positions = self.positions[slot, :count].tolist()
+        orders = []
+        for tensors, steps, width, structure in (
+            (self.train, train_steps, train_width, structures[0]),
+            (self.evaluation, eval_steps, eval_width, structures[1]),
+        ):
+            orders.append(
+                RoundOrders(
+                    indices=tensors[0][slot, :count, :steps, :width].clone(),
+                    lengths=tensors[1][slot, :count, :steps].clone(),
+                    starts=tensors[2][slot, :count, :steps].clone(),
+                    steps=tensors[3][slot, :count].clone(),
+                    structure=[structure[place] for place in positions],
+                    contiguous=tensors[4][slot, :count].clone(),
+                )
+            )
+        return PlannedRound(round_id, positions, orders[0], orders[1])
+
+
+def _full_orders(roster: RosterPlan) -> tuple[RoundOrders, RoundOrders]:
+    """Every client's orders at once, for their sizes and structures, which no seed changes."""
+
+    seeds = [0] * len(roster)
     return (
-        planned.round_id,
-        planned.positions,
-        tuple(getattr(planned.train, name) for name in _ORDER_FIELDS),
-        planned.train.structure,
-        tuple(getattr(planned.evaluation, name) for name in _ORDER_FIELDS),
-        planned.evaluation.structure,
+        plan_orders(list(roster.train_orders), list(roster.loops), seeds),
+        plan_orders(list(roster.eval_orders), [LocalLoop(epochs=1)] * len(roster), seeds),
     )
 
 
-def _unpacked(packed: tuple[Any, ...]) -> PlannedRound:
-    round_id, positions, train, train_structure, evaluation, eval_structure = packed
-    return PlannedRound(
-        round_id,
-        list(positions),
-        RoundOrders(*train[:4], train_structure, train[4]),  # type: ignore[arg-type]
-        RoundOrders(*evaluation[:4], eval_structure, evaluation[4]),  # type: ignore[arg-type]
+def _slot_tensors(full: RoundOrders, slots: int, clients: int) -> tuple[Tensor, ...]:
+    steps, width = full.indices.shape[1], full.indices.shape[2]
+    return (
+        torch.zeros((slots, clients, steps, width), dtype=torch.long).share_memory_(),
+        torch.zeros((slots, clients, steps), dtype=torch.long).share_memory_(),
+        torch.zeros((slots, clients, steps), dtype=torch.long).share_memory_(),
+        torch.zeros((slots, clients), dtype=torch.long).share_memory_(),
+        torch.zeros((slots, clients), dtype=torch.bool).share_memory_(),
     )
 
 
-def _worker(roster: RosterPlan, tasks: Any, results: Any) -> None:
-    """A planner process: plan each round it is handed, until it is handed None."""
+def _worker(roster: RosterPlan, ring: _Ring, tasks: Any, results: Any) -> None:
+    """A planner process: plan each round it is handed into its slot, until it is handed None."""
 
     torch.set_num_threads(1)
     while True:
-        round_id = tasks.get()
-        if round_id is None:
+        task = tasks.get()
+        if task is None:
             return
+        round_id, slot = task
         try:
-            results.put(("round", _packed(plan_roster_round(roster, round_id))))
+            results.put(("round", ring.write(slot, plan_roster_round(roster, round_id))))
         except Exception as error:  # noqa: BLE001 -- reported to the loop, which plans itself
             results.put(("error", round_id, f"{type(error).__name__}: {error}"))
 
@@ -214,6 +272,9 @@ class RoundPlanner:
         self._processes: list[Any] = []
         self._tasks: Any = None
         self._results: Any = None
+        self._ring: _Ring | None = None
+        self._free: list[int] = []
+        self._structures: tuple[list[Any], list[Any]] = ([], [])
         if workers > 0:
             self._start(workers)
 
@@ -252,13 +313,19 @@ class RoundPlanner:
 
     def _start(self, workers: int) -> None:
         try:
+            ring = self._ring = _Ring(self.roster, self.ahead + 2)
+            full = _full_orders(self.roster)
+            self._structures = (full[0].structure, full[1].structure)
+            self._free = list(range(ring.slots))
             context = torch.multiprocessing.get_context("spawn")
             self._tasks = context.Queue()
             self._results = context.Queue()
             with _main_unseen():
                 for _ in range(workers):
                     process = context.Process(
-                        target=_worker, args=(self.roster, self._tasks, self._results), daemon=True
+                        target=_worker,
+                        args=(self.roster, ring, self._tasks, self._results),
+                        daemon=True,
                     )
                     process.start()
                     self._processes.append(process)
@@ -272,8 +339,8 @@ class RoundPlanner:
 
         assert self._next_task is not None
         stop = min(self.last_round, round_id + self.ahead)
-        while self._next_task <= stop:
-            self._tasks.put(self._next_task)
+        while self._next_task <= stop and self._free:
+            self._tasks.put((self._next_task, self._free.pop(0)))
             self._next_task += 1
 
     def _wait(self, round_id: int) -> PlannedRound:
@@ -297,7 +364,12 @@ class RoundPlanner:
                     return self._fall_back(
                         f"a planner worker raised on round {message[1]}: {message[2]}", round_id
                     )
-                planned = _unpacked(message[1])
+                assert self._ring is not None
+                header = message[1]
+                planned = self._ring.read(header, self._structures)
+                # Copied out: the slot can take another round.
+                self._free.append(header[1])
+                self._submit(round_id)
                 if planned.round_id == round_id:
                     return planned
                 self._received[planned.round_id] = planned

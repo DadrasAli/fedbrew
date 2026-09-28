@@ -167,6 +167,8 @@ class WorkersPlanWhatThisProcessPlansTest(unittest.TestCase):
                 for round_id in range(1, 9):
                     got, want = planner.plan(round_id), plan_roster_round(roster, round_id)
                     self.assertEqual(got.positions, want.positions)
+                    self.assertEqual(got.train.structure, want.train.structure)
+                    self.assertEqual(got.evaluation.structure, want.evaluation.structure)
                     for name in FIELDS:
                         self.assertTrue(
                             torch.equal(getattr(got.train, name), getattr(want.train, name))

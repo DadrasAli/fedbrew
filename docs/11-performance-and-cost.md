@@ -417,8 +417,11 @@ with the calls `plan_round` makes, and the round adopts them as `plan_round`
 would (`adopt_orders`) after checking they are its plans' -- the same clients,
 loaders, loops and seeds; a round whose plans are not falls back to
 `plan_round`, recorded. On a CUDA run worker processes plan a few rounds
-ahead of the loop, as many as the job's CPUs less two, at most four, and hand
-each round over through shared memory; on a CPU run, whose training
+ahead of the loop, as many as the job's CPUs less two, at most four, and
+write each round into slots of shared memory made once, at the start, so only
+a few numbers cross the queue per round (handing a round's tensors over one
+by one, each through a file descriptor, cost about 6 ms of the loop's round
+on an A100 node, measured 2026-09-29); on a CPU run, whose training
 occupies those cores, the loop plans each round itself. A worker that dies,
 raises or does not answer within two minutes leaves the planning to the
 loop, with the same function. `run.json` records `executor.planner`: `used`,
