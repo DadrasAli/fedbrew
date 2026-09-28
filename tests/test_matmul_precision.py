@@ -127,6 +127,49 @@ class MatmulPrecisionIsRecordedTest(unittest.TestCase):
 
 
 @pytest.mark.fast
+class HighestTurnsCudnnTf32OffTest(unittest.TestCase):
+    """matmul_precision reaches convolutions too: cuDNN's TF32 switch follows it.
+
+    torch's matmul setting leaves cuDNN alone, and cuDNN allows TF32 by
+    default, so a CUDA run at "highest" ran every convolution in TF32 while
+    run.json said "highest".
+    """
+
+    def setUp(self) -> None:
+        precision, allowed = torch.get_float32_matmul_precision(), torch.backends.cudnn.allow_tf32
+        self.addCleanup(torch.set_float32_matmul_precision, precision)
+        self.addCleanup(setattr, torch.backends.cudnn, "allow_tf32", allowed)
+
+    def _runtime(self, precision: str | None) -> dict[str, object]:
+        return MatmulPrecisionIsRecordedTest._runtime(self, precision)  # type: ignore[arg-type]
+
+    def test_highest_turns_it_off_and_the_others_on(self) -> None:
+        for precision, allowed in (
+            ("highest", False),
+            ("high", True),
+            ("medium", True),
+            ("highest", False),
+        ):
+            with self.subTest(precision=precision):
+                record = self._runtime(precision)
+                self.assertIs(torch.backends.cudnn.allow_tf32, allowed)
+                self.assertIs(record["cudnn_allow_tf32"], allowed)
+
+    def test_an_unset_key_leaves_it_and_records_what_cudnn_holds(self) -> None:
+        for held in (True, False):
+            with self.subTest(held=held):
+                torch.backends.cudnn.allow_tf32 = held
+                record = self._runtime(None)
+                self.assertIs(torch.backends.cudnn.allow_tf32, held)
+                self.assertIs(record["cudnn_allow_tf32"], held)
+
+    def test_the_documentation_says_so(self) -> None:
+        text = Path(_DOC).read_text(encoding="utf-8")
+        self.assertIn("`cudnn_allow_tf32`", text)
+        self.assertIn("**It covers convolutions too.**", text)
+
+
+@pytest.mark.fast
 class PerformanceBlockDocumentationTest(unittest.TestCase):
     def test_no_config_still_claims_the_whole_block_is_free(self) -> None:
         """The comment used to read "none of these change results"."""

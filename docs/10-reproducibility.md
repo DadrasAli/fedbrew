@@ -9,8 +9,9 @@ Every run records what it did in `run.json` under `reproducibility`: the git
 commit and whether a tracked file was dirty (which identifies the code exactly
 only for a clean checkout — chapter 09 §3.3), the seed, the deterministic flags, the torch, CUDA,
 cuDNN and numpy versions, and — separately from what the config asked for —
-what torch **actually held** for `matmul_precision`, `cudnn_benchmark`,
-`cudnn_deterministic` and `torch_deterministic_algorithms`. Chapter 09 §3.3.
+what torch **actually held** for `matmul_precision`, `cudnn_allow_tf32`,
+`cudnn_benchmark`, `cudnn_deterministic` and `torch_deterministic_algorithms`.
+Chapter 09 §3.3.
 
 ### What is guaranteed
 
@@ -111,6 +112,18 @@ not.
   config omitting the key is running different arithmetic from one setting
   `high` — which is why every shipped run config states it explicitly and
   `tests/test_shipped_config_explicitness.py` keeps it doing so.
+
+  **It covers convolutions too.** torch's matmul setting reaches matmuls
+  only; a convolution runs through cuDNN, whose TensorFloat32 switch
+  (`torch.backends.cudnn.allow_tf32`) is its own and is on by torch's default.
+  So `highest` also turns cuDNN's TF32 off, and `high` and `medium` turn it on,
+  as they allow TF32 in matmuls; an unset key leaves it at torch's default.
+  Before this, every convolution of a CUDA run at `highest` ran in TF32: on an
+  A100 the FEMNIST CNN's batched and sequential runs parted by 2e-4 after one
+  round, against 1e-7 with it off (measured 2026-09-28). No shipped config was
+  affected: the FEMNIST and OpenImage configs are at `high`, and the ones at
+  `highest` are MLPs. `run.json` records what cuDNN held, as
+  `cudnn_allow_tf32`.
 
   `run.json` records the precision torch actually held, not the one requested.
   `torch.set_float32_matmul_precision` does not reject an unknown value — it

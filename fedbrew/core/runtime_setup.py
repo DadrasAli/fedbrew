@@ -246,6 +246,15 @@ def configure_runtime(config: FullConfig, deterministic: bool) -> dict[str, obje
     matmul_precision = performance.get("matmul_precision")
     if matmul_precision and hasattr(torch, "set_float32_matmul_precision"):
         torch.set_float32_matmul_precision(str(matmul_precision))
+        # The matmul setting reaches matmuls only. A convolution runs through
+        # cuDNN, whose TensorFloat32 switch is its own and is on by torch's
+        # default, so at "highest" every convolution of a CUDA run was TF32
+        # while run.json said "highest": measured on an A100, the batched and
+        # sequential FEMNIST CNN parted by 2e-4 after one round with it on and
+        # by 1e-7 with it off (2026-09-28). "high" and "medium" allow TF32 in
+        # matmuls, so they allow it here too, which is torch's default.
+        if hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.allow_tf32 = str(matmul_precision) != "highest"
 
     torch_metadata = _torch_runtime_metadata(torch)
     record: dict[str, object] = {
@@ -262,6 +271,9 @@ def configure_runtime(config: FullConfig, deterministic: bool) -> dict[str, obje
         # Same rule cudnn_benchmark below already follows.
         "matmul_precision": torch_metadata["matmul_precision"],
         "cudnn_benchmark": torch_metadata["cudnn_benchmark"],
+        # Recorded beside matmul_precision because it is the other half of
+        # the same question: whether a float32 product ran in float32.
+        "cudnn_allow_tf32": torch_metadata["cudnn_allow_tf32"],
         "cudnn_deterministic": torch_metadata["cudnn_deterministic"],
         "torch_deterministic_algorithms": torch_metadata["torch_deterministic_algorithms"],
     }
@@ -309,6 +321,7 @@ def _base_seed_metadata(
         "deterministic_warn_only": warn_only,
         "cudnn_deterministic": None,
         "cudnn_benchmark": None,
+        "cudnn_allow_tf32": None,
         "torch_deterministic_algorithms": None,
         "matmul_precision": None,
         "torch_version": None,
@@ -358,11 +371,14 @@ def _torch_runtime_metadata(torch_module: Any) -> dict[str, object]:
     cudnn_version = None
     cudnn_benchmark = None
     cudnn_deterministic = None
+    cudnn_allow_tf32 = None
     backends = getattr(torch_module, "backends", None)
     cudnn = getattr(backends, "cudnn", None)
     if cudnn is not None:
         if hasattr(cudnn, "benchmark"):
             cudnn_benchmark = bool(cudnn.benchmark)
+        if hasattr(cudnn, "allow_tf32"):
+            cudnn_allow_tf32 = bool(cudnn.allow_tf32)
         if hasattr(cudnn, "deterministic"):
             cudnn_deterministic = bool(cudnn.deterministic)
         version = getattr(cudnn, "version", None)
@@ -387,5 +403,6 @@ def _torch_runtime_metadata(torch_module: Any) -> dict[str, object]:
         "cudnn_version": cudnn_version,
         "cudnn_deterministic": cudnn_deterministic,
         "cudnn_benchmark": cudnn_benchmark,
+        "cudnn_allow_tf32": cudnn_allow_tf32,
         "torch_deterministic_algorithms": deterministic_algorithms,
     }
