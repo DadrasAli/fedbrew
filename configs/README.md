@@ -28,6 +28,11 @@ examples/    pl-1d/                     (7 arms)
              fed-lasso/  fed-lasso-l2/  fed-lasso-smooth/  (9 arms each, 1 arm)
              simplex-lsq/  simplex-lsq-feasible/               (8 arms, 3 arms)
              nonconvex-simplex/                                       (8 arms)
+             fed-logistic-l1-synthetic-1000-lambda0.001/              (1 arm)
+             fed-logistic-l1-synthetic-1000-lambda0.03/               (1 arm)
+             fed-logistic-l1-synthetic-kappa1-lambda0.01/             (1 arm)
+             fed-logistic-l1-synthetic-kappa10-lambda0.01/            (1 arm)
+             fed-logistic-l1-synthetic-kappa100-lambda0.01/           (1 arm)
              fed-logistic-l1-synthetic-lambda0.03/                    (1 arm)
 ```
 

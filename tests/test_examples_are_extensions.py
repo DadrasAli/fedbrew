@@ -51,6 +51,14 @@ ARMS = (
     "fedlalr",
 )
 
+#: examples/fed-logistic-l1's settings: one problem on one dataset each.
+FED_LOGISTIC_SETTINGS = tuple(
+    sorted(
+        path.stem
+        for path in (REPO_ROOT / "data" / "configs" / "examples").glob("fed-*-lambda*.yaml")
+    )
+)
+
 #: example directory -> (its extension file, the dataset/task name it
 #: registers, its model name, the generator-config settings it ships).
 #: Every entry is a claim that the example is on the hook; the test below
@@ -70,11 +78,7 @@ EXAMPLES = {
         ("simplex-lsq", "simplex-lsq-feasible"),
     ),
     "nonconvex-simplex": ("nonconvex_simplex", "simplex_point", ("nonconvex-simplex",)),
-    "fed-logistic-l1": (
-        "fed_logistic_l1",
-        "logistic_vector",
-        ("fed-logistic-l1-synthetic-lambda0.03",),
-    ),
+    "fed-logistic-l1": ("fed_logistic_l1", "logistic_vector", FED_LOGISTIC_SETTINGS),
 }
 
 

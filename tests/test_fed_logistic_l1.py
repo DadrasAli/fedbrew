@@ -5,6 +5,8 @@ instance generated here (d = 8, 4 clients of 16 rows):
 
 - the gradient autograd takes of the task's ``functional_loss`` is the
   module's analytic ``gradient``, at random points, to 1e-14 relative;
+- a conditioned design's pooled Gram has the condition number asked for, and
+  `lambda_max = 1`;
 - the manifest's reference: a convex problem's ``f_star`` is ``F`` at its
   ``x_star``, certified to a KKT residual under ``CERTIFICATE``; a nonconvex
   one records neither;
@@ -132,6 +134,23 @@ class TheReferenceTest(unittest.TestCase):
                 task = _task(loss, penalty)
                 at = task.pooled_objective(torch.tensor(reference["x_star"], dtype=torch.float64))
                 self.assertEqual(reference["f_star"], at)
+
+
+class TheConditionNumberDialTest(unittest.TestCase):
+    def test_the_pooled_gram_has_the_condition_number_asked_for(self) -> None:
+        for kappa in (1.0, 10.0, 100.0):
+            with self.subTest(kappa=kappa):
+                spec = problem.ProblemSpec(
+                    num_clients=4,
+                    dim=8,
+                    rows_per_client=16,
+                    partition_block=4,
+                    condition_number=kappa,
+                )
+                record = problem._gram_record(spec.design())
+                self.assertAlmostEqual(record["gram_condition"], kappa, delta=1e-10 * kappa)
+                self.assertAlmostEqual(record["gram_lambda_max"], 1.0, delta=1e-12)
+                self.assertAlmostEqual(spec.lipschitz(), 0.25, delta=1e-12)
 
 
 class OneRoundBatchedAgreesTest(ExecutorRuns):

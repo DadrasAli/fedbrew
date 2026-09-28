@@ -88,6 +88,16 @@ def _generator_configs() -> dict[Path, dict[str, Any]]:
     return found
 
 
+def _needs_external_input(config: dict[str, Any]) -> bool:
+    """A generator in `NEEDS_EXTERNAL_INPUT`, or a config reading a `source` file.
+
+    A `source` section names a file under `data/raw/` that is fetched by hand
+    and pinned by its digest (examples/fed-logistic-l1's LIBSVM settings).
+    """
+
+    return config["dataset"]["name"] in NEEDS_EXTERNAL_INPUT or "source" in config
+
+
 class GeneratedDataTestCase(unittest.TestCase):
     """Generates every dataset a clone can, from the generator config that ships it.
 
@@ -104,7 +114,7 @@ class GeneratedDataTestCase(unittest.TestCase):
         cls._scratch = tempfile.TemporaryDirectory()
         cls.generated = {}
         for index, (shipped, config) in enumerate(sorted(_generator_configs().items())):
-            if config["dataset"]["name"] in NEEDS_EXTERNAL_INPUT:
+            if _needs_external_input(config):
                 continue
             config["dataset"]["output_dir"] = str(Path(cls._scratch.name) / str(index))
             path = Path(cls._scratch.name) / f"{index}.yaml"
@@ -142,8 +152,7 @@ class ShippedConfigsAgreeWithTheirDataTest(GeneratedDataTestCase):
                         model_data_shape_mismatch(_model_config(config), manifest),
                     )
             elif shipped not in NO_GENERATOR_CONFIG and (
-                shipped not in generators
-                or generators[shipped]["dataset"]["name"] not in NEEDS_EXTERNAL_INPUT
+                shipped not in generators or not _needs_external_input(generators[shipped])
             ):
                 unclassified.append(str(path))
         self.assertEqual(unclassified, [], "data neither generated here nor declared out of reach")

@@ -29,3 +29,6 @@ problem:
   penalty: l1
   penalty_strength: 0.03
   partition_block: 32
+  # Each client's own L1 solution's support size, into the manifest and
+  # client_stats.csv: a solve per client.
+  client_support_sizes: true

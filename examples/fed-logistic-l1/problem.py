@@ -84,6 +84,8 @@ from __future__ import annotations
 
 import csv
 import json
+import math
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -162,6 +164,50 @@ def label_base(dim: int) -> int:
     """`p_d`: the first prime the design does not use (see the module docstring)."""
 
     return primes(dim + 1)[dim]
+
+
+def conditioned(design: Tensor, condition_number: float) -> Tensor:
+    """The design's centred columns orthonormalised and rescaled to a given conditioning.
+
+    A reduced QR of the centred design, its columns scaled by the square roots
+    of `kappa^(-j/(d-1))`, `j = 0..d-1`, and by `sqrt(n)`: the pooled Gram
+    `A'A/n` of the result has eigenvalues from 1 down to `1/kappa`, so its
+    condition number is `kappa` and `lambda_max = 1` whatever `kappa` is. The
+    QR makes the design depend on the LAPACK it runs on, to about 1e-14, which
+    the manifest records (:func:`lapack_record`).
+    """
+
+    rows, dim = design.shape
+    basis, _ = torch.linalg.qr(design - design.mean(0), mode="reduced")
+    scale = torch.logspace(0.0, -0.5 * math.log10(condition_number), dim, dtype=DTYPE)
+    return math.sqrt(rows) * basis * scale
+
+
+def lapack_record() -> dict[str, Any]:
+    """What a conditioned design depends on: torch, its BLAS and LAPACK, and the CPU."""
+
+    config = torch.__config__.show()
+
+    def found(pattern: str) -> str | None:
+        match = re.search(pattern, config)
+        return match.group(1) if match else None
+
+    cpu = None
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8") as handle:
+            cpu = next(
+                (line.split(":", 1)[1].strip() for line in handle if line.startswith("model name")),
+                None,
+            )
+    except OSError:
+        pass
+    return {
+        "torch": torch.__version__,
+        "blas": found(r"BLAS_INFO=(\w+)"),
+        "lapack": found(r"LAPACK_INFO=(\w+)"),
+        "cpu_capability": found(r"CPU capability usage: (\w+)"),
+        "cpu": cpu,
+    }
 
 
 def deal(key: Tensor, clients: int, rows_per_client: int, block: int) -> list[Tensor]:
@@ -539,6 +585,10 @@ class ProblemSpec:
     loss: str = "logistic"
     #: The penalty `lam` multiplies (:data:`PENALTIES`).
     penalty: str = "l1"
+    #: `kappa`: the condition number of the pooled Gram `A'A/n`, by rescaling
+    #: the design's orthonormalised columns (:func:`conditioned`). None keeps
+    #: the Halton design as it is.
+    condition_number: float | None = None
 
     def __post_init__(self) -> None:
         """Refuse a spec that cannot express what it claims to."""
@@ -555,18 +605,25 @@ class ProblemSpec:
             raise ValueError("problem.signal_scale must be positive")
         if self.penalty_strength < 0.0:
             raise ValueError("problem.penalty_strength must be non-negative")
-        if self.loss not in LOSSES:
-            raise ValueError(f"problem.loss must be one of {sorted(LOSSES)}, not {self.loss!r}")
-        if self.penalty not in PENALTIES:
-            raise ValueError(
-                f"problem.penalty must be one of {sorted(PENALTIES)}, not {self.penalty!r}"
-            )
+        self._check_forms()
         if self.partition_block < 1 or self.rows_per_client % self.partition_block:
             raise ValueError(
                 f"problem.partition_block must divide problem.rows_per_client: "
                 f"{self.partition_block} does not divide {self.rows_per_client}. The deal "
                 "is whole blocks, so a remainder would give some clients fewer rows and "
                 "break the equal m_c that makes uniform aggregation exactly F."
+            )
+
+    def _check_forms(self) -> None:
+        """Refuse a loss, a penalty or a conditioning this file does not define."""
+
+        if self.condition_number is not None and self.condition_number < 1.0:
+            raise ValueError("problem.condition_number must be at least 1")
+        if self.loss not in LOSSES:
+            raise ValueError(f"problem.loss must be one of {sorted(LOSSES)}, not {self.loss!r}")
+        if self.penalty not in PENALTIES:
+            raise ValueError(
+                f"problem.penalty must be one of {sorted(PENALTIES)}, not {self.penalty!r}"
             )
 
     @property
@@ -600,9 +657,12 @@ class ProblemSpec:
     # -- the data -----------------------------------------------------------
 
     def design(self) -> Tensor:
-        """`A`, shape `(n, d)`, in source order."""
+        """`A`, shape `(n, d)`, in source order: Halton, conditioned when asked."""
 
-        return halton_normal_design(self.rows, self.dim)
+        design = halton_normal_design(self.rows, self.dim)
+        if self.condition_number is None:
+            return design
+        return conditioned(design, self.condition_number)
 
     def labels(self) -> Tensor:
         """`b`, shape `(n,)`, in `{-1, +1}`: a deterministic Bernoulli draw."""
@@ -805,6 +865,8 @@ PROBLEM_KEYS = {
     "partition_block",
     "loss",
     "penalty",
+    "condition_number",
+    "client_support_sizes",
 }
 
 
@@ -837,7 +899,12 @@ def _spec_from_config(config: Mapping[str, Any]) -> ProblemSpec:
         partition_block=int(problem.get("partition_block", 32)),
         loss=str(problem.get("loss", "logistic")),
         penalty=str(problem.get("penalty", "l1")),
+        condition_number=_optional_float(problem.get("condition_number")),
     )
+
+
+def _optional_float(value: Any) -> float | None:
+    return None if value is None else float(value)
 
 
 def _spec_from_reference(reference: Mapping[str, Any]) -> ProblemSpec:
@@ -857,13 +924,14 @@ def _spec_from_reference(reference: Mapping[str, Any]) -> ProblemSpec:
         partition_block=int(problem["partition_block"]),
         loss=str(problem.get("loss", "logistic")),
         penalty=str(problem.get("penalty", "l1")),
+        condition_number=_optional_float(problem.get("condition_number")),
     )
 
 
 def _problem_record(spec: ProblemSpec) -> dict[str, Any]:
     """The dials, as the manifest's ``reference.problem`` records them."""
 
-    return {
+    record: dict[str, Any] = {
         "clients": spec.num_clients,
         "dim": spec.dim,
         "rows_per_client": spec.rows_per_client,
@@ -874,12 +942,16 @@ def _problem_record(spec: ProblemSpec) -> dict[str, Any]:
         "loss": spec.loss,
         "penalty": spec.penalty,
     }
+    if spec.condition_number is not None:
+        record["condition_number"] = spec.condition_number
+    return record
 
 
 def reference_of(
     spec: ProblemSpec,
     iterations: int = 20_000,
     client_iterations: int = 4_000,
+    client_supports: bool = False,
 ) -> dict[str, Any]:
     """Everything a run on this data is scored against.
 
@@ -888,7 +960,9 @@ def reference_of(
     optimum, so its reference holds no ``x_star``, ``f_star`` or
     ``kkt_residual``, and its runs report no gap. The two budgets are lowered
     by ``_self_check``, which checks this block's plumbing and not the shipped
-    accuracy.
+    accuracy. ``client_supports`` adds each client's own L1 solution's support
+    size (``problem.client_support_sizes``): a solve per client, which is the
+    whole cost of generation at 1,000 clients, so it is asked for.
     """
 
     features, labels = spec.design(), spec.labels()
@@ -903,6 +977,8 @@ def reference_of(
         "lipschitz": spec.lipschitz(),
         "client_label_balance": spec.client_label_balance(),
     }
+    if spec.condition_number is not None:
+        reference.update(_gram_record(features))
     if not spec.certified:
         return reference
     optimum, residual = spec.optimum(iterations=iterations)
@@ -931,9 +1007,21 @@ def reference_of(
             "client_gradient_dispersion": spec.client_gradient_dispersion(optimum),
         }
     )
-    if spec.penalty == "l1":
+    if client_supports and spec.penalty == "l1":
         reference["client_support_sizes"] = spec.client_support_sizes(iterations=client_iterations)
     return reference
+
+
+def _gram_record(features: Tensor) -> dict[str, Any]:
+    """The pooled Gram's spectrum as built, and what the build depended on."""
+
+    eigenvalues = torch.linalg.eigvalsh(features.T @ features / features.shape[0])
+    return {
+        "gram_condition": float(eigenvalues[-1] / eigenvalues[0]),
+        "gram_lambda_max": float(eigenvalues[-1]),
+        "gram_lambda_min": float(eigenvalues[0]),
+        "built_with": lapack_record(),
+    }
 
 
 def generate_fed_logistic_l1_from_config(
@@ -953,13 +1041,14 @@ def generate_fed_logistic_l1_from_config(
 
     del client_splits
     spec = _spec_from_config(config)
+    client_supports = bool(dict(config.get("problem", {})).get("client_support_sizes", False))
     features = spec.design()
     labels = spec.labels()
     partition = spec.client_indices()
     output_dir = Path(output_dir)
     shards_dir = output_dir / "shards"
     shards_dir.mkdir(parents=True, exist_ok=True)
-    reference = reference_of(spec)
+    reference = reference_of(spec, client_supports=client_supports)
 
     clients: list[dict[str, Any]] = []
     for index, rows in enumerate(partition):
@@ -1545,7 +1634,7 @@ def _check_solve(spec: ProblemSpec) -> str | None:
         return "the KKT residual does not increase away from the optimum"
     if spec.objective_at(optimum) > spec.objective_at(probe):
         return "the reference solve is not the better of two points"
-    reference = reference_of(spec, iterations=400, client_iterations=200)
+    reference = reference_of(spec, iterations=400, client_iterations=200, client_supports=True)
     if _spec_from_reference(reference) != spec:
         return "the spec does not survive the round trip through the manifest"
     stored = torch.tensor(reference["x_star"], dtype=DTYPE)

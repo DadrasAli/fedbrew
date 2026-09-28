@@ -78,6 +78,31 @@ recovery holds (it does over `λ ∈ [0.02, 0.07]`), and
 `‖x* − x_true‖` is a floor that `distance_to_truth` cannot go below, measured
 by solving rather than given by a formula.
 
+### synthetic-1000 — the same generator at 1,000 clients
+
+`fed-logistic-l1-synthetic-1000-lambda0.001` and `-lambda0.03`: the generator
+above at 1,000 clients × 32 rows, `d = 32`, dealt in blocks of 16 — many
+clients, each holding too few rows to see the planted support. `F*` at the two
+`λ`: `0.42993436284235004` and `0.5121661415511938`.
+
+### synthetic-kappa1, -kappa10, -kappa100 — a condition-number dial
+
+`fed-logistic-l1-synthetic-kappa<κ>-lambda0.01`, `κ ∈ {1, 10, 100}`: the
+synthetic generator (32 × 64, `d = 32`, blocks of 32) with its design
+reconditioned by `problem.condition_number`. The centred Halton design is
+orthonormalised by a reduced QR and its columns rescaled so that the pooled
+Gram `AᵀA/n` has eigenvalues `κ^(−j/(d−1))`, `j = 0..d−1`: from 1 down to
+`1/κ`. Its condition number is `κ` and `λ_max = 1` for all three, so
+`L = 1/4` on each; the truth, the labels and the deal follow from the
+reconditioned rows as above. `F*` at `λ = 0.01`: `0.45512445647395333`,
+`0.4738248007229769` and `0.48743008220058726`.
+
+The QR makes the rows depend on the LAPACK they are computed with, to about
+`1e-14`. The manifest records the Gram's spectrum as built (`gram_condition`,
+`gram_lambda_max`, `gram_lambda_min`) and what built it (`built_with`: torch,
+its BLAS and LAPACK, the CPU); two builds on different machines are the same
+problem to that precision and not bit for bit.
+
 ## The reference optimum
 
 A convex problem's `x*` has no closed form. It is solved once, at generation,
