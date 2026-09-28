@@ -89,6 +89,7 @@ class ResidentEvaluation:
         self._rows: dict[str, Any] = {}
         self._planned: dict[tuple[Any, ...], _Planned] = {}
         self._plans: dict[tuple[int, tuple[str, ...]], tuple[ClientEvalPlan, str | None]] = {}
+        self._work: dict[tuple[Any, ...], Any] = {}
         self.central = _central_rows(rounds)
 
     # -- the client splits ---------------------------------------------------
@@ -100,7 +101,7 @@ class ResidentEvaluation:
 
         if not work or not self.clients:
             return None
-        plans, missing = zip(*(self._plan(place, splits) for place, splits in work), strict=True)
+        plans, missing = self._work_plans(work)
         done: list[tuple[list[tuple[int, int]], Any, bool]] = []
         dtype = next(iter(params.values())).dtype
         for planned in self._splits(list(plans), work, round_id):
@@ -127,6 +128,19 @@ class ResidentEvaluation:
             layout,
             staged,
         )
+
+    def _work_plans(
+        self, work: list[tuple[int, list[str]]]
+    ) -> tuple[tuple[ClientEvalPlan, ...], tuple[str | None, ...]]:
+        """Every client's plan, and the split it refuses: for the same work, the same lists."""
+
+        key = tuple((place, tuple(splits)) for place, splits in work)
+        held = self._work.get(key)
+        if held is None:
+            held = tuple(zip(*(self._plan(place, splits) for place, splits in work), strict=True))
+            if len(self._work) < 8:
+                self._work[key] = held
+        return held  # type: ignore[return-value]
 
     def _plan(self, place: int, splits: list[str]) -> tuple[ClientEvalPlan, str | None]:
         """``batched_evaluation_plan``'s plan for a client, and the split it refuses, if any.

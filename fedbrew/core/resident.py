@@ -80,6 +80,10 @@ RESIDENT_RULES = ("fedavg", "local_sgd", "local_adamw")
 #: The share of the device's free memory every client's rows may take.
 ROWS_FRACTION = 0.25
 
+#: How many chunks' record plans are kept; a run whose clients change every
+#: round builds them again.
+MAX_KEPT_CHUNKS = 8
+
 
 # ---------------------------------------------------------------------------
 # Whether a run takes it
@@ -446,6 +450,8 @@ class ResidentRounds:
         self.model = self._placed(context.server._model_state)
         self.copier = HostCopy(self.device)
         self._client_states: tuple[Any, dict[str, Any] | None] | None = None
+        #: Per chunk of clients, their rules and record plans (``_record_plans``).
+        self._records: dict[tuple[int, ...], tuple[list[Any], list[_MemberPlan]]] = {}
         self.graphs = RoundGraphs(self.device, executor.cuda_graphs, executor.record)
         #: The dtypes the fold sums the model's tensors in, in order of first use.
         self.accumulation_dtypes = list(
@@ -895,9 +901,28 @@ class ResidentRounds:
                 dict(self.metadata),
                 self.trainable,
             )
-            members = [
-                self.member(place) for place in device_round.positions[chunk.start : chunk.stop]
-            ]
+            members, plans = self._record_plans(device_round, chunk.start, chunk.stop)
+            built = time.perf_counter()
+            stacked = members[0].batched_stacked_results(
+                _Requests(device_round.round_id, chunk.stop - chunk.start), plans, fit, members
+            )
+            results.append((stacked, chunk.seconds + time.perf_counter() - built))
+        return results
+
+    def _record_plans(
+        self, device_round: DeviceRound, start: int, stop: int
+    ) -> tuple[list[Any], list[_MemberPlan]]:
+        """A chunk's clients' rules and the plan fields their records read, kept per chunk.
+
+        The same clients in the same places have the same rules, structures,
+        rows and splits every round; only the program and whether the post-fit
+        pass ran are the round's, and those are set on the kept plans.
+        """
+
+        places = tuple(device_round.positions[start:stop])
+        held = self._records.get(places)
+        if held is None:
+            members = [self.member(place) for place in places]
             plans = [
                 _MemberPlan(
                     program=device_round.program,
@@ -908,14 +933,23 @@ class ResidentRounds:
                     eval_rows=device_round.eval_rows[slot],
                     train_data=self.splits[device_round.positions[slot]],
                 )
-                for slot in range(chunk.start, chunk.stop)
+                for slot in range(start, stop)
             ]
-            built = time.perf_counter()
-            stacked = members[0].batched_stacked_results(
-                _Requests(device_round.round_id, chunk.stop - chunk.start), plans, fit, members
-            )
-            results.append((stacked, chunk.seconds + time.perf_counter() - built))
-        return results
+            held = (members, plans)
+            if len(self._records) < MAX_KEPT_CHUNKS:
+                self._records[places] = held
+        members, plans = held
+        if plans[0].program != device_round.program or plans[0].evaluate != device_round.evaluate:
+            for plan in plans:
+                plan.program, plan.evaluate = device_round.program, device_round.evaluate
+        for plan, slot in zip(plans, range(start, stop), strict=True):
+            # A client's structure and rows are its own every round; checked, not assumed.
+            if (
+                plan.structure != device_round.structures[slot]
+                or plan.eval_rows != (device_round.eval_rows[slot])
+            ):
+                raise RuntimeError(f"round {device_round.round_id}: client {slot}'s plan changed")
+        return members, plans
 
     def _stand_in(self, size: int) -> StateStack:
         """A bucket's state stack as its records read it: its row size, and a row per client.
