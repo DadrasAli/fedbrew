@@ -151,7 +151,8 @@ reconditioned rows as above. `F*` at `λ = 0.01`: `0.45512445647395333`,
 `0.4738248007229769` and `0.48743008220058726`.
 
 The QR makes the rows depend on the LAPACK they are computed with, to about
-`1e-14`. The manifest records the Gram's spectrum as built (`gram_condition`,
+`1e-14`, and on how many threads it runs on: one and many give different last
+bits, so it runs on one thread, whatever the machine. The manifest records the Gram's spectrum as built (`gram_condition`,
 `gram_lambda_max`, `gram_lambda_min`) and what built it (`built_with`: torch,
 its BLAS and LAPACK, the CPU); two builds on different machines are the same
 problem to that precision and not bit for bit.

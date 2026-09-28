@@ -218,6 +218,19 @@ class ALibsvmSourceTest(unittest.TestCase):
             problem.load_source(missing, 4, 16)
 
 
+class TheConditionedDesignIgnoresTheThreadCountTest(unittest.TestCase):
+    def test_the_same_rows_on_one_thread_and_on_four(self) -> None:
+        design = problem.halton_normal_design(512, 16)
+        threads = torch.get_num_threads()
+        self.addCleanup(torch.set_num_threads, threads)
+        built = []
+        for count in (1, 4):
+            torch.set_num_threads(count)
+            built.append(problem.conditioned(design, 10.0))
+            self.assertEqual(torch.get_num_threads(), count)
+        self.assertTrue(torch.equal(*built))
+
+
 class OneRoundBatchedAgreesTest(ExecutorRuns):
     def test_each_problem_within_the_executor_tolerance(self) -> None:
         for loss, penalty in problem.PROBLEMS:

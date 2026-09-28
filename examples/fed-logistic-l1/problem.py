@@ -169,6 +169,10 @@ def label_base(dim: int) -> int:
     return primes(dim + 1)[dim]
 
 
+#: The threads the conditioning QR runs on (:func:`conditioned`).
+QR_THREADS = 1
+
+
 def conditioned(design: Tensor, condition_number: float) -> Tensor:
     """The design's centred columns orthonormalised and rescaled to a given conditioning.
 
@@ -177,11 +181,18 @@ def conditioned(design: Tensor, condition_number: float) -> Tensor:
     `A'A/n` of the result has eigenvalues from 1 down to `1/kappa`, so its
     condition number is `kappa` and `lambda_max = 1` whatever `kappa` is. The
     QR makes the design depend on the LAPACK it runs on, to about 1e-14, which
-    the manifest records (:func:`lapack_record`).
+    the manifest records (:func:`lapack_record`), and on the threads it runs
+    on: one thread and many give different last bits (measured 2026-09-28), so
+    it runs on one, and a machine's core count does not change the data.
     """
 
     rows, dim = design.shape
-    basis, _ = torch.linalg.qr(design - design.mean(0), mode="reduced")
+    threads = torch.get_num_threads()
+    torch.set_num_threads(QR_THREADS)
+    try:
+        basis, _ = torch.linalg.qr(design - design.mean(0), mode="reduced")
+    finally:
+        torch.set_num_threads(threads)
     scale = torch.logspace(0.0, -0.5 * math.log10(condition_number), dim, dtype=DTYPE)
     return math.sqrt(rows) * basis * scale
 
@@ -210,6 +221,7 @@ def lapack_record() -> dict[str, Any]:
         "lapack": found(r"LAPACK_INFO=(\w+)"),
         "cpu_capability": found(r"CPU capability usage: (\w+)"),
         "cpu": cpu,
+        "qr_threads": QR_THREADS,
     }
 
 
