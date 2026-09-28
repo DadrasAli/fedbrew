@@ -360,7 +360,16 @@ are folded in one weighted reduction per tensor (chapter 07 §3.3).
   (`row_batches`), which draws what the loader draws;
 - the same records, weights and state, because each client's rule builds its
   `FitResult` from its share of the stack with the code its own `fit` ends
-  with (`batched_result`);
+  with (`batched_result`). A rule whose result is that code unchanged --
+  `fedavg`, `local_sgd`, `local_adamw`, on a task that weighs a client by the
+  examples its post-fit pass counts -- builds the whole chunk's results at
+  once instead (`batched_stacked_results`), from the chunk's columns: the
+  post-fit metrics the task folded, each training step's `total`, and the
+  same arithmetic per client. They reach the aggregator as one
+  `StackedFitResults` a chunk (the seam's stacked path, chapter 01 §2), and a
+  run with every client in one bucket is bit-identical to the same run one
+  result at a time. `fedprox` and `scaffold` build their results client by
+  client;
 - the same arithmetic, to summation order: `functional_loss` is the loss
   `train_step` backpropagates, and the step is `torch.optim.SGD`'s and
   `AdamW`'s single-tensor step operation for operation. Across a stack,
@@ -584,6 +593,7 @@ python tools/bench_compare_runs.py --help
 | `tests/test_batch_orders.py` | §9: every planned order is its loader's own, for every task, update mode, shuffle, `drop_last` and `max_local_steps`, 520 clients at once included; the bulk seeds are `dataloader_seed`'s. |
 | `tests/test_batched_evaluator.py` | §9: ragged, shuffled and missing evaluation splits through both evaluators, the refusal's words, and the central pass's kept model and shard. |
 | `tests/test_stacked_fold.py` | A stack's rows fold to their mean, and one row exactly. |
+| `tests/test_stacked_results.py` | §9: the stacked path is each client's result exactly: the same metrics to the bit, the same refusals naming the same client, the model to `1e-12`; one bucket bit-identical to one result at a time. |
 
 ### Known failure modes
 

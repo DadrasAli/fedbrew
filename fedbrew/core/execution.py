@@ -16,6 +16,17 @@ The references are ``SequentialExecutor`` and ``SequentialEvaluator``
 runs, folds and measures through nothing else. They are what every run used
 before the seam existed, call for call. A batched executor is held to them by
 tolerance and never replaces them as the reference.
+
+The stacked path. An executor that trains clients together may also offer
+``fit_stacked``: the same results handed over a chunk at a time, each chunk
+one ``StackedFitResults`` (``fedbrew/core/stacked_results.py``) whose states,
+example counts and metrics are tensors over its clients. The loop takes it
+when the executor offers it for the round and the aggregator takes it
+(``aggregate_stacked``); otherwise the round goes through ``fit`` and
+``aggregate``. A stacked result stands for exactly the ``FitResult`` s it
+replaces: a server that folds one result at a time is handed them, built from
+the stacks, and the observer writes each client's records from them as it
+writes them from a result.
 """
 
 from __future__ import annotations
@@ -25,6 +36,7 @@ from typing import Any, Protocol
 
 from fedbrew.clients.base import ClientUpdate
 from fedbrew.core.protocol import ClientInfo, EvalResult, FitRequest, FitResult, RoundInfo
+from fedbrew.core.stacked_results import StackedFitResults, StackedResults
 from fedbrew.data.dataset import FederatedDataset
 from fedbrew.servers.base import ServerStrategy
 
@@ -49,6 +61,14 @@ class FitObserver(Protocol):
     def fitted(self, result: FitResult, seconds: float, done: int, total: int) -> None:
         """Record one client's result; ``done`` counts from 1 up to ``total``."""
 
+    # Optional, for the stacked path:
+    #
+    #   def fitted_stack(self, stacked, seconds, done, total) -> None
+    #
+    # records every client of one StackedFitResults, in order, as ``fitted``
+    # records each, ``done`` counting up to its last client and ``seconds``
+    # the stack's. An observer without it is handed each client's result.
+
 
 class ClientExecutor(Protocol):
     """How a round's sampled clients are run."""
@@ -66,6 +86,15 @@ class ClientExecutor(Protocol):
         number of sampled clients.
         """
 
+    # Optional, for the stacked path:
+    #
+    #   def fit_stacked(self, clients, requests, observer)
+    #       -> Iterator[StackedFitResults] | None
+    #
+    # the same results, one StackedFitResults per chunk in request order,
+    # each reported to the observer (``fitted_stack``) before it is yielded;
+    # None, before anything runs, when the round's rules cannot stack them.
+
 
 class Aggregator(Protocol):
     """How a round's results become the server's new state."""
@@ -82,6 +111,13 @@ class Aggregator(Protocol):
             NonFiniteStateError: If the round's aggregate is not finite; the
                 server's state is left as it was.
         """
+
+    # Optional, for the stacked path:
+    #
+    #   def aggregate_stacked(self, server, round_info, stacks) -> dict[str, Any]
+    #
+    # ``aggregate`` over an executor's ``fit_stacked``: the same fold of the
+    # same results, handed over a chunk at a time.
 
 
 class Evaluator(Protocol):
@@ -120,3 +156,18 @@ class StreamingAggregator:
         results: Iterable[FitResult],
     ) -> dict[str, Any]:
         return server.aggregate_stream(round_info, results)
+
+    def aggregate_stacked(
+        self,
+        server: ServerStrategy,
+        round_info: RoundInfo,
+        stacks: Iterable[StackedFitResults],
+    ) -> dict[str, Any]:
+        """``aggregate`` of stacked results: the server's own stream over them.
+
+        A server that folds a stack whole reads the stacks
+        (``StackedResults.stacks``, ``FedAvgServer``); any other iterates the
+        same results one by one, as ``aggregate`` hands them.
+        """
+
+        return server.aggregate_stream(round_info, StackedResults(stacks))

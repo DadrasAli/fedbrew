@@ -284,6 +284,19 @@ from adding the rows one by one only in summation order, and a stack of one
 row is added exactly as a plain state is. `tests/test_stacked_fold.py` pins
 both.
 
+**A stacked result is folded a stack at a time.** Handed a round's
+`StackedFitResults` (chapter 01 §2), `FedAvgServer` checks the metadata once
+per stacked result, as its first client's, and the keys and shapes once per
+state stack; folds each stack with `WeightedStateAccumulator.add_stacked`,
+which records every client's weight and extremes in request order, so a
+non-finite weight or state is refused naming the client the per-result fold
+names; and sums the metrics name by name over the clients in request order
+(`WeightedMetricAccumulator.add_columns`), the same additions as one result at
+a time, so the round's `fit_` averages are the same to the bit. The model can
+differ in summation order only: two buckets' rows used to arrive interleaved
+and fold in runs. A subclass that checks or weighs a result its own way is
+handed the results one by one. `tests/test_stacked_results.py`.
+
 ### 3.4 `fedlalr`
 
 Locally adaptive rates with synchronised optimizer state,

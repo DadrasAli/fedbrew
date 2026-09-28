@@ -338,7 +338,11 @@ has nothing to hold out.
    `sgd_mode_updates` or `own_loop_updates`) and `batched_result` (its
    `FitResult`, from the tail its `fit` shares). A subclass inherits the hooks
    but not the declaration, so a rule whose step differs from its parent's
-   runs sequentially rather than as its parent. `fedbrew/clients/batched_update.py`,
+   runs sequentially rather than as its parent. A rule whose `FitResult` is
+   `_fit_result`'s adds anything of its own through `_batched_extra_metrics`,
+   and then keeps `batched_stacked_supported`: its results are built for a
+   whole chunk at once and handed over stacked. Overriding `batched_result`
+   turns that off, and the rule's results are built one by one. `fedbrew/clients/batched_update.py`,
    chapter 11 §9.
 
 8. **Document it** in chapter 07 if it is in the package, and add any new

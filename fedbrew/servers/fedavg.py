@@ -19,6 +19,7 @@ from fedbrew.core.metrics import filter_metrics
 from fedbrew.core.protocol import ClientInfo, EvalResult, FitRequest, FitResult, RoundInfo
 from fedbrew.core.refusal import RunRefused
 from fedbrew.core.seeding import derive_seed
+from fedbrew.core.stacked_results import StackedFitResults, StackedResults
 from fedbrew.core.torch_utils import (
     StackedRow,
     WeightedStateAccumulator,
@@ -65,6 +66,33 @@ class WeightedMetricAccumulator:
         for name, value in metrics.items():
             self._totals[name] = self._totals.get(name, 0.0) + value * num_examples
             self._weights[name] = self._weights.get(name, 0) + num_examples
+
+    def add_columns(
+        self,
+        columns: Mapping[str, Sequence[float]],
+        counts: Sequence[int],
+        reported: Mapping[str, Sequence[bool]] | None = None,
+    ) -> None:
+        """Add several clients' metrics, name by name, as ``add`` adds them client by client.
+
+        ``columns[name][p]`` is client ``p``'s value and ``counts[p]`` its
+        weight; ``reported[name]``, where given, says which clients report
+        ``name``. A name's total is the same sum over the same clients in the
+        same order as ``add`` makes it, so the result is the same to the bit.
+        """
+
+        for name, values in columns.items():
+            mask = (reported or {}).get(name)
+            total = self._totals.get(name)
+            weight = self._weights.get(name, 0)
+            for position, (value, count) in enumerate(zip(values, counts, strict=True)):
+                if mask is not None and not mask[position]:
+                    continue
+                total = (0.0 if total is None else total) + value * count
+                weight += count
+            if total is not None:
+                self._totals[name] = total
+                self._weights[name] = weight
 
     def result(self) -> dict[str, float]:
         """Return the weighted mean of every accumulated metric.
@@ -302,6 +330,8 @@ class FedAvgServer(ServerStrategy):
         if self._model_state_metadata is None:
             raise ValueError("server model state metadata was not initialized")
 
+        if isinstance(results, StackedResults) and self._folds_stacks():
+            return self._accumulate_stacks(results.stacks())
         accumulator = WeightedStateAccumulator()
         metric_accumulator = WeightedMetricAccumulator()
         num_results = 0
@@ -315,6 +345,76 @@ class FedAvgServer(ServerStrategy):
         if not num_results:
             raise ValueError("FedAvg aggregate requires at least one result")
         return accumulator.result(), metric_accumulator.result()
+
+    def _folds_stacks(self) -> bool:
+        """Whether a round's stacks may be folded whole: this class's check and weight are used.
+
+        A subclass that checks or weighs a result its own way is handed the
+        results one by one (``StackedResults``), so it sees what it always saw.
+        """
+
+        cls = type(self)
+        return (
+            cls._compatible_model_state is FedAvgServer._compatible_model_state
+            and cls._result_weight is FedAvgServer._result_weight
+        )
+
+    def _accumulate_stacks(
+        self, stacks: Iterable[StackedFitResults]
+    ) -> tuple[dict[str, Any], dict[str, float]]:
+        """``_accumulate_fit_results`` over stacked results, a stack at a time.
+
+        The same checks, weights and sums as folding each stack's results in
+        order: the state and metadata are checked once per stack, which is
+        what the per-result check does for rows of one stack; the metrics are
+        summed name by name over the clients in order, to the bit; the states
+        are folded a stack at a time, as the rows of one stack always were.
+        """
+
+        assert self._model_state is not None and self._model_state_metadata is not None
+        accumulator = WeightedStateAccumulator()
+        metric_accumulator = WeightedMetricAccumulator()
+        num_results = 0
+        for stacked in stacks:
+            if not len(stacked):
+                continue
+            self._compatible_stack(stacked)
+            counts = stacked.counts()
+            weights = (
+                [1.0] * len(counts)
+                if self.aggregation_weighting == "uniform"
+                else [float(count) for count in counts]
+            )
+            accumulator.add_stacked(stacked.states, weights, stacked.client_ids)
+            columns, reported = stacked.metric_columns()
+            metric_accumulator.add_columns(columns, counts, reported)
+            num_results += len(stacked)
+        if not num_results:
+            raise ValueError("FedAvg aggregate requires at least one result")
+        return accumulator.result(), metric_accumulator.result()
+
+    def _compatible_stack(self, stacked: StackedFitResults) -> None:
+        """``_compatible_model_state`` for every client of a stack at once.
+
+        The metadata is one object's copies for every client, so it is
+        checked once, as the first client's; the keys and shapes once per
+        state stack, as its first client's in request order.
+        """
+
+        assert self._model_state is not None and self._model_state_metadata is not None
+        context = f"fit result from client {stacked.client_ids[0]!r}"
+        received_metadata = stacked.payload.get("model_state_metadata")
+        validate_federated_state_metadata(
+            self._model_state_metadata,
+            received_metadata if isinstance(received_metadata, Mapping) else None,
+            received_scope=payload_model_state_scope(stacked.payload, context=context),
+            context=context,
+        )
+        for stack, positions in sorted(stacked.states, key=lambda part: min(part[1])):
+            first = stacked.client_ids[min(positions)]
+            validate_state_matches(
+                self._model_state, stack.row(0), context=f"fit result from client {first!r}"
+            )
 
     def _compatible_model_state(self, result: FitResult) -> dict[str, Any]:
         """Return ``result``'s model state, refusing one this server cannot fold.

@@ -9,7 +9,6 @@ import torch
 
 from fedbrew.clients.batch_orders import LocalLoop
 from fedbrew.clients.batched_update import (
-    ClientBatchFit,
     ClientBatchPlan,
     LocalProgram,
     OptimizerSpec,
@@ -199,23 +198,10 @@ class FedAvgClient(TorchSGDClient):
             ),
         )
 
-    def batched_result(
-        self, request: FitRequest, plan: ClientBatchPlan, fit: ClientBatchFit
-    ) -> FitResult:
-        """The FitResult ``fit`` returns, from the batched executor's share for this client."""
+    def _batched_extra_metrics(self, plan: ClientBatchPlan) -> dict[str, float]:
+        """The rate this round's update stepped at, after the update's own metrics."""
 
-        metrics, evaluated_num_examples = self._batched_post_fit(plan, fit)
-        return self._fit_result(
-            request,
-            metrics=metrics,
-            evaluated_num_examples=evaluated_num_examples,
-            training_outputs=fit.training_outputs,
-            optimizer_steps=fit.optimizer_steps,
-            model_state=fit.model_state,
-            model_state_metadata=fit.model_state_metadata,
-            trainable_parameters=fit.trainable_parameters,
-            extra_metrics={"client_learning_rate": float(plan.program.optimizer.lr)},
-        )
+        return {"client_learning_rate": float(plan.program.optimizer.lr)}
 
     def get_state(self) -> dict[str, Any]:
         """Return checkpointable client configuration and metadata."""

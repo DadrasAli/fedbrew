@@ -6,7 +6,7 @@ import copy
 import math
 import random
 import warnings
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 import torch
@@ -492,11 +492,22 @@ class WeightedStateAccumulator:
             self._fold_pending()
             self._add_state(state, weight, source)
 
-    def _add_state(self, state: Mapping[str, Any], weight: float, source: str | None) -> None:
-        """Add one plain state: into the sums now, with its extremes."""
+    def _add_state(
+        self,
+        state: Mapping[str, Any],
+        weight: float,
+        source: str | None,
+        extremes: dict[str, Any] | None = None,
+    ) -> None:
+        """Add one plain state: into the sums now, with its extremes.
 
-        extremes: dict[str, tuple[Tensor, Tensor]] = {}
-        self._extremes.append((source, extremes))
+        ``extremes`` is the state's entry when ``add_stacked`` has placed it
+        already; otherwise one is appended for ``source``.
+        """
+
+        if extremes is None:
+            extremes = {}
+            self._extremes.append((source, extremes))
         for key, value in state.items():
             if not isinstance(value, Tensor):
                 raise TypeError(f"state value for {key} is not a tensor")
@@ -522,6 +533,74 @@ class WeightedStateAccumulator:
         self._total_weight += weight
         self._count += 1
 
+    def add_stacked(
+        self,
+        parts: Sequence[tuple[StateStack, Sequence[int]]],
+        weights: Sequence[float],
+        sources: Sequence[str | None],
+    ) -> None:
+        """Add several clients' states at once, as ``add`` adds them one by one in order.
+
+        Client ``p`` has weight ``weights[p]`` and sent ``sources[p]``; its
+        state is a row of one of ``parts``' stacks, each given with, per row,
+        its client's position. Each stack is folded whole. Everything ``add``
+        checks and names is checked and named as it would be for the clients
+        in order: the first non-finite weight, and, if the mean is not finite,
+        the first client whose state is not.
+
+        Raises:
+            NonFiniteStateError: If a weight is NaN or infinite.
+            ValueError: If a stack's keys differ from the states already added.
+        """
+
+        for weight in weights:
+            if not math.isfinite(float(weight)):
+                raise NonFiniteStateError(f"client weight must be finite, got {float(weight)}")
+        self._fold_pending()
+        entries: list[dict[str, Any]] = [{} for _ in weights]
+        self._extremes.extend(zip(sources, entries, strict=True))
+        summed = [True] * len(weights)
+        for stack, positions in parts:
+            if (self._count or self._reference) and set(stack.tensors) != set(self._reference):
+                raise ValueError("all states must have the same keys")
+            if not stack.foldable:
+                # Added one by one, as add adds them, weight and extremes included.
+                for row, position in enumerate(positions):
+                    self._add_state(
+                        stack.row(row), float(weights[position]), None, entries[position]
+                    )
+                    summed[position] = False
+                continue
+            self._hold(stack)
+            self._pending = (
+                stack,
+                list(range(len(positions))),
+                [float(weights[position]) for position in positions],
+                [entries[position] for position in positions],
+            )
+            self._count += len(positions)
+            self._fold_pending()
+        # Summed in the clients' order, as add sums them.
+        for weight, pending in zip(weights, summed, strict=True):
+            if pending:
+                self._total_weight += float(weight)
+
+    def _hold(self, stack: StateStack) -> None:
+        """Check a stack against the states added so far, and set up the sums it starts."""
+
+        for key, tensor in stack.tensors.items():
+            shape, dtype = tensor.shape[1:], tensor.dtype
+            reference = self._reference.get(key)
+            if reference is None:
+                # Its dtype and shape are all a floating reference is read
+                # for; a real row would keep the whole stack alive.
+                self._reference[key] = torch.empty(shape, dtype=dtype, device="meta")
+                self._totals[key] = torch.zeros(shape, dtype=_accumulation_dtype(dtype))
+            elif dtype != reference.dtype or shape != reference.shape:
+                raise ValueError(
+                    f"state tensor {key!r} must have matching dtype and shape across clients"
+                )
+
     def _add_row(self, row: StackedRow, weight: float, source: str | None) -> None:
         """Hold one stacked row's weight until its stack is folded."""
 
@@ -529,18 +608,7 @@ class WeightedStateAccumulator:
         if self._pending is not None and self._pending[0] is not stack:
             self._fold_pending()
         if self._pending is None:
-            for key, tensor in stack.tensors.items():
-                shape, dtype = tensor.shape[1:], tensor.dtype
-                reference = self._reference.get(key)
-                if reference is None:
-                    # Its dtype and shape are all a floating reference is read
-                    # for; a real row would keep the whole stack alive.
-                    self._reference[key] = torch.empty(shape, dtype=dtype, device="meta")
-                    self._totals[key] = torch.zeros(shape, dtype=_accumulation_dtype(dtype))
-                elif dtype != reference.dtype or shape != reference.shape:
-                    raise ValueError(
-                        f"state tensor {key!r} must have matching dtype and shape across clients"
-                    )
+            self._hold(stack)
             self._pending = (stack, [], [], [])
         extremes: dict[str, tuple[Tensor, Tensor]] = {}
         self._extremes.append((source, extremes))

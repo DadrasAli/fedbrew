@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
@@ -67,6 +68,7 @@ from fedbrew.clients.batched_update import (
 from fedbrew.clients.torch_sgd_client import trainable_parameter_count
 from fedbrew.core.execution import ClientPool, FitObserver
 from fedbrew.core.protocol import FitRequest, FitResult
+from fedbrew.core.stacked_results import StackedFitResults
 from fedbrew.core.torch_utils import StateStack
 from fedbrew.tasks.base import BatchableTask
 
@@ -123,33 +125,13 @@ class BatchedExecutor:
         requests: list[FitRequest],
         observer: FitObserver,
     ) -> Iterator[FitResult]:
-        if not requests:
-            return
         members = [
             clients[request.client_id] if isinstance(clients, Mapping) else clients
             for request in requests
         ]
-        task = members[0].task
-        template = task.build_model(members[0].model_config)
-        plans = _plans(members, requests, template)
-        train, evaluation = plan_round(plans, requests[0].round_id)
         done, total = 0, len(requests)
-        chunks = list(self._chunks(task, template, plans, train))
-        # Kept only while a round is one chunk, so what is held between rounds
-        # is what one chunk holds anyway.
-        kept = self._rows if len(chunks) == 1 else None
-        self._rows = {}
-        for start, stop in chunks:
-            self.record["largest_chunk_clients"] = max(
-                self.record["largest_chunk_clients"], stop - start
-            )
-            chunk_started = time.perf_counter()
-            fits = _train_chunk(
-                task, template, plans[start:stop], (train, evaluation), kept, self._rows
-            )
-            if kept is None:
-                self._rows = {}
-            share = (time.perf_counter() - chunk_started) / (stop - start)
+        for start, stop, plans, fits, seconds in self._trained(members, requests, _train_chunk):
+            share = seconds / (stop - start)
             for index in range(start, stop):
                 result_started = time.perf_counter()
                 result = members[index].batched_result(
@@ -162,6 +144,92 @@ class BatchedExecutor:
                 # Held no longer than the consumer holds it: a result is a row
                 # of its chunk's stack and keeps the whole stack alive.
                 result = None  # type: ignore[assignment]
+
+    def fit_stacked(
+        self,
+        clients: ClientPool,
+        requests: Sequence[FitRequest],
+        observer: FitObserver,
+    ) -> Iterator[StackedFitResults] | None:
+        """The round's results as one stacked result per chunk, or None if a rule cannot build them.
+
+        What ``fit`` yields, handed over a chunk at a time: each chunk's
+        clients' results as one :class:`StackedFitResults`, built by their
+        rule (``batched_stacked_results``) from the chunk's stacked tensors,
+        in request order. Decided before anything runs: None when some
+        client's rule builds its results only one by one, and the round then
+        goes through ``fit``.
+        """
+
+        requests = list(requests)
+        members = [
+            clients[request.client_id] if isinstance(clients, Mapping) else clients
+            for request in requests
+        ]
+        for member in {type(member): member for member in members}.values():
+            supported = getattr(member, "batched_stacked_supported", None)
+            if not callable(supported) or not supported():
+                return None
+        return self._fit_stacked(members, requests, observer)
+
+    def _fit_stacked(
+        self, members: list[Any], requests: list[FitRequest], observer: FitObserver
+    ) -> Iterator[StackedFitResults]:
+        report = getattr(observer, "fitted_stack", None)
+        done, total = 0, len(requests)
+        trained = self._trained(members, requests, _train_chunk_stacked)
+        for start, stop, plans, chunk, seconds in trained:
+            built = time.perf_counter()
+            stacked = members[start].batched_stacked_results(
+                requests[start:stop], plans[start:stop], chunk, members[start:stop]
+            )
+            chunk = None
+            seconds += time.perf_counter() - built
+            if callable(report):
+                done += len(stacked)
+                report(stacked, seconds, done, total)
+            else:
+                # An observer that records one result at a time is handed
+                # each, with its share of the chunk's time.
+                for result in stacked.results():
+                    done += 1
+                    observer.fitted(result, seconds / len(stacked), done, total)
+            yield stacked
+            # Held no longer than the consumer holds it: it keeps the stacks alive.
+            stacked = None  # type: ignore[assignment]
+
+    def _trained(
+        self,
+        members: list[Any],
+        requests: list[FitRequest],
+        train_chunk: Callable[..., Any],
+    ) -> Iterator[tuple[int, int, list[ClientBatchPlan], Any, float]]:
+        """Plan the round, then train it a chunk at a time with ``train_chunk``.
+
+        Yields each chunk's bounds, the round's plans, what ``train_chunk``
+        returned, and the seconds it took.
+        """
+
+        if not requests:
+            return
+        task = members[0].task
+        template = task.build_model(members[0].model_config)
+        plans = _plans(members, requests, template)
+        orders = plan_round(plans, requests[0].round_id)
+        chunks = list(self._chunks(task, template, plans, orders[0]))
+        # Kept only while a round is one chunk, so what is held between rounds
+        # is what one chunk holds anyway.
+        kept = self._rows if len(chunks) == 1 else None
+        self._rows = {}
+        for start, stop in chunks:
+            self.record["largest_chunk_clients"] = max(
+                self.record["largest_chunk_clients"], stop - start
+            )
+            chunk_started = time.perf_counter()
+            trained = train_chunk(task, template, plans[start:stop], orders, kept, self._rows)
+            if kept is None:
+                self._rows = {}
+            yield start, stop, plans, trained, time.perf_counter() - chunk_started
 
     def _chunks(
         self, task: Any, template: nn.Module, plans: list[ClientBatchPlan], train: RoundOrders
@@ -207,6 +275,42 @@ def _plans(
     return plans
 
 
+def _train_buckets(
+    task: Any,
+    template: nn.Module,
+    plans: Sequence[ClientBatchPlan],
+    orders: tuple[RoundOrders, RoundOrders],
+    kept: Mapping[tuple[int, ...], _Rows] | None,
+    keep: dict[tuple[int, ...], _Rows] | None,
+) -> tuple[list[str], list[tuple[list[int], dict[str, Tensor], Any, Any]]]:
+    """Train one chunk's clients, bucket by bucket.
+
+    Returns the federated state's keys, and per bucket its clients (indices
+    into ``plans``), its trained stack, and both passes' outputs, still on
+    the device.
+    """
+
+    state_keys = list(task.get_federated_model_state(template))
+    names = [name for name, _ in template.named_parameters()]
+    if set(state_keys) != set(names):
+        raise ValueError(
+            "the batched executor trains parameters, and this model's federated state "
+            f"is not exactly its parameters: {sorted(set(state_keys) ^ set(names))}"
+        )
+    buffers = dict(template.named_buffers())
+    buckets: dict[tuple[Any, ...], list[int]] = {}
+    for index, plan in enumerate(plans):
+        buckets.setdefault(plan.bucket, []).append(index)
+    trained = [
+        (
+            members,
+            *_run_bucket(task, template, buffers, [plans[i] for i in members], orders, kept, keep),
+        )
+        for members in buckets.values()
+    ]
+    return state_keys, trained
+
+
 def _train_chunk(
     task: Any,
     template: nn.Module,
@@ -223,28 +327,9 @@ def _train_chunk(
     ``keep`` receives this chunk's.
     """
 
-    state_keys = list(task.get_federated_model_state(template))
-    names = [name for name, _ in template.named_parameters()]
-    if set(state_keys) != set(names):
-        raise ValueError(
-            "the batched executor trains parameters, and this model's federated state "
-            f"is not exactly its parameters: {sorted(set(state_keys) ^ set(names))}"
-        )
+    state_keys, trained = _train_buckets(task, template, plans, orders, kept, keep)
     metadata = task.federated_model_state_metadata(template)
     trainable = trainable_parameter_count(template)
-    buffers = dict(template.named_buffers())
-
-    buckets: dict[tuple[Any, ...], list[int]] = {}
-    for index, plan in enumerate(plans):
-        buckets.setdefault(plan.bucket, []).append(index)
-
-    trained = [
-        (
-            members,
-            *_run_bucket(task, template, buffers, [plans[i] for i in members], orders, kept, keep),
-        )
-        for members in buckets.values()
-    ]
     # Every bucket's outputs cross to the host together, once for the chunk,
     # a stacked bucket's post-fit outputs folded into metrics first.
     parts: list[Any] = []
@@ -280,6 +365,101 @@ def _train_chunk(
                 eval_metrics=evaluation if isinstance(evaluation, tuple) else None,
             )
     return [fit for fit in fits if fit is not None]
+
+
+def _train_chunk_stacked(
+    task: Any,
+    template: nn.Module,
+    plans: Sequence[ClientBatchPlan],
+    orders: tuple[RoundOrders, RoundOrders],
+    kept: Mapping[tuple[int, ...], _Rows] | None = None,
+    keep: dict[tuple[int, ...], _Rows] | None = None,
+) -> ChunkFit:
+    """``_train_chunk``, for a rule that builds its results stacked: each bucket as columns.
+
+    What a rule's result reads of the passes' outputs is kept per bucket over
+    its clients, not per client: each training step's ``total``, and the
+    post-fit pass's metrics and example counts as the task folded them
+    (``stacked_metrics``). A bucket the task does not fold -- one client, or
+    a task without the hook -- keeps each client's post-fit outputs. All of
+    it crosses to the host in one copy for the chunk.
+    """
+
+    state_keys, trained = _train_buckets(task, template, plans, orders, kept, keep)
+    parts: list[Any] = []
+    columns: list[Tensor] = []
+    layout: list[tuple[int | None, int | None, list[str], bool]] = []
+    for _, _, (outputs, counts), evaluated in trained:
+        totals = None
+        if outputs and "total" in outputs[0]:
+            totals = len(columns)
+            columns.append(torch.stack([output["total"] for output in outputs]))
+        eval_part, names, folded = None, [], False
+        if evaluated is not None:
+            stacked_metrics = getattr(task, "stacked_metrics", None)
+            if callable(stacked_metrics) and len(evaluated[1]) > 1 and evaluated[0]:
+                metrics, examples = stacked_metrics(*evaluated)
+                names, folded = list(metrics), True
+                eval_part = len(columns)
+                columns.extend([*metrics.values(), examples])
+            else:
+                eval_part = len(parts)
+                parts.append(evaluated)
+        layout.append((totals, eval_part, names, folded))
+        del counts
+    groups, values = host_values(parts, columns)
+    buckets = []
+    for (members, stack, _, _), (totals, eval_part, names, folded) in zip(
+        trained, layout, strict=True
+    ):
+        bucket = BucketFit(
+            positions=members,
+            states=StateStack({key: stack[key] for key in state_keys}),
+            step_totals=None if totals is None else values[totals],
+        )
+        if folded:
+            assert eval_part is not None
+            bucket.eval_metrics = {
+                name: values[eval_part + offset] for offset, name in enumerate(names)
+            }
+            bucket.eval_examples = [int(count) for count in values[eval_part + len(names)]]
+        elif eval_part is not None:
+            bucket.eval_outputs = groups[eval_part]
+        buckets.append(bucket)
+    return ChunkFit(
+        buckets=buckets,
+        model_state_metadata=task.federated_model_state_metadata(template),
+        trainable_parameters=trainable_parameter_count(template),
+    )
+
+
+@dataclass(slots=True)
+class BucketFit:
+    """One bucket's share of a trained chunk, over its clients (``_train_chunk_stacked``)."""
+
+    #: The bucket's clients, as positions in the chunk, in the order of its rows.
+    positions: list[int]
+    #: Their trained states: row ``r`` is client ``positions[r]``'s.
+    states: StateStack
+    #: Each training step's ``total``, step-major -- client ``r``'s steps are
+    #: ``step_totals[r::len(positions)]`` -- or None when the steps report none.
+    step_totals: list[float] | None = None
+    #: The post-fit pass's ``compute_metrics`` per name over the rows, and its
+    #: example counts, as the task folded them; None when it did not.
+    eval_metrics: dict[str, list[float]] | None = None
+    eval_examples: list[int] | None = None
+    #: Each row's post-fit outputs, when the pass ran and was not folded.
+    eval_outputs: list[list[dict[str, float]]] | None = None
+
+
+@dataclass(slots=True)
+class ChunkFit:
+    """A trained chunk, bucket by bucket, for a rule that builds its results stacked."""
+
+    buckets: list[BucketFit]
+    #: ``task.federated_model_state_metadata`` of the model.
+    model_state_metadata: dict[str, Any]
+    trainable_parameters: int
 
 
 def _run_bucket(
@@ -541,6 +721,19 @@ def host_floats(
     ``float()`` would give.
     """
 
+    return host_values(parts, [])[0]
+
+
+def host_values(
+    parts: Sequence[tuple[list[dict[str, Tensor]], Sequence[int]]],
+    columns: Sequence[Tensor],
+) -> tuple[list[list[list[dict[str, float]]]], list[list[float]]]:
+    """``host_floats`` of ``parts``, and each of ``columns`` as a list of floats, in one copy.
+
+    A column is read in its own order, flattened: a ``(steps, clients)``
+    tensor becomes its values step by step.
+    """
+
     pieces: list[Tensor] = []
     layout: list[tuple[list[str], int, int]] = []
     for outputs, counts in parts:
@@ -550,6 +743,8 @@ def host_floats(
                 torch.stack([output[key] for output in outputs]).reshape(-1).to(torch.float64)
             )
         layout.append((keys, len(outputs), len(counts)))
+    for column in columns:
+        pieces.append(column.reshape(-1).to(torch.float64))
     values: list[float] = []
     if pieces:
         # Joined where they are, so a GPU round is one device-to-host copy.
@@ -558,17 +753,21 @@ def host_floats(
     groups: list[list[list[dict[str, float]]]] = []
     offset = 0
     for (keys, positions, size), (_, counts) in zip(layout, parts, strict=True):
-        columns = {}
+        read = {}
         for key in keys:
-            columns[key] = values[offset : offset + positions * size]
+            read[key] = values[offset : offset + positions * size]
             offset += positions * size
         groups.append(
             [
-                [{key: columns[key][step * size + split] for key in keys} for step in range(count)]
+                [{key: read[key][step * size + split] for key in keys} for step in range(count)]
                 for split, count in enumerate(counts)
             ]
         )
-    return groups
+    lists: list[list[float]] = []
+    for column in columns:
+        lists.append(values[offset : offset + column.numel()])
+        offset += column.numel()
+    return groups, lists
 
 
 class _Bucket:

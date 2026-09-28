@@ -78,6 +78,19 @@ runs `BatchedEvaluator` (`fedbrew/core/batched_evaluator.py`), which measures
 the due clients together and keeps one model for the central pass. Chapter 11
 §9.
 
+**The seam has a stacked path.** An executor may also offer `fit_stacked`: the
+same results handed over a chunk at a time, one `StackedFitResults`
+(`fedbrew/core/stacked_results.py`) per chunk, whose states are rows of the
+chunk's stacks and whose example counts and metrics are tensors over its
+clients. The loop takes it when the executor offers it for the round and the
+aggregator has `aggregate_stacked` (`loop._aggregate_round`); otherwise the
+round goes through `fit` and `aggregate`, which the `SequentialExecutor` always
+does. A stacked result stands for exactly the `FitResult`s it replaces: the
+observer writes each client's records from it (`fitted_stack`), a server that
+folds a stack whole reads the stacks (`FedAvgServer`, and `FedOptServer`
+through it), and any other server iterates each client's `FitResult`, built
+from the stack, in request order (`StackedResults`).
+
 A round's checkpoints become visible last, so a kill anywhere in a round leaves
 a checkpoint whose round the metric history already holds, which a resume can
 continue (`POST-F24`).
@@ -293,6 +306,7 @@ Four files, written every round. Chapter 09 covers them in full.
 | --- | --- |
 | `fedbrew/core/loop.py` | the round loop; `run_fl_loop` at line 96 |
 | `fedbrew/core/execution.py` | the executor seam: `ClientExecutor`, `Aggregator`, `Evaluator`, `FitObserver` |
+| `fedbrew/core/stacked_results.py` | the seam's stacked path: `StackedFitResults`, `StackedResults` |
 | `fedbrew/core/runner.py` | `run()`, the CLI, and the override application |
 | `fedbrew/core/factory.py` | config → built objects |
 | `fedbrew/core/registry.py` | the six registries; `register_builtin_components` is the whole built-in set |
@@ -349,7 +363,7 @@ python -m pytest tests/test_lazy_client_pool_selection.py \
 | `tests/test_lazy_client_pool_selection.py` | The pool follows from the dataset, not a config key. |
 | `tests/test_auxiliary_state_aggregation.py` | Algorithm state travels in `payload` and survives aggregation. |
 | `tests/test_aggregation_peak_memory.py` | Aggregation retains the same bytes at 4, 16 and 64 clients, and the fit phase is a generator. |
-| `tests/test_execution_seam.py` | §2: the loop runs, folds and measures through the executor seam alone, and the references are the defaults. |
+| `tests/test_execution_seam.py` | §2: the loop runs, folds and measures through the executor seam alone, and the references are the defaults; the stacked path is taken every round the executor and aggregator both offer it, hands the aggregator exactly the stacks yielded and the server each client's result, and writes the default run's records. |
 | `tests/test_tied_weight_federation.py` | The federated-state group handles tied weights. |
 | `tests/test_lora_adapter_federation.py` | Adapter-scoped state federates without the full model. |
 | `tests/test_federated_state_compatibility.py` | §5: FedAvg, SCAFFOLD and FedLALR each refuse a result of the wrong scope, adapter identity, keys or shapes, and leave their state unchanged (`POST-F28`). |

@@ -61,6 +61,7 @@ from fedbrew.core.protocol import (
 )
 from fedbrew.core.refusal import RunRefused
 from fedbrew.core.runtime_setup import capture_rng_state, restore_rng_state
+from fedbrew.core.stacked_results import StackedFitResults
 from fedbrew.core.state import (
     ClientEvaluationRecord,
     ClientMetricRecord,
@@ -264,8 +265,8 @@ def run_fl_loop(
                 # state carry over unchanged, rather than each strategy defining an
                 # update over no results.
                 if requests:
-                    server_payload = aggregator.aggregate(
-                        server, round_info, executor.fit(client, requests, observer)
+                    server_payload = _aggregate_round(
+                        executor, aggregator, server, round_info, client, requests, observer
                     )
             except NonFiniteStateError as error:
                 # Same contract as the monitor below: a model that went non-finite
@@ -817,6 +818,57 @@ class _RoundFitObserver:
         self._totals.num_examples += result.num_examples
         if self._on_progress is not None:
             self._on_progress(self._round_id, done, total, "fit")
+
+    def fitted_stack(
+        self, stacked: StackedFitResults, seconds: float, done: int, total: int
+    ) -> None:
+        """``fitted`` for every client of a stack, in order: the same records and calls."""
+
+        self._totals.fit_seconds += seconds
+        counts = stacked.counts()
+        self._state.client_update_metrics_history.extend(
+            ClientMetricRecord(
+                round_id=stacked.round_id,
+                client_id=client_id,
+                phase="fit",
+                num_examples=count,
+                metrics=dict(metrics),
+            )
+            for client_id, count, metrics in zip(
+                stacked.client_ids, counts, stacked.metric_rows(), strict=True
+            )
+        )
+        for count in counts:
+            self._totals.num_examples += count
+        if self._on_progress is not None:
+            first = done - len(stacked)
+            for finished in range(first + 1, done + 1):
+                self._on_progress(self._round_id, finished, total, "fit")
+
+
+def _aggregate_round(
+    executor: ClientExecutor,
+    aggregator: Aggregator,
+    server: ServerStrategy,
+    round_info: RoundInfo,
+    client: ClientPool,
+    requests: list[FitRequest],
+    observer: _RoundFitObserver,
+) -> dict[str, Any]:
+    """Run and fold the round's clients: stacked when the executor and aggregator both can.
+
+    The stacked path (``fedbrew/core/execution.py``) hands over the same
+    results a chunk at a time; the executor says before anything runs whether
+    this round's rules can stack them.
+    """
+
+    fit_stacked = getattr(executor, "fit_stacked", None)
+    aggregate_stacked = getattr(aggregator, "aggregate_stacked", None)
+    if callable(fit_stacked) and callable(aggregate_stacked):
+        stacks = fit_stacked(client, requests, observer)
+        if stacks is not None:
+            return aggregate_stacked(server, round_info, stacks)
+    return aggregator.aggregate(server, round_info, executor.fit(client, requests, observer))
 
 
 class SequentialExecutor:

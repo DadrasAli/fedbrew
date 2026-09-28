@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Generic, TypeVar, cast
 
 import torch
@@ -48,6 +48,7 @@ from fedbrew.core.protocol import (
 )
 from fedbrew.core.runtime_setup import dataloader_seed
 from fedbrew.core.seeding import client_seed
+from fedbrew.core.stacked_results import MetricColumns, StackedFitResults
 from fedbrew.core.torch_utils import (
     RESIDENT_STATE_ATTR,
     forget_resident_state,
@@ -606,6 +607,89 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
             model_state=fit.model_state,
             model_state_metadata=fit.model_state_metadata,
             trainable_parameters=fit.trainable_parameters,
+            extra_metrics=self._batched_extra_metrics(plan),
+        )
+
+    def _batched_extra_metrics(self, plan: ClientBatchPlan) -> dict[str, float]:
+        """What this rule's result adds after the update's own metrics (``_fit_result``)."""
+
+        del plan
+        return {}
+
+    def batched_stacked_supported(self) -> bool:
+        """Whether this client's results can be built for a whole chunk at once.
+
+        They can when they are ``_fit_result``'s, as this class builds them,
+        and the task weighs a client by the examples its post-fit pass
+        counted -- ``federated_aggregation_weight`` as ``TaskAdapter`` defines
+        it -- so the per-step outputs are read for nothing but their
+        ``total``. A rule whose result is its own (FedProx, SCAFFOLD) builds
+        it client by client.
+        """
+
+        cls = type(self)
+        return (
+            cls.batched_result is TorchSGDClient.batched_result
+            and cls._fit_result is TorchSGDClient._fit_result
+            and cls._batched_post_fit is TorchSGDClient._batched_post_fit
+            and type(self.task).federated_aggregation_weight
+            is TaskAdapter.federated_aggregation_weight
+        )
+
+    def batched_stacked_results(
+        self,
+        requests: Sequence[FitRequest],
+        plans: Sequence[ClientBatchPlan],
+        chunk: Any,
+        members: Sequence[TorchSGDClient[Any]],
+    ) -> StackedFitResults:
+        """``batched_result`` for every client of a chunk, as one stacked result.
+
+        ``chunk`` is the chunk trained (``_train_chunk_stacked``), and
+        ``members[p]`` is client ``p``'s rule, this one first. Each client's
+        count, metrics and payload are the ones its ``batched_result`` would
+        return -- the same numbers under the same names in the same order, and
+        the same refusal -- computed a column at a time where the chunk holds
+        them as columns: the post-fit metrics the task folded, and each
+        client's own ``_fit_result`` arithmetic on them.
+        """
+
+        size = len(requests)
+        columns = MetricColumns(size)
+        evaluated = _stacked_post_fit(chunk, plans, members, columns)
+        totals = _step_totals(chunk, size)
+        num_examples = [int(count) for count in evaluated]
+        if any(count < 0 for count in num_examples):
+            raise ValueError("task federated aggregation weight must be non-negative")
+        first = chunk.buckets[0].states
+        if first.row_size is None:
+            first.row_size = model_state_size(first.row(0))
+        communicated_parameters, communicated_bytes = first.row_size
+        everyone = range(size)
+        columns.put("optimizer_steps", everyone, [float(len(plan.structure)) for plan in plans])
+        columns.put("active_target_tokens", everyone, [float(total) for total in totals])
+        for name, value in (
+            ("trainable_parameters", float(chunk.trainable_parameters)),
+            ("communicated_parameters", float(communicated_parameters)),
+            ("communicated_bytes", float(communicated_bytes)),
+        ):
+            columns.put(name, everyone, [value] * size)
+        for position, (member, plan) in enumerate(zip(members, plans, strict=True)):
+            for name, value in member._batched_extra_metrics(plan).items():
+                columns.put(name, [position], [value])
+        metrics, reported = columns.tensors()
+        metadata = chunk.model_state_metadata
+        return StackedFitResults(
+            round_id=requests[0].round_id,
+            client_ids=[member.client_id for member in members],
+            num_examples=torch.tensor(num_examples, dtype=torch.int64),
+            states=[(bucket.states, bucket.positions) for bucket in chunk.buckets],
+            metrics=metrics,
+            reported=reported,
+            payload={
+                "model_state_scope": str(metadata["model_state_scope"]),
+                "model_state_metadata": metadata,
+            },
         )
 
     def _batched_post_fit(
@@ -1183,6 +1267,65 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
             self.client_id,
             phase,
         )
+
+
+def _stacked_post_fit(
+    chunk: Any,
+    plans: Sequence[ClientBatchPlan],
+    members: Sequence[TorchSGDClient[Any]],
+    columns: MetricColumns,
+) -> list[int]:
+    """Each client's ``_batched_post_fit``: its metrics into ``columns``, its count returned.
+
+    A bucket whose post-fit metrics the task folded is read a column at a
+    time, each client's own metrics list filtering its values as it filters
+    its dict (a run's clients share one list); any other bucket is read
+    client by client, through ``_batched_post_fit`` itself.
+    """
+
+    evaluated = [0] * len(plans)
+    for bucket in chunk.buckets:
+        positions = bucket.positions
+        if bucket.eval_metrics is None:
+            for row, position in enumerate(positions):
+                metrics, evaluated[position] = members[position]._batched_post_fit(
+                    plans[position],
+                    ClientBatchFit(
+                        model_state={},
+                        training_outputs=[],
+                        eval_outputs=None
+                        if bucket.eval_outputs is None
+                        else bucket.eval_outputs[row],
+                        optimizer_steps=0,
+                        model_state_metadata={},
+                        trainable_parameters=0,
+                    ),
+                )
+                for name, value in metrics.items():
+                    columns.put(name, [position], [value])
+            continue
+        computed = {f"fit_{name}": values for name, values in bucket.eval_metrics.items()}
+        kept: dict[tuple[str, ...], list[int]] = {}
+        for row, position in enumerate(positions):
+            kept.setdefault(tuple(members[position].metrics), []).append(row)
+            evaluated[position] = bucket.eval_examples[row]
+        for requested, rows in kept.items():
+            for name, values in filter_metrics(computed, list(requested)).items():
+                columns.put(name, [positions[row] for row in rows], [values[row] for row in rows])
+    return evaluated
+
+
+def _step_totals(chunk: Any, size: int) -> list[float]:
+    """Each client's ``active_target_tokens``: ``_fit_result``'s sum of its steps' ``total``."""
+
+    totals = [0.0] * size
+    for bucket in chunk.buckets:
+        if bucket.step_totals is None:
+            continue
+        width = len(bucket.positions)
+        for row, position in enumerate(bucket.positions):
+            totals[position] = sum(float(total) for total in bucket.step_totals[row::width])
+    return totals
 
 
 def trainable_parameter_count(model: torch.nn.Module) -> int:
