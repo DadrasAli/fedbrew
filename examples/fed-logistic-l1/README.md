@@ -190,7 +190,7 @@ against `x*`'s own support, since nothing was planted. The L1 settings:
 | `fed-logistic-l1-a9a-lambda0.001` | 0.001 | 0.3468377180429282 |
 | `fed-logistic-l1-a9a-lambda0.03` | 0.03 | 0.5291036251024969 |
 | `fed-logistic-l1-a9a-lambda0.05` | 0.05 | 0.5765317125957747 |
-| `fed-logistic-l1-ijcnn1-32-lambda0.01` | 0.01 | 0.4278836450209717 |
+| `fed-logistic-l1-ijcnn1-32-lambda0.01` | 0.01 | 0.42788364502097165 |
 | `fed-logistic-l1-gisette-lambda5e-5` | 5e-5 | 0.16230244614601907 |
 | `fed-logistic-l1-gisette-lambda5e-4` | 5e-4 | 0.4220170868705644 |
 | `fed-logistic-l1-gisette-lambda0.001` | 0.001 | 0.521996719845196 |
