@@ -200,6 +200,44 @@ class WorkersPlanWhatThisProcessPlansTest(unittest.TestCase):
                 self.assertTrue(torch.equal(planned.train.indices, want.train.indices))
 
 
+class AScriptWithoutAMainGuardIsNotRunAgainTest(unittest.TestCase):
+    """A worker is spawned, and spawning imports the parent's main module: not this one's."""
+
+    def test_the_script_runs_once(self) -> None:
+        import subprocess
+        import sys
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "ran.txt"
+            script = root / "driver.py"
+            script.write_text(
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).open('a').write('ran\\n')\n"
+                "from tests.test_round_planner import WorkersPlanWhatThisProcessPlansTest\n"
+                "from fedbrew.core.round_planner import RoundPlanner\n"
+                "import tempfile\n"
+                "case = WorkersPlanWhatThisProcessPlansTest()\n"
+                "with tempfile.TemporaryDirectory() as inner:\n"
+                "    planner = RoundPlanner(case._roster(Path(inner)), 3, workers=1)\n"
+                "    rounds = [planner.plan(r).round_id for r in (1, 2, 3)]\n"
+                "    print('planned', rounds, planner.record)\n"
+                "    planner.close()\n",
+                encoding="utf-8",
+            )
+            done = subprocess.run(
+                [sys.executable, str(script)],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                cwd=Path(__file__).resolve().parent.parent,
+            )
+            self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+            self.assertIn("planned [1, 2, 3]", done.stdout)
+            self.assertNotIn("fallback", done.stdout)
+            self.assertEqual(marker.read_text(encoding="utf-8").splitlines(), ["ran"])
+
+
 def _unplanned() -> Any:
     return mock.patch.object(
         batched_executor, "roster_plan", lambda components: (None, "switched off by the test")

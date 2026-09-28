@@ -30,7 +30,8 @@ import os
 import queue
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -254,12 +255,13 @@ class RoundPlanner:
             context = torch.multiprocessing.get_context("spawn")
             self._tasks = context.Queue()
             self._results = context.Queue()
-            for _ in range(workers):
-                process = context.Process(
-                    target=_worker, args=(self.roster, self._tasks, self._results), daemon=True
-                )
-                process.start()
-                self._processes.append(process)
+            with _main_unseen():
+                for _ in range(workers):
+                    process = context.Process(
+                        target=_worker, args=(self.roster, self._tasks, self._results), daemon=True
+                    )
+                    process.start()
+                    self._processes.append(process)
         except Exception as error:  # noqa: BLE001 -- the run plans in process instead
             self._fall_back(f"the planner workers could not start: {type(error).__name__}: {error}")
             return
@@ -329,6 +331,29 @@ def planned_for(roster: RosterPlan, planned: PlannedRound, plans: Sequence[Any])
         and plan.seed == roster.seeds[place]
         for plan, place in zip(plans, planned.positions, strict=True)
     )
+
+
+@contextmanager
+def _main_unseen() -> Iterator[None]:
+    """Start processes that do not run the parent's ``__main__`` again.
+
+    A spawned process imports the parent's main module before its target, so
+    a script that trains at import -- any driver without an ``if __name__ ==
+    "__main__"`` guard -- would train again in every worker. A worker needs
+    nothing from it: its target is this module's ``_worker``.
+    """
+
+    main = sys.modules.get("__main__")
+    saved = {name: getattr(main, name) for name in ("__file__", "__spec__") if hasattr(main, name)}
+    try:
+        if main is not None:
+            if "__file__" in saved:
+                del main.__file__
+            main.__spec__ = None
+        yield
+    finally:
+        for name, value in saved.items():
+            setattr(main, name, value)
 
 
 def auto_workers() -> int:
