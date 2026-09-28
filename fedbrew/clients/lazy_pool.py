@@ -119,11 +119,21 @@ class LazyClientPool(Mapping[str, ClientUpdate]):
                 client.load_state(saved_state)
 
     def get_state_snapshot(self) -> dict[str, dict[str, Any]]:
-        """Return known states without materializing additional clients."""
+        """Return known states without materializing additional clients.
 
-        snapshot = {client_id: dict(state) for client_id, state in self._saved_states.items()}
-        for client_id, client in self._clients.items():
-            snapshot[client_id] = dict(client.get_state())
+        In roster order, whichever clients are built: a checkpoint stacks the
+        states in this order (``stack_client_states``), so an order that
+        followed which clients happened to be resident would make the same
+        states a different file.
+        """
+
+        snapshot = {}
+        for client_id in self._client_ids:
+            client = self._clients.get(client_id)
+            if client is not None:
+                snapshot[client_id] = dict(client.get_state())
+            elif client_id in self._saved_states:
+                snapshot[client_id] = dict(self._saved_states[client_id])
         return snapshot
 
     def release_client(self, client_id: str) -> None:
