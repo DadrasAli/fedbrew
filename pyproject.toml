@@ -82,6 +82,7 @@ addopts = "-m 'not quickstart'"
 markers = [
     "quickstart: runs a quickstart end to end (docs/03 or the README); excluded by default",
     "fast: reads text and configs only; `-m fast` is the gate for a text, config or docs change",
+    "cuda: needs a usable CUDA device; the full gate runs these in a job of their own, on a GPU",
 ]
 
 [tool.ruff]

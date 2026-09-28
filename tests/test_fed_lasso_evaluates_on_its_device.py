@@ -20,6 +20,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import pytest
 import torch
 import yaml
 
@@ -78,6 +79,7 @@ class FedLassoEvaluationDeviceTest(unittest.TestCase):
 
         self.assertTrue(math.isclose(measured["optimality_gap"], expected, rel_tol=1e-12))
 
+    @pytest.mark.cuda
     @unittest.skipUnless(_cuda_usable(), "needs a usable CUDA device")
     def test_a_round_evaluates_on_cuda(self) -> None:
         run(_config_file(self.root, "cuda"), args=None)

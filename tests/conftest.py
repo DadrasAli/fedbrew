@@ -31,6 +31,12 @@ if it did none of that anywhere. A test whose work lands in a class's
 `setUpClass` is not marked on its own, because that work is charged to
 whichever test of the class a worker runs first.
 
+**The `cuda` mark.** A test that needs a usable CUDA device is marked `cuda`,
+and the full gate runs `-m cuda` on a GPU and everything else on CPU nodes
+(chapter 13 section 2.3). A test that skips for want of one without the mark
+would run in neither, so a skip whose reason names CUDA or a GPU fails here
+unless the test is marked.
+
 **Shipped datasets, validated once.** `validate_manifest` is memoized, for this
 process only, when the manifest lives under `data/generated/`. The key is the
 arguments, the working directory, and the size and modification time of every
@@ -118,6 +124,13 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> Iterator[Any]:
     report = yield
+    if report.skipped and item.get_closest_marker("cuda") is None and _names_a_device(report):
+        report.outcome = "failed"
+        report.longrepr = (
+            f"{item.nodeid} skipped for want of a GPU ({_skip_reason(report)}) and is not "
+            "marked cuda, so the full gate would run it neither on its CPU nodes nor in "
+            "its GPU job. Mark it @pytest.mark.cuda. Chapter 13 section 2.3."
+        )
     if call.when == "teardown" and _work and item.get_closest_marker("fast") is not None:
         done = ", ".join(f"{HEAVY_WORK[kind]} ({count}x)" for kind, count in sorted(_work.items()))
         report.outcome = "failed"
@@ -129,6 +142,18 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) ->
             "to the neighbours that still qualify. Chapter 13 section 2.2."
         )
     return report
+
+
+def _skip_reason(report: pytest.TestReport) -> str:
+    longrepr = report.longrepr
+    return str(longrepr[2]) if isinstance(longrepr, tuple) else str(longrepr)
+
+
+def _names_a_device(report: pytest.TestReport) -> bool:
+    """Whether a skip's reason is the lack of a GPU."""
+
+    reason = _skip_reason(report).lower()
+    return "cuda" in reason or "gpu" in reason
 
 
 def _dataset_state(root: Path) -> tuple[tuple[str, int, int], ...]:

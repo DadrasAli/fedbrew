@@ -226,6 +226,18 @@ each config names, and one of them skipped any config it could not resolve, so
 run alone it checked 14 of 24 and passed (FINDINGS `POST-F17`). Each now loads
 what it needs.
 
+## 2.3 The `cuda` mark
+
+A test that needs a usable CUDA device is marked `cuda`. On a machine without
+one it skips, which is every CPU node and CI, so the full gate runs the suite
+in two parts: `-m 'not quickstart and not cuda'` on CPU nodes, and
+`-m 'cuda and not quickstart'` in a job of its own on one GPU, where a skip
+counts as a failure. The two expressions partition the suite, so every test
+runs in exactly one. `tests/conftest.py` keeps the mark honest: a test that
+skips with a reason naming CUDA or a GPU and is not marked fails, since it
+would otherwise run in neither part. One test is marked today,
+`tests/test_fed_lasso_evaluates_on_its_device.py`'s round on CUDA.
+
 ## 3. The three kinds of test
 
 **Behavioural.** Most of the suite. They run code and assert on what it
