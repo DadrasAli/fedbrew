@@ -229,6 +229,94 @@ class _fold_sites:  # noqa: N801 -- used as a context manager, named for what it
         self._patch.stop()
 
 
+@contextmanager
+def without(split: str, every: int = 3) -> Iterator[None]:
+    """Every ``every``-th client (by number) holds no ``split``: an empty one of its tensors."""
+
+    from fedbrew.data.synthetic_classification import SyntheticClassificationDataset as Data
+
+    real = Data.get_client_data
+
+    def fewer(self: Any, client_id: str) -> dict[str, Any]:
+        data = real(self, client_id)
+        if int(client_id.rsplit("_", 1)[-1]) % every == 0:
+            data[split] = {key: value[:0] for key, value in data[split].items()}
+        return data
+
+    with mock.patch.object(Data, "get_client_data", fewer):
+        yield
+
+
+class TheEvaluationIsMeasuredOnTheDeviceTest(ResidentRuns):
+    """Client splits and the central pass: measured at the round, recorded at the flush."""
+
+    def _config(self, **evaluation: Any) -> dict[str, Any]:
+        config = classification_config(**FEDAVG, update_mode="single_batch")
+        config["runtime"]["checkpointing"].update(save_every_round=True)
+        config["runtime"]["flush_every"] = 2
+        config["evaluation"].update(evaluation)
+        return config
+
+    def test_its_stages_are_taken(self) -> None:
+        from fedbrew.core import resident_evaluation
+
+        taken: dict[str, int] = {"clients": 0, "central": 0}
+        real = (
+            resident_evaluation.ResidentEvaluation.enqueue,
+            (resident_evaluation.ResidentEvaluation.enqueue_central),
+        )
+
+        def clients(self: Any, *args: Any) -> Any:
+            stage = real[0](self, *args)
+            taken["clients"] += stage is not None
+            return stage
+
+        def central(self: Any, *args: Any) -> Any:
+            stage = real[1](self, *args)
+            taken["central"] += stage is not None
+            return stage
+
+        with (
+            mock.patch.object(resident_evaluation.ResidentEvaluation, "enqueue", clients),
+            mock.patch.object(resident_evaluation.ResidentEvaluation, "enqueue_central", central),
+        ):
+            held, reference = self.pair(self._config())
+        self.assertEqual(taken, {"clients": 4, "central": 4})
+        self.assertSameRun(held, reference)
+
+    def test_schedules_and_client_scopes(self) -> None:
+        config = self._config(
+            train={"every": 2, "clients": "participating"},
+            val={"every": 3, "clients": "sample:3"},
+            test={"every": 1, "clients": "resample:5"},
+            central_test={"every": 2},
+        )
+        config["server"] = {
+            **config["server"],
+            "participation_rate": None,
+            "participation_probability": 0.5,
+        }
+        self.assertSameRun(*self.pair(config, ragged))
+
+    def test_a_shuffled_evaluation_loader(self) -> None:
+        config = self._config()
+        config["client"].update(eval_shuffle=True, eval_batch_size=2)
+        self.assertSameRun(*self.pair(config, ragged))
+
+    def test_a_client_without_a_val_split(self) -> None:
+        self.assertSameRun(*self.pair(self._config(), lambda: without("eval")))
+
+    def test_a_client_without_a_test_split_is_refused_in_the_same_words(self) -> None:
+        messages = []
+        for context in (nullcontext, per_round):
+            with self.subTest(path=context.__name__), without("test"), context():
+                with self.assertRaises(ValueError) as caught:
+                    self.run_config(_clean(self._config()), "batched")
+                messages.append(str(caught.exception))
+        self.assertEqual(messages[0], messages[1])
+        self.assertIn("has no non-empty test split", messages[0])
+
+
 class AManifestDatasetTest(ResidentRuns):
     """A manifest dataset's clients are built on demand, and stay built while cached."""
 

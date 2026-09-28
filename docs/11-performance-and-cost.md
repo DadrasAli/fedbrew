@@ -591,6 +591,19 @@ computes, bit for bit on the same device:
   evaluation, verdict, checkpoints and flush, as `run_fl_loop` does them.
   A client is taken from the pool when the round would first touch it, so a
   checkpoint lists the clients it lists on the per-round path.
+- **Evaluation.** The round's due client splits are measured at the round,
+  on the device, at the mean the fold left: every split's clients in the
+  batched evaluator's order and chunks, their rows gathered from stacks held
+  for the run, `measure_splits` and the task's folding as that evaluator runs
+  them (`fedbrew/core/resident_evaluation.py`). The central pass runs
+  `functional_eval` over the global test rows in `evaluate_model`'s batches,
+  where the task's `evaluate_model` is the classification task's. Both are
+  staged with the round's other values and read back in its one copy; the
+  flush builds each client's `EvalResult` with its rule's
+  `batched_evaluation_result`, and the central metrics with the task's
+  `compute_metrics`, as the evaluator does after its own copy. A rule the
+  batched evaluator does not measure, and any other task's central pass, are
+  evaluated at the flush by the evaluator itself.
 - **Stops.** A divergence verdict or a refusal inside a flush window ends the
   run at that round, exactly as the per-round loop ends it; the rounds
   trained after it are dropped. An aggregate that is not finite is run once
@@ -612,7 +625,10 @@ file -- model, server and client states, metrics and RNG state -- and how the
 run ended: full and Bernoulli participation, clients of different sizes and
 several buckets (some of one client), the own-loop rules, uniform weighting,
 a post-fit pass on some rounds, a flush every third round, a manifest
-dataset, and a stall and a non-finite aggregate inside a flush window.
+dataset, and a stall and a non-finite aggregate inside a flush window; and of
+the evaluation, that it is measured on the device, under mixed schedules and
+client scopes, a shuffled evaluation loader, a client without a `val` split,
+and a missing `test` split refused in the per-round path's words.
 
 ## 10. Settings run as one group
 
@@ -777,6 +793,7 @@ Accuracy cells under `bf16` move by whole examples and are not held.
 | `fedbrew/clients/batch_orders.py` | §9: every client's batch order for a round, from the loaders' declarations: seeds, permutations, batches |
 | `fedbrew/core/round_planner.py` | §9: each round's sampled clients and orders planned from the roster, ahead of the loop, by worker processes |
 | `fedbrew/core/resident.py` | §9.1: the resident round: rows, model and records held on the device, recorded at the flush |
+| `fedbrew/core/resident_evaluation.py` | §9.1: the resident round's client splits and central pass, measured on the device at the round |
 | `fedbrew/core/batched_evaluator.py` | §9: the due clients' splits measured together, and the central pass's kept model and shard |
 | `tools/` | the benchmark and profiling scripts |
 

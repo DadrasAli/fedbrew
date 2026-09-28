@@ -62,9 +62,12 @@ class ClientEvaluationTest(ExecutorRuns):
         from fedbrew.core import batched_evaluator
 
         measured = mock.Mock(wraps=batched_evaluator.measure_splits)
+        # The per-round path, whose evaluator is BatchedEvaluator; a resident
+        # run measures the same splits through fedbrew/core/resident_evaluation.py.
         with (
             float64_classification(),
             mock.patch.object(batched_evaluator, "measure_splits", measured),
+            per_round(),
         ):
             batched, sequential = self.both(
                 evaluation_config(eval_batch_size=2), data=ragged_evaluation_splits

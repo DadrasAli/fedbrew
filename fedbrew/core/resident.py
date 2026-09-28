@@ -165,15 +165,22 @@ def _rule_unsupported(context: Any) -> str | None:
 
 
 class ResidentRows:
-    """Every client's training rows, stacked once for the run and padded to the longest.
+    """Clients' rows of one split, stacked once for the run and padded to the longest.
 
-    ``tensors[k][c, :lengths[c]]`` is roster client ``c``'s rows of the
-    task's tensor ``k``, as ``split_rows`` gives them; the padding is zeros,
-    as ``pad_sequence``'s is.
+    ``splits[place]`` is roster client ``place``'s split, or None where it has
+    none. ``tensors[k][row, :lengths[row]]`` is a client's rows of the task's
+    tensor ``k``, as ``split_rows`` gives them, at the row ``index[place]``;
+    the padding is zeros, as ``pad_sequence``'s is.
     """
 
     def __init__(self, task: Any, splits: Sequence[Any]) -> None:
-        rows = [task.split_rows(split) for split in splits]
+        self.index = {
+            place: row
+            for row, place in enumerate(
+                place for place, split in enumerate(splits) if split is not None
+            )
+        }
+        rows = [task.split_rows(split) for split in splits if split is not None]
         self.lengths = [int(len(split_rows[0])) for split_rows in rows]
         self.longest = max(self.lengths)
         self.tensors = tuple(
@@ -184,6 +191,7 @@ class ResidentRows:
         self.row_bytes = sum(
             tensor[0, :1].numel() * tensor.element_size() for tensor in self.tensors
         )
+        self._everyone = list(range(len(self.lengths)))
         self._kept: dict[tuple[int, ...], _Rows] = {}
         self._fresh: dict[tuple[int, ...], _Rows] = {}
 
@@ -195,10 +203,10 @@ class ResidentRows:
         clients come back.
         """
 
-        key = tuple(places)
+        key = tuple(self.index[place] for place in places)
         rows = self._kept.get(key)
         if rows is None:
-            rows = self._rows(places)
+            rows = self._rows(list(key))
         self._fresh[key] = rows
         return rows
 
@@ -208,6 +216,8 @@ class ResidentRows:
         self._kept, self._fresh = self._fresh, {}
 
     def _rows(self, places: list[int]) -> _Rows:
+        """``_Rows`` of these stacked rows: one's own, or several padded to their longest."""
+
         rows: _Rows = object.__new__(_Rows)
         rows.sources = []
         rows.versions = []
@@ -217,7 +227,7 @@ class ResidentRows:
         if not rows.stacked:
             place, length = places[0], rows.lengths[0]
             rows.tensors = tuple(tensor[place, :length] for tensor in self.tensors)
-        elif places == list(range(len(self.lengths))) and rows.longest == self.longest:
+        elif places == self._everyone and rows.longest == self.longest:
             rows.tensors = self.tensors
         else:
             index = torch.tensor(places, dtype=torch.long, device=self.tensors[0].device)
@@ -280,6 +290,15 @@ class DeviceRound:
     finite: Tensor | None = None
     staged: Tensor | None = None
     staged_layouts: list[StagedLayout] = field(default_factory=list)
+    #: The clients due an evaluation this round, as (roster place, splits) in
+    #: the evaluator's order, and what was measured of them on the device.
+    work: list[tuple[int, list[str]]] = field(default_factory=list)
+    eval_stage: Any = None
+    central_due: bool = False
+    central_stage: Any = None
+    #: The staged values' sizes: the chunks', then the evaluation's and the
+    #: central pass's.
+    sizes: tuple[int, int, int] = (0, 0, 0)
     seconds: float = 0.0
 
 
@@ -325,6 +344,9 @@ class ResidentRounds:
         if self.unsupported is None:
             self.rows = ResidentRows(self.task, self.splits)
         self.model = self._placed(context.server._model_state)
+        from fedbrew.core.resident_evaluation import ResidentEvaluation
+
+        self.evaluation = ResidentEvaluation(self) if self.unsupported is None else None
 
     # -- set-up --------------------------------------------------------------
 
@@ -370,8 +392,31 @@ class ResidentRounds:
         )
         if planned.positions:
             self._train(planned, device_round)
+        self._evaluate(device_round)
+        self._stage(device_round)
         device_round.seconds = time.perf_counter() - started
         return device_round
+
+    def _evaluate(self, device_round: DeviceRound) -> None:
+        """The round's due evaluations, measured on the device at the model it leaves."""
+
+        from fedbrew.core.config import evaluates_round
+        from fedbrew.core.loop import _round_evaluation_plan
+
+        context, round_id = self.context, device_round.round_id
+        selected = [self.roster.client_ids[place] for place in device_round.positions]
+        splits_by_client, _ = _round_evaluation_plan(
+            context.evaluation_clients, context.schedules, round_id, context.global_rounds, selected
+        )
+        device_round.work = [
+            (self.roster.where[client], splits) for client, splits in splits_by_client.items()
+        ]
+        device_round.eval_stage = self.evaluation.enqueue(round_id, device_round.work, self.model)
+        device_round.central_due = evaluates_round(
+            context.central_schedule, round_id, context.global_rounds
+        )
+        if device_round.central_due:
+            device_round.central_stage = self.evaluation.enqueue_central(self.model)
 
     def _refuse_empty(self, planned: PlannedRound) -> None:
         """Refuse the first client, in request order, whose loader yields no batch."""
@@ -411,7 +456,6 @@ class ResidentRounds:
         device_round.mean, device_round.finite = fold.result()
         self.model = device_round.mean
         self.rows.round_done()  # type: ignore[union-attr]
-        self._stage(device_round)
 
     def _costs(self, planned: PlannedRound, device_round: DeviceRound, program: Any) -> list[int]:
         """``client_costs`` of the round's clients, from the resident rows' sizes."""
@@ -502,7 +546,10 @@ class ResidentRounds:
         return next(iter(self.parameters.values())).dtype
 
     def _stage(self, device_round: DeviceRound) -> None:
-        """Join every chunk's staged values in one float64 tensor, for the flush's copy."""
+        """Join the round's staged values in one float64 tensor, for the flush's copy.
+
+        The chunks' first, then the evaluation's and the central pass's.
+        """
 
         pieces, layouts = [], []
         for chunk in device_round.chunks:
@@ -511,7 +558,16 @@ class ResidentRounds:
             if staged is not None:
                 pieces.append(staged)
             chunk.parts, chunk.columns = [], []
+        fit_size = sum(int(piece.numel()) for piece in pieces)
+        extra = []
+        for stage in (device_round.eval_stage, device_round.central_stage):
+            staged = None if stage is None else stage.staged
+            extra.append(0 if staged is None else int(staged.numel()))
+            if staged is not None:
+                pieces.append(staged)
+                stage.staged = None
         device_round.staged_layouts = layouts
+        device_round.sizes = (fit_size, extra[0], extra[1])
         device_round.staged = torch.cat(pieces) if pieces else None
 
     # -- the flush's side ----------------------------------------------------
@@ -868,6 +924,13 @@ def _record_window(
     return False
 
 
+def _split_values(device_round: DeviceRound, values: list[float]) -> tuple[list[float], ...]:
+    """A round's staged values as its chunks', its evaluation's and its central pass's."""
+
+    fit, evaluation, _ = device_round.sizes
+    return values[:fit], values[fit : fit + evaluation], values[fit + evaluation :]
+
+
 def _record_round(
     context: Any,
     rounds: ResidentRounds,
@@ -882,6 +945,7 @@ def _record_round(
 
     state, round_id = context.state, device_round.round_id
     round_started = time.perf_counter()
+    values, eval_values, central_values = _split_values(device_round, values)
     round_info = RoundInfo(round_id=round_id, total_rounds=context.global_rounds)
     selected = [rounds.roster.client_ids[place] for place in device_round.positions]
     if context.on_client_progress is not None:
@@ -900,9 +964,78 @@ def _record_round(
         flushing.host_model = host_mean
     timings = {"fit": fit_totals.fit_seconds + device_round.seconds}
     timings["aggregate"] = max(time.perf_counter() - fit_started - fit_totals.fit_seconds, 0.0)
+    evaluated = _client_evaluation(context, rounds, device_round, eval_values, timings)
+    central = _central_evaluation(context, rounds, device_round, central_values, timings)
     return _record_evaluation_and_rest(
-        context, round_info, selected, fit_totals, timings, round_started, flushing, long_lived
+        context,
+        round_info,
+        selected,
+        (evaluated, central),
+        fit_totals,
+        timings,
+        round_started,
+        flushing,
+        long_lived,
     )
+
+
+def _client_evaluation(
+    context: Any,
+    rounds: ResidentRounds,
+    device_round: DeviceRound,
+    values: list[float],
+    timings: dict[str, float],
+) -> list[tuple[Any, list[str]]]:
+    """The round's client evaluation: from the device's measurement, or by the evaluator now."""
+
+    started = time.perf_counter()
+    stage = device_round.eval_stage
+    round_id = device_round.round_id
+    if stage is not None:
+        evaluated = rounds.evaluation.results(  # type: ignore[union-attr]
+            stage,
+            values,
+            round_id,
+            context.server_payload,
+            context.evaluation.model_scope,
+            context.on_client_progress,
+        )
+    else:
+        infos = {info.client_id: info for info in context.client_infos}
+        work = [
+            (infos[rounds.roster.client_ids[place]], splits) for place, splits in device_round.work
+        ]
+        evaluated = context.evaluator.evaluate_clients(
+            context.client,
+            round_id,
+            work,
+            context.server_payload,
+            context.evaluation.model_scope,
+            context.on_client_progress,
+        )
+    timings["client_eval"] = time.perf_counter() - started
+    return evaluated
+
+
+def _central_evaluation(
+    context: Any,
+    rounds: ResidentRounds,
+    device_round: DeviceRound,
+    values: list[float],
+    timings: dict[str, float],
+) -> dict[str, float] | None:
+    """The round's central metrics, if due: from the device's measurement, or by the evaluator."""
+
+    started = time.perf_counter()
+    central = None
+    if device_round.central_due:
+        stage = device_round.central_stage
+        if stage is not None:
+            central = rounds.evaluation.central_metrics(stage, values)  # type: ignore[union-attr]
+        else:
+            central = context.evaluator.evaluate_central(context.server, context.dataset)
+    timings["global_eval"] = time.perf_counter() - started
+    return central
 
 
 def _check_weights(device_round: DeviceRound, state: Any, rounds: ResidentRounds) -> None:
@@ -991,36 +1124,23 @@ def _record_evaluation_and_rest(
     context: Any,
     round_info: RoundInfo,
     selected: list[str],
+    measured: tuple[list[tuple[Any, list[str]]], dict[str, float] | None],
     fit_totals: Any,
     timings: dict[str, float],
     round_started: float,
     flushing: _Flushing,
     long_lived: Any,
 ) -> bool:
-    """The rest of ``run_fl_loop``'s body: evaluation, the verdict, checkpoints, the flush."""
+    """The rest of ``run_fl_loop``'s body: the evaluation's records, the verdict, the flush."""
 
-    from fedbrew.core.config import evaluates_round
     from fedbrew.core.loop import (
         _aggregate_client_split_metrics,
         _build_client_evaluation_record,
-        _round_evaluation_plan,
         _scope_split_names,
     )
 
-    state, round_id = context.state, round_info.round_id
-    splits_by_client, infos_by_client = _round_evaluation_plan(
-        context.evaluation_clients, context.schedules, round_id, context.global_rounds, selected
-    )
-    client_eval_started = time.perf_counter()
-    evaluated = context.evaluator.evaluate_clients(
-        context.client,
-        round_id,
-        [(infos_by_client[client_id], splits) for client_id, splits in splits_by_client.items()],
-        context.server_payload,
-        context.evaluation.model_scope,
-        context.on_client_progress,
-    )
-    timings["client_eval"] = time.perf_counter() - client_eval_started
+    state = context.state
+    evaluated, central = measured
     selected_client_set = set(selected)
     state.client_metrics_history.extend(
         _build_client_evaluation_record(
@@ -1039,12 +1159,8 @@ def _record_evaluation_and_rest(
             round_info.metrics.update(
                 _aggregate_client_split_metrics(subset, metric_split, context.statistics)
             )
-    global_eval_started = time.perf_counter()
-    if evaluates_round(context.central_schedule, round_id, context.global_rounds):
-        round_info.metrics.update(
-            context.evaluator.evaluate_central(context.server, context.dataset)
-        )
-    timings["global_eval"] = time.perf_counter() - global_eval_started
+    if central is not None:
+        round_info.metrics.update(central)
     return _record_the_round(
         context, round_info, selected, fit_totals, timings, round_started, flushing, long_lived
     )
