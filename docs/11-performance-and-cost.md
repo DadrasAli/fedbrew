@@ -671,7 +671,7 @@ held by a test at the bound given:
 | `f32_f64`, fed-lasso-l2, simplex-lsq, pl-1d | at most 5.6e-7 / 6.0e-6 | `1e-4` | `tests/test_precision_modes.py` |
 | `f32_f64`, fed-lasso | 1.1e-3 / 1.4e-4 | not held: the L1 kink (§9) turns float32 rounding into steps `lam` apart | — |
 | `bf16`, the MLP | 9.5e-3 / 9.1e-3 in a loss spread | `5e-2`, model and loss cells | `tests/test_precision_modes.py` |
-| `tf32`, the MLP on CUDA | measured in the step 6 GPU run | `5e-2`, bf16's: TF32 keeps 10 mantissa bits to bfloat16's 7 | same, marked `cuda` |
+| `tf32`, the MLP on CUDA | 9.1e-5 / 2.8e-4, on an A100 | `1e-3`, model and loss cells | same, marked `cuda` |
 
 Accuracy cells under `bf16` move by whole examples and are not held.
 
@@ -761,7 +761,7 @@ python tools/bench_compare_runs.py --help
 | `tests/test_batch_orders.py` | §9: every planned order is its loader's own, for every task, update mode, shuffle, `drop_last` and `max_local_steps`, 520 clients at once included; the bulk seeds are `dataloader_seed`'s. |
 | `tests/test_batched_evaluator.py` | §9: ragged, shuffled and missing evaluation splits through both evaluators, the refusal's words, and the central pass's kept model and shard. |
 | `tests/test_compile_mode.py` | §11: a compiled step is held to §9's bounds on fed-lasso (FedAvg, local_sgd in both modes, local_adamw, SCAFFOLD) and the MLP, dynamo having made its graphs; a step that does not compile runs eagerly, bit for bit the reference, and run.json says why; the key needs the batched executor. |
-| `tests/test_precision_modes.py` | §11: `f32_f64` within `1e-4` on the smooth examples, and in a group of settings each as alone; `bf16` within `5e-2` on the MLP; `tf32` within `5e-2` on CUDA; each mode trained otherwise than the reference; a mode that does not apply runs the reference bit for bit and says why; the key needs the batched executor. |
+| `tests/test_precision_modes.py` | §11: `f32_f64` within `1e-4` on the smooth examples, and in a group of settings each as alone; `bf16` within `5e-2` on the MLP; `tf32` within `1e-3` on CUDA; each mode trained otherwise than the reference; a mode that does not apply runs the reference bit for bit and says why; the key needs the batched executor. |
 | `tests/test_program_values.py` | §9: a bucket shares its program's shape, not its values; a client stepped beside clients with other values is the client stepped alone, bit for bit, in every shape and both float widths, and a client alone is `torch.optim`'s SGD and AdamW step. |
 | `tests/test_sweep.py` | §10: `fedbrew sweep` groups the configs equal but for the run's name and the numeric hyperparameters it lists, runs any other config alone and one that does not load alone, keeps two configs that would write one directory apart, `--plan` runs nothing, `--run-group` refuses configs that are not one group, and a sweep of a group and a config alone writes both, the group recorded; the exit status. |
 | `tests/test_settings_group.py` | §10: a group of one is its run alone bit for bit; each setting matches its run alone within the tolerance, its checkpoints' generator state exactly, under the stacked and the per-client paths, server settings, a budget that splits rounds, and the MLP; a diverging or refused setting stops alone, the others bit-identical to the group without it; run.json's `group`; how units are packed. |

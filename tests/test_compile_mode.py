@@ -132,6 +132,24 @@ class AStepThatDoesNotCompileRunsEagerlyTest(CompiledRuns):
         )
 
 
+class TheRecordNamesTheWrappedCauseTest(unittest.TestCase):
+    def test_a_wrapped_error_is_recorded_with_its_cause(self) -> None:
+        record: dict[str, Any] = {"used": "batched"}
+        context = StepContext(True, "reference", record)
+        try:
+            try:
+                raise OSError("gcc: command not found")
+            except OSError as cause:
+                raise RuntimeError("backend='inductor' raised:\nlong trace") from cause
+        except RuntimeError as error:
+            with mock.patch("sys.stderr"):
+                context._fail(error)
+        self.assertEqual(
+            record["compile"]["fallback"],
+            "RuntimeError: backend='inductor' raised: OSError: gcc: command not found",
+        )
+
+
 class ConfigTest(unittest.TestCase):
     def _load(self, **performance: Any) -> None:
         config = copy.deepcopy(example_config("fed-lasso"))

@@ -1588,8 +1588,13 @@ class StepContext:
         return self._compiled
 
     def _fail(self, error: BaseException) -> None:
-        lines = str(error).strip().splitlines()
-        reason = f"{type(error).__name__}: {lines[0] if lines else ''}"[:300]
+        reason = _first_line(error)
+        # Dynamo wraps the compiler's own error ("backend='inductor' raised:"),
+        # so the line that says why is the wrapped one's.
+        inner = getattr(error, "inner_exception", None) or error.__cause__
+        if inner is not None:
+            reason = f"{reason} {_first_line(inner)}"
+        reason = reason[:300]
         self.compiling = False
         for record in self.records:
             record.setdefault("compile", {}).update(used="off", fallback=reason)
@@ -1599,6 +1604,11 @@ class StepContext:
             file=sys.stderr,
             flush=True,
         )
+
+
+def _first_line(error: BaseException) -> str:
+    lines = str(error).strip().splitlines()
+    return f"{type(error).__name__}: {lines[0] if lines else ''}"
 
 
 def _vmapped(function: Callable[..., Any], dims: tuple[Any, ...], *values: Any) -> Any:

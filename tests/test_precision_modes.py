@@ -12,8 +12,8 @@ arithmetic and every evaluation stay at the model's precision (chapter 11
 - ``bf16``: the MLP's loss under bfloat16 autocast, within ``5e-2`` per model
   tensor and per loss cell; measured 9.5e-3 and 9.1e-3 (a loss spread,
   2026-09-28). Accuracy cells move by whole examples and are not held;
-- ``tf32``: the MLP on CUDA, within the same ``5e-2``: TF32 keeps 10
-  mantissa bits to bfloat16's 7, so it is held to bf16's bound;
+- ``tf32``: the MLP on CUDA, within ``1e-3`` per model tensor and loss cell;
+  measured 9.1e-5 and 2.8e-4 (a fit_loss cell) on an A100 (2026-09-28);
 - a mode that does not apply -- f32_f64 on a float32 model, bf16 or tf32 on
   a float64 one, tf32 on the CPU -- runs the reference, bit for bit, and
   run.json says why.
@@ -48,8 +48,10 @@ from tests.test_reproducibility import TIMING
 
 #: f32_f64 on the smooth linear examples.
 F32_F64_TOLERANCE = 1e-4
-#: bf16 (and tf32) on the MLP, per model tensor and loss cell.
+#: bf16 on the MLP, per model tensor and loss cell.
 BF16_TOLERANCE = 5e-2
+#: tf32 on the MLP on CUDA, per model tensor and loss cell.
+TF32_TOLERANCE = 1e-3
 SMOOTH = ("fed-lasso-l2", "simplex-lsq", "pl-1d")
 
 
@@ -146,7 +148,7 @@ class Tf32Test(ModeRuns):
         config = _mlp()
         config["runtime"]["device"] = "cuda"
         mode, reference = self.reference_and(config, precision="tf32")
-        self.assertLossesAgree(mode, reference, BF16_TOLERANCE)
+        self.assertLossesAgree(mode, reference, TF32_TOLERANCE)
         self.assertTrainedOtherwise(mode, reference)
         self.assertEqual(executor_record(mode)["precision"], {"used": "tf32"})
 
