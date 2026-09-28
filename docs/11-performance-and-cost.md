@@ -647,7 +647,10 @@ eagerly, as does every later one; the run prints why on stderr and records it
 (`compile: {used: off, fallback: ...}`), and is then the reference run bit for
 bit. Inductor needs a C++ compiler: on Berzelius the `g++` first on `PATH` is
 a wrapper that refuses to run without a build-environment module, so set
-`CXX=/usr/bin/g++`.
+`CXX=/usr/bin/g++`. On CUDA it also needs Triton, which the conda build of
+torch 2.5.1 the repository's environments use does not bring: there a
+compiled run falls back, and records `RuntimeError: Cannot find a working
+triton installation` (measured on an A100, 2026-09-28).
 
 **`precision`** trains at a lower precision:
 
