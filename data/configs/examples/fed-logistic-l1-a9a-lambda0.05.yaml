@@ -1,0 +1,45 @@
+# examples/fed-logistic-l1, fed-logistic-l1-a9a-lambda0.05.
+#
+# The problem: logistic loss + lam ||x||_1: convex, nonsmooth; F* certified at generation; lam = 0.05.
+# The data: LIBSVM a9a, its first 32,000 rows; 1,000 clients x 32 rows, d = 123.
+#
+#   fedbrew generate --config data/configs/examples/fed-logistic-l1-a9a-lambda0.05.yaml
+#   fedbrew inspect-data data/generated/examples/fed-logistic-l1-a9a-lambda0.05/manifest.json
+#
+# The rows are a public LIBSVM file, which this generator never downloads.
+# Fetch it once; the sha256 below is what pins it:
+#
+#   mkdir -p data/raw/datasets/libsvm
+#   curl -L -o data/raw/datasets/libsvm/a9a \
+#     https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary/a9a
+#
+# See examples/fed-logistic-l1/README.md for the dataset and the problem.
+
+dataset:
+  name: fed_logistic_l1
+  output_dir: data/generated/examples/fed-logistic-l1-a9a-lambda0.05
+  # No draw for it to fix; recorded because every dataset records its seed.
+  seed: 42
+  extensions:
+    - examples/fed-logistic-l1/problem.py
+
+source:
+  format: libsvm
+  path: data/raw/datasets/libsvm/a9a
+  sha256: f5d5ffd8d865ff41328e7ee043e4b020816914ff6843ff15b98905ddbedce906
+  url: https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary/a9a
+  row_normalize: false
+
+partition:
+  strategy: analytic
+  num_clients: 1000
+
+problem:
+  dim: 123
+  rows_per_client: 32
+  loss: logistic
+  penalty: l1
+  penalty_strength: 0.05
+  partition_block: 16
+  partition_reference_lambda: 0.03
+  partition_key: exact

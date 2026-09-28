@@ -12,7 +12,9 @@ instance generated here (d = 8, 4 clients of 16 rows):
   one records neither;
 - one FedAvg round, batched, agrees with the sequential round within the
   batched executor's ``1e-12`` (chapter 11 §9), every cell and the model;
-- a model block that states another problem than the data is refused.
+- a model block that states another problem than the data is refused;
+- a LIBSVM source is read as its rows, pinned by its digest, and dealt by a
+  key that does not depend on the order a row is summed in.
 """
 
 from __future__ import annotations
@@ -151,6 +153,69 @@ class TheConditionNumberDialTest(unittest.TestCase):
                 self.assertAlmostEqual(record["gram_condition"], kappa, delta=1e-10 * kappa)
                 self.assertAlmostEqual(record["gram_lambda_max"], 1.0, delta=1e-12)
                 self.assertAlmostEqual(spec.lipschitz(), 0.25, delta=1e-12)
+
+
+class ALibsvmSourceTest(unittest.TestCase):
+    """The reader, the digest pin and the deal, on a 16-row file written here."""
+
+    def setUp(self) -> None:
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.root = Path(self._directory.name)
+        spec = problem.ProblemSpec(num_clients=4, dim=4, rows_per_client=4, partition_block=2)
+        self.features, self.labels = spec.design(), spec.labels()
+        lines = []
+        for row, label in zip(self.features.tolist(), self.labels.tolist(), strict=True):
+            cells = " ".join(f"{column + 1}:{value!r}" for column, value in enumerate(row))
+            lines.append(f"{int(label):+d} {cells}")
+        self.path = self.root / "rows.libsvm"
+        self.path.write_text("\n".join(lines) + "\n", encoding="ascii")
+        self.source = problem.SourceSpec(
+            path=str(self.path), sha256=problem.digest_of(self.path), row_normalize=False
+        )
+
+    def _spec(self) -> Any:
+        return problem.ProblemSpec(
+            num_clients=4,
+            dim=4,
+            rows_per_client=4,
+            partition_block=2,
+            penalty_strength=0.01,
+            source=self.source,
+            partition_reference_lambda=0.01,
+            partition_key="exact",
+        )
+
+    def test_the_rows_are_the_file_and_the_deal_a_partition(self) -> None:
+        spec = self._spec()
+        self.assertTrue(torch.equal(spec.design(), self.features))
+        self.assertTrue(torch.equal(spec.labels(), self.labels))
+        dealt = torch.cat(spec.client_indices())
+        self.assertEqual(sorted(dealt.tolist()), list(range(16)))
+        reference = problem.reference_of(spec)
+        self.assertNotIn("x_true", reference)
+        self.assertLessEqual(reference["kkt_residual"], problem.CERTIFICATE)
+        self.assertEqual(reference["problem"]["source"]["sha256"], self.source.sha256)
+
+    def test_the_exact_key_does_not_depend_on_the_summation_order(self) -> None:
+        weights = torch.tensor([0.3, -1.25, 2.0e-3, 7.5], dtype=torch.float64)
+        order = torch.tensor([3, 1, 0, 2])
+        self.assertTrue(
+            torch.equal(
+                problem.exact_margins(self.features, weights),
+                problem.exact_margins(self.features[:, order], weights[order]),
+            )
+        )
+
+    def test_a_file_with_another_digest_or_none_is_refused(self) -> None:
+        other = problem.SourceSpec(path=str(self.path), sha256="0" * 64, row_normalize=False)
+        with self.assertRaisesRegex(ValueError, "the config pins"):
+            problem.load_source(other, 4, 16)
+        missing = problem.SourceSpec(
+            path=str(self.root / "absent.bz2"), sha256="0" * 64, url="https://example.org/f"
+        )
+        with self.assertRaisesRegex(FileNotFoundError, "curl -L -o"):
+            problem.load_source(missing, 4, 16)
 
 
 class OneRoundBatchedAgreesTest(ExecutorRuns):

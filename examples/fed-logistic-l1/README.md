@@ -103,6 +103,48 @@ The QR makes the rows depend on the LAPACK they are computed with, to about
 its BLAS and LAPACK, the CPU); two builds on different machines are the same
 problem to that precision and not bit for bit.
 
+### LIBSVM corpora: a9a, ijcnn1-32, gisette
+
+Three public binary-classification files from the LIBSVM collection. **The
+generator never downloads**: each file is fetched once by hand into
+`data/raw/datasets/libsvm/`, and its SHA-256, pinned in the generator config,
+is checked before a byte is parsed. A missing file is refused with the `curl`
+command that fetches it, and a file with another digest is refused rather than
+generating a different problem under the same name.
+
+| Dataset | File | Rows kept | Rows | Clients × rows | `d` | Deal |
+| --- | --- | --- | --- | --- | --- | --- |
+| `a9a` | `a9a` | the first 32,000 | 0/1 features as they are | 1,000 × 32 | 123 | blocks of 16, by the L1 `x*` at `λ = 0.03`, exact key |
+| `ijcnn1-32` | `ijcnn1.bz2` | the first 32,000 | as they are | 32 × 1,000 | 22 | blocks of 50, by the L1 `x*` at `λ = 0.01`, exact key |
+| `gisette` | `gisette_scale.bz2` | the first 6,000 | each scaled to unit L2 norm | 100 × 60 | 5,000 | blocks of 30, by the L1 `x*` at `λ = 5e-4` |
+
+The digests are in the generator configs. There is no planted signal on real rows,
+so the deal sorts by the margin against a solved `x*` — the certified L1
+solution at `problem.partition_reference_lambda` — and every setting on one
+corpus shares that one partition whatever its own problem and `λ`.
+`problem.partition_key: exact` takes that margin as each row's products with
+the solution rounded to ten significant digits, summed exactly
+(`math.fsum`): the same key on any machine, whatever order its BLAS sums in.
+`float` takes the design's product with the solution as it is.
+
+On real data the reference records `lambda_max = ‖Aᵀb‖_∞/2n` and `λ`'s
+fraction of it; `x*` is stored by its non-zeros, and `support_f1` is measured
+against `x*`'s own support, since nothing was planted. The L1 settings:
+
+| Setting | `λ` | `F*` |
+| --- | --- | --- |
+| `fed-logistic-l1-a9a-lambda0.001` | 0.001 | 0.3468377180429282 |
+| `fed-logistic-l1-a9a-lambda0.03` | 0.03 | 0.5291036251024969 |
+| `fed-logistic-l1-a9a-lambda0.05` | 0.05 | 0.5765317125957747 |
+| `fed-logistic-l1-ijcnn1-32-lambda0.01` | 0.01 | 0.4278836450209717 |
+| `fed-logistic-l1-gisette-lambda5e-5` | 5e-5 | 0.16230244614601907 |
+| `fed-logistic-l1-gisette-lambda5e-4` | 5e-4 | 0.4220170868705644 |
+| `fed-logistic-l1-gisette-lambda0.001` | 0.001 | 0.521996719845196 |
+
+Gisette carries duplicate columns, so its support Hessian can be singular:
+the certified solve's Newton step is taken in the Hessian's range, and a
+coordinate the step pushes across its own sign leaves the support.
+
 ## The reference optimum
 
 A convex problem's `x*` has no closed form. It is solved once, at generation,

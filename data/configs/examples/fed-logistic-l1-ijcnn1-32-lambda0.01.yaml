@@ -1,0 +1,45 @@
+# examples/fed-logistic-l1, fed-logistic-l1-ijcnn1-32-lambda0.01.
+#
+# The problem: logistic loss + lam ||x||_1: convex, nonsmooth; F* certified at generation; lam = 0.01.
+# The data: LIBSVM ijcnn1, its first 32,000 rows; 32 clients x 1,000 rows, d = 22.
+#
+#   fedbrew generate --config data/configs/examples/fed-logistic-l1-ijcnn1-32-lambda0.01.yaml
+#   fedbrew inspect-data data/generated/examples/fed-logistic-l1-ijcnn1-32-lambda0.01/manifest.json
+#
+# The rows are a public LIBSVM file, which this generator never downloads.
+# Fetch it once; the sha256 below is what pins it:
+#
+#   mkdir -p data/raw/datasets/libsvm
+#   curl -L -o data/raw/datasets/libsvm/ijcnn1.bz2 \
+#     https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary/ijcnn1.bz2
+#
+# See examples/fed-logistic-l1/README.md for the dataset and the problem.
+
+dataset:
+  name: fed_logistic_l1
+  output_dir: data/generated/examples/fed-logistic-l1-ijcnn1-32-lambda0.01
+  # No draw for it to fix; recorded because every dataset records its seed.
+  seed: 42
+  extensions:
+    - examples/fed-logistic-l1/problem.py
+
+source:
+  format: libsvm
+  path: data/raw/datasets/libsvm/ijcnn1.bz2
+  sha256: 450dee8470b168e47b9fae1fc160396b8a809c675737837fce3acd51dcdc0481
+  url: https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary/ijcnn1.bz2
+  row_normalize: false
+
+partition:
+  strategy: analytic
+  num_clients: 32
+
+problem:
+  dim: 22
+  rows_per_client: 1000
+  loss: logistic
+  penalty: l1
+  penalty_strength: 0.01
+  partition_block: 50
+  partition_reference_lambda: 0.01
+  partition_key: exact

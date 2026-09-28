@@ -82,12 +82,15 @@ handed both, so it is where they are cross-checked.
 
 from __future__ import annotations
 
+import bz2
 import csv
+import hashlib
 import json
 import math
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -375,6 +378,158 @@ def lipschitz_of(features: Tensor) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Real data: a LIBSVM file, pinned by digest and never downloaded
+# ---------------------------------------------------------------------------
+
+#: Where the LIBSVM binary collection lives, for the message a missing file
+#: raises. Written out rather than fetched: see :func:`load_source`.
+LIBSVM_BINARY = "https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary"
+
+#: The partition keys: the margin as the design's product with the reference
+#: solution (``float``), or each row's sum taken exactly against that solution
+#: rounded to ten significant digits (``exact``), which is the same key on any
+#: machine whatever its BLAS does with the order.
+PARTITION_KEYS = ("float", "exact")
+
+#: The significant digits ``exact`` rounds the reference solution to.
+EXACT_KEY_DIGITS = 10
+
+
+@dataclass(frozen=True, slots=True)
+class SourceSpec:
+    """A LIBSVM file on disk, identified by its content and not by its name.
+
+    Frozen and hashable, so :func:`load_source` can cache the parse against it.
+    """
+
+    #: Where the file is, relative to the directory the generator runs in.
+    path: str
+    #: The SHA-256 the file must have, checked before a byte is parsed.
+    sha256: str
+    #: Where a reader can fetch it: part of the refusal message and the
+    #: manifest. Nothing here requests it.
+    url: str = ""
+    #: The only format this reads, stated so a second would be a config change.
+    format: str = "libsvm"
+    #: Scale every row to unit L2 norm.
+    row_normalize: bool = True
+
+    def __post_init__(self) -> None:
+        if self.format != "libsvm":
+            raise ValueError(f"source.format must be 'libsvm', not {self.format!r}")
+        if len(self.sha256) != 64 or any(c not in "0123456789abcdef" for c in self.sha256):
+            raise ValueError("source.sha256 must be 64 lowercase hex digits")
+
+
+def digest_of(path: Path) -> str:
+    """The file's SHA-256, read a megabyte at a time."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _libsvm_row(line: str, dim: int, where: str) -> tuple[float, list[int], list[float]]:
+    """One LIBSVM line as `(label, 0-based columns, values)`; every refusal names the line."""
+
+    fields = line.split()
+    if not fields:
+        raise ValueError(f"{where}: an empty row")
+    label = float(fields[0])
+    if label not in (1.0, -1.0):
+        raise ValueError(f"{where}: label {label:g}, and this problem's labels are -1 or +1")
+    columns, values = [], []
+    for field in fields[1:]:
+        key, separator, value = field.partition(":")
+        if not separator:
+            raise ValueError(f"{where}: {field!r} is not index:value")
+        column = int(key)
+        if not 1 <= column <= dim:
+            raise ValueError(f"{where}: feature index {column} is outside 1..{dim}")
+        columns.append(column - 1)
+        values.append(float(value))
+    return label, columns, values
+
+
+def read_libsvm(path: Path, dim: int, rows: int) -> tuple[Tensor, Tensor]:
+    """The **first** `rows` rows of a LIBSVM file, dense, as `(features, labels)`.
+
+    First in file order, and the rest of the file is not read: the trim is how
+    `n = N m` is hit exactly. A file with fewer rows is refused.
+    """
+
+    row_ids: list[int] = []
+    columns: list[int] = []
+    values: list[float] = []
+    labels: list[float] = []
+    opener = bz2.open if path.suffix == ".bz2" else open
+    with opener(path, "rt", encoding="ascii") as handle:  # type: ignore[operator]
+        for line in handle:
+            if len(labels) == rows:
+                break
+            label, row_columns, row_values = _libsvm_row(line, dim, f"{path}:{len(labels) + 1}")
+            row_ids.extend([len(labels)] * len(row_columns))
+            columns.extend(row_columns)
+            values.extend(row_values)
+            labels.append(label)
+    if len(labels) < rows:
+        raise ValueError(f"{path} holds {len(labels)} rows, and the dials ask for {rows}")
+    features = torch.zeros((rows, dim), dtype=DTYPE)
+    features[torch.tensor(row_ids), torch.tensor(columns)] = torch.tensor(values, dtype=DTYPE)
+    return features, torch.tensor(labels, dtype=DTYPE)
+
+
+@lru_cache(maxsize=2)
+def load_source(source: SourceSpec, dim: int, rows: int) -> tuple[Tensor, Tensor]:
+    """The trimmed, optionally row-normalised design and labels of a source.
+
+    **This never downloads.** The file is fetched once, by hand, and what pins
+    the data is its digest; a missing file is refused with the command that
+    fetches it, and a file with another digest is refused rather than
+    generating a different problem under the same name.
+    """
+
+    path = Path(source.path)
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"{path} is missing, and this generator never downloads. Fetch it once:\n"
+            f"  mkdir -p {path.parent} && curl -L -o {path} {source.url or LIBSVM_BINARY}\n"
+            f"Generation then checks its SHA-256 against the {source.sha256} the config pins."
+        )
+    found = digest_of(path)
+    if found != source.sha256:
+        raise ValueError(
+            f"{path} has SHA-256 {found}, and the config pins {source.sha256}. The file is not "
+            "the one this dataset was defined on: re-fetch it, or change the pin deliberately."
+        )
+    features, labels = read_libsvm(path, dim, rows)
+    if not source.row_normalize:
+        return features, labels
+    norms = torch.linalg.vector_norm(features, dim=1, keepdim=True)
+    if float(norms.min()) == 0.0:
+        raise ValueError(f"{path}: a row of the trim is all zeros, so it has no unit-norm form")
+    return features / norms, labels
+
+
+def exact_margins(features: Tensor, weights: Tensor, digits: int = EXACT_KEY_DIGITS) -> Tensor:
+    """`a_i . w` with `w` rounded to `digits` significant digits, each row summed exactly.
+
+    Each product is one IEEE multiplication and ``math.fsum`` rounds the sum
+    once, so the key does not depend on the order a BLAS sums in, and two
+    reference solves that agree to more than `digits` digits deal the same
+    partition.
+    """
+
+    rounded = torch.tensor(
+        [float(f"{value:.{digits - 1}e}") for value in weights.tolist()], dtype=DTYPE
+    )
+    products = (features * rounded).tolist()
+    return torch.tensor([math.fsum(row) for row in products], dtype=DTYPE)
+
+
+# ---------------------------------------------------------------------------
 # The reference solver: FISTA to find the support, Newton on it to finish
 # ---------------------------------------------------------------------------
 
@@ -550,6 +705,14 @@ def certified_optimum(
     )
 
 
+@lru_cache(maxsize=2)
+def partition_reference(source: SourceSpec, dim: int, rows: int, lam: float) -> Tensor:
+    """`w_ref`: the certified L1 `x*` at the lam a real dataset's deal sorts by."""
+
+    features, labels = load_source(source, dim, rows)
+    return certified_optimum(features, labels, lam)[0]
+
+
 # ---------------------------------------------------------------------------
 # The problem
 # ---------------------------------------------------------------------------
@@ -589,6 +752,16 @@ class ProblemSpec:
     #: the design's orthonormalised columns (:func:`conditioned`). None keeps
     #: the Halton design as it is.
     condition_number: float | None = None
+    #: A LIBSVM file to take the rows from instead of planting them. With one
+    #: set, ``sparsity`` and ``signal_scale`` describe nothing, and a config
+    #: stating them beside a source is refused.
+    source: SourceSpec | None = None
+    #: The `lam` whose certified L1 `x*` orders a real dataset's rows before the
+    #: deal: there is no planted `x_true` to sort by. Its own dial, so settings
+    #: that differ in the problem share one partition.
+    partition_reference_lambda: float | None = None
+    #: How that margin is taken (:data:`PARTITION_KEYS`).
+    partition_key: str = "float"
 
     def __post_init__(self) -> None:
         """Refuse a spec that cannot express what it claims to."""
@@ -615,8 +788,17 @@ class ProblemSpec:
             )
 
     def _check_forms(self) -> None:
-        """Refuse a loss, a penalty or a conditioning this file does not define."""
+        """Refuse a form this file does not define, or dials that cannot go together."""
 
+        if self.source is not None and not self.partition_reference_lambda:
+            raise ValueError(
+                "problem.partition_reference_lambda is required with a source: real rows carry "
+                "no planted signal, so the deal sorts by the margin against a solved x*"
+            )
+        if self.source is not None and self.condition_number is not None:
+            raise ValueError("problem.condition_number reconditions the synthetic design only")
+        if self.partition_key not in PARTITION_KEYS:
+            raise ValueError(f"problem.partition_key must be one of {PARTITION_KEYS}")
         if self.condition_number is not None and self.condition_number < 1.0:
             raise ValueError("problem.condition_number must be at least 1")
         if self.loss not in LOSSES:
@@ -643,6 +825,8 @@ class ProblemSpec:
     def truth(self) -> Tensor:
         """`x_true`: `sparsity` non-zeros, evenly spaced, magnitudes halving."""
 
+        if self.source is not None:
+            raise ValueError("a source has no planted signal: x_true is not defined on real data")
         values = torch.zeros(self.dim, dtype=DTYPE)
         for order in range(self.sparsity):
             index = (order * self.dim) // self.sparsity
@@ -657,24 +841,35 @@ class ProblemSpec:
     # -- the data -----------------------------------------------------------
 
     def design(self) -> Tensor:
-        """`A`, shape `(n, d)`, in source order: Halton, conditioned when asked."""
+        """`A`, shape `(n, d)`, in source order: Halton, conditioned when asked, or the file's."""
 
+        if self.source is not None:
+            return load_source(self.source, self.dim, self.rows)[0]
         design = halton_normal_design(self.rows, self.dim)
         if self.condition_number is None:
             return design
         return conditioned(design, self.condition_number)
 
     def labels(self) -> Tensor:
-        """`b`, shape `(n,)`, in `{-1, +1}`: a deterministic Bernoulli draw."""
+        """`b`, shape `(n,)`, in `{-1, +1}`: a deterministic Bernoulli draw, or the file's."""
 
+        if self.source is not None:
+            return load_source(self.source, self.dim, self.rows)[1]
         probability = torch.sigmoid(self.design() @ self.truth())
         threshold = van_der_corput(self.rows, label_base(self.dim))
         return torch.where(probability > threshold, 1.0, -1.0).to(DTYPE)
 
     def margin_key(self) -> Tensor:
-        """The per-row score the deal sorts by: `x_true . a_i`."""
+        """The per-row score the deal sorts by: `x_true . a_i`, or `w_ref . a_i` on real data."""
 
-        return self.design() @ self.truth()
+        if self.source is None:
+            return self.design() @ self.truth()
+        reference = partition_reference(
+            self.source, self.dim, self.rows, float(self.partition_reference_lambda or 0.0)
+        )
+        if self.partition_key == "exact":
+            return exact_margins(self.design(), reference)
+        return self.design() @ reference
 
     def client_indices(self) -> list[Tensor]:
         """Which rows each client holds: blocks of the margin order, round robin."""
@@ -691,6 +886,8 @@ class ProblemSpec:
         """
 
         features, labels = self.design(), self.labels()
+        if self.source is not None:
+            return certified_optimum(features, labels, self.penalty_strength)
         optimum, residual = solve_reference(
             features, labels, self.penalty_strength, iterations=iterations
         )
@@ -709,6 +906,11 @@ class ProblemSpec:
         """`L = ||A||_2^2 / 4n`, the Lipschitz constant of the logistic `grad l`."""
 
         return lipschitz_of(self.design())
+
+    def lambda_max(self) -> float:
+        """The smallest L1 `lam` whose minimiser is `x* = 0`: `||A' b||_inf / 2n`."""
+
+        return float((self.design().T @ self.labels()).abs().max()) / (2.0 * self.rows)
 
     def client_objective_at(self, x: Tensor) -> list[float]:
         """`F_c(x)` for each client, from the rows that client holds."""
@@ -867,7 +1069,16 @@ PROBLEM_KEYS = {
     "penalty",
     "condition_number",
     "client_support_sizes",
+    "partition_reference_lambda",
+    "partition_key",
 }
+
+#: The ``source`` keys a generator config may state.
+SOURCE_KEYS = {"format", "path", "sha256", "url", "row_normalize"}
+
+#: The synthetic dials, which a real-data config may not state: they describe a
+#: planted signal, and a file has none.
+_PLANTED_KEYS = ("sparsity", "signal_scale", "condition_number")
 
 
 @dataclass(frozen=True, slots=True)
@@ -900,6 +1111,38 @@ def _spec_from_config(config: Mapping[str, Any]) -> ProblemSpec:
         loss=str(problem.get("loss", "logistic")),
         penalty=str(problem.get("penalty", "l1")),
         condition_number=_optional_float(problem.get("condition_number")),
+        source=_source_from_config(config),
+        partition_reference_lambda=_optional_float(problem.get("partition_reference_lambda")),
+        partition_key=str(problem.get("partition_key", "float")),
+    )
+
+
+def _source_from_config(config: Mapping[str, Any]) -> SourceSpec | None:
+    """Read the optional ``source`` section, and refuse it beside planted dials."""
+
+    section = config.get("source")
+    if section is None:
+        return None
+    values = dict(section)
+    stated = [key for key in _PLANTED_KEYS if key in dict(config.get("problem", {}))]
+    if stated:
+        raise ValueError(
+            f"fed_logistic_l1 was given a source and the planted dials {stated}. Real rows carry "
+            "no planted signal: drop them, or drop the source."
+        )
+    missing = [key for key in ("path", "sha256") if key not in values]
+    if missing:
+        raise ValueError(f"source needs {missing}: the file, and the digest that pins it")
+    return _source_of(values)
+
+
+def _source_of(values: Mapping[str, Any]) -> SourceSpec:
+    return SourceSpec(
+        path=str(values["path"]),
+        sha256=str(values["sha256"]),
+        url=str(values.get("url", "")),
+        format=str(values.get("format", "libsvm")),
+        row_normalize=bool(values.get("row_normalize", True)),
     )
 
 
@@ -925,6 +1168,9 @@ def _spec_from_reference(reference: Mapping[str, Any]) -> ProblemSpec:
         loss=str(problem.get("loss", "logistic")),
         penalty=str(problem.get("penalty", "l1")),
         condition_number=_optional_float(problem.get("condition_number")),
+        source=None if problem.get("source") is None else _source_of(problem["source"]),
+        partition_reference_lambda=_optional_float(problem.get("partition_reference_lambda")),
+        partition_key=str(problem.get("partition_key", "float")),
     )
 
 
@@ -944,6 +1190,20 @@ def _problem_record(spec: ProblemSpec) -> dict[str, Any]:
     }
     if spec.condition_number is not None:
         record["condition_number"] = spec.condition_number
+    if spec.source is not None:
+        for key in ("sparsity", "signal_scale"):
+            del record[key]
+        source = spec.source
+        record["source"] = {
+            "format": source.format,
+            "path": source.path,
+            "sha256": source.sha256,
+            "url": source.url,
+            "row_normalize": source.row_normalize,
+            "rows_kept": spec.rows,
+        }
+        record["partition_reference_lambda"] = spec.partition_reference_lambda
+        record["partition_key"] = spec.partition_key
     return record
 
 
@@ -971,12 +1231,18 @@ def reference_of(
         "problem": _problem_record(spec),
         "rows": spec.rows,
         "rows_per_client": spec.rows_per_client,
-        "label_base": label_base(spec.dim),
-        "x_true": spec.truth().tolist(),
-        "truth_support": sorted(spec.truth_support()),
         "lipschitz": spec.lipschitz(),
         "client_label_balance": spec.client_label_balance(),
     }
+    if spec.source is None:
+        reference.update(
+            label_base=label_base(spec.dim),
+            x_true=spec.truth().tolist(),
+            truth_support=sorted(spec.truth_support()),
+        )
+    else:
+        lambda_max = spec.lambda_max()
+        reference.update(lambda_max=lambda_max, lambda_fraction=spec.penalty_strength / lambda_max)
     if spec.condition_number is not None:
         reference.update(_gram_record(features))
     if not spec.certified:
@@ -990,7 +1256,9 @@ def reference_of(
         )
     reference.update(
         {
-            "x_star": optimum.tolist(),
+            # Stored by its non-zeros on real data: run.json copies the whole
+            # reference into every run, and d is 5,000 on Gisette.
+            "x_star": optimum.tolist() if spec.source is None else _sparse(optimum),
             # In the order the global shard stacks the rows, which is the order
             # the task's pooled objective sums in.
             "f_star": objective(
@@ -1003,13 +1271,33 @@ def reference_of(
             ),
             "kkt_residual": residual,
             "optimum_support": sorted(support_of(optimum, 0.0)),
-            "support_recoverable": support_of(optimum, 0.0) == spec.truth_support(),
             "client_gradient_dispersion": spec.client_gradient_dispersion(optimum),
         }
     )
+    if spec.source is None:
+        reference["support_recoverable"] = support_of(optimum, 0.0) == spec.truth_support()
     if client_supports and spec.penalty == "l1":
         reference["client_support_sizes"] = spec.client_support_sizes(iterations=client_iterations)
     return reference
+
+
+def _sparse(values: Tensor) -> dict[str, list[Any]]:
+    """A vector as its non-zeros: `{"indices": [...], "values": [...]}`."""
+
+    indices = torch.nonzero(values, as_tuple=False).ravel()
+    return {"indices": indices.tolist(), "values": values[indices].tolist()}
+
+
+def _x_star_of(reference: Mapping[str, Any], dim: int) -> Tensor:
+    """The stored `x*`, dense or by its non-zeros, as a `d`-vector."""
+
+    stored = reference["x_star"]
+    if not isinstance(stored, Mapping):
+        return torch.tensor(stored, dtype=DTYPE)
+    optimum = torch.zeros(dim, dtype=DTYPE)
+    indices = torch.tensor([int(index) for index in stored["indices"]], dtype=torch.long)
+    optimum[indices] = torch.tensor([float(value) for value in stored["values"]], dtype=DTYPE)
+    return optimum
 
 
 def _gram_record(features: Tensor) -> dict[str, Any]:
@@ -1206,10 +1494,15 @@ class FedLogisticL1Task(TaskAdapter):
         self._optimum: Tensor | None = None
         self._optimal_objective: float | None = None
         if spec.certified:
-            self._optimum = torch.tensor(self.reference["x_star"], dtype=DTYPE).to(self.device)
+            self._optimum = _x_star_of(self.reference, spec.dim).to(self.device)
             self._optimal_objective = float(self.reference["f_star"])
-        self._truth: Tensor | None = spec.truth().to(self.device)
-        self._truth_support = spec.truth_support()
+        # The support a run's is scored against: the planted one, or on real
+        # data -- nothing planted -- x*'s own, where the problem has one.
+        self._truth: Tensor | None = None
+        self._truth_support: set[int] = set(self.reference.get("optimum_support", ()))
+        if spec.source is None:
+            self._truth = spec.truth().to(self.device)
+            self._truth_support = spec.truth_support()
         pooled = _pooled_rows(spec, dataset_metadata or {})
         self._pooled_features = pooled[0].to(self.device)
         self._pooled_labels = pooled[1].to(self.device)
@@ -1224,7 +1517,7 @@ class FedLogisticL1Task(TaskAdapter):
             *(("distance_to_optimum",) if self._optimum is not None else ()),
             *(("distance_to_truth",) if self._truth is not None else ()),
             "support_size",
-            "support_f1",
+            *(("support_f1",) if self._truth_support else ()),
             "exact_zeros",
         )
         self._central_names = (
@@ -1388,7 +1681,8 @@ class FedLogisticL1Task(TaskAdapter):
         if self._truth is not None:
             measured["distance_to_truth"] = torch.linalg.vector_norm(iterate - self._truth)
         measured["support_size"] = found.sum().to(DTYPE)
-        measured["support_f1"] = self._support_f1(found)
+        if self._truth_support:
+            measured["support_f1"] = self._support_f1(found)
         measured["exact_zeros"] = (iterate == 0.0).sum().to(DTYPE)
         return measured
 
@@ -1560,7 +1854,7 @@ def register() -> None:
     registry.generators.register(
         DATASET_NAME,
         generate_fed_logistic_l1_from_config,
-        sections={"problem": PROBLEM_KEYS},
+        sections={"problem": PROBLEM_KEYS, "source": SOURCE_KEYS},
     )
     registry.tasks.register(TASK_NAME, lambda **kwargs: FedLogisticL1Task(**kwargs))
     registry.models.register(MODEL_NAME, build_logistic_vector, task=TASK_NAME)
