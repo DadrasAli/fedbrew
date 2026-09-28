@@ -162,7 +162,8 @@ class AnUnsolvableExampleSaysSoTest(unittest.TestCase):
         words = "zero one two three four five six seven eight nine ten".split()
         # The sentence wraps; compare with line breaks flattened.
         self.assertIn(
-            f"**{words[len(unsolvable)].capitalize()} of the five pose problems "
+            f"**{words[len(unsolvable)].capitalize()} of the {words[len(_chapter_rows())]} "
+            "pose problems "
             "no shipped algorithm can solve.**",
             " ".join(_chapter().split()),
         )

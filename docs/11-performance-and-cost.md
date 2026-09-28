@@ -447,7 +447,7 @@ back: <reason>` in amber, and `run.json` records the reason
 
 | Part | Requirement |
 | --- | --- |
-| Task | implements `BatchableTask` (`fedbrew/tasks/base.py`): `split_rows`, `row_batches`, `functional_loss`, `functional_eval`, with a loss that averages over rows; optionally `loader_order`, which lets the round's batch orders be computed together rather than each client's loader replayed. The classification task does all five (the MLP and the CNNs), and so do the five linear examples; the causal-LM task does not. |
+| Task | implements `BatchableTask` (`fedbrew/tasks/base.py`): `split_rows`, `row_batches`, `functional_loss`, `functional_eval`, with a loss that averages over rows; optionally `loader_order`, which lets the round's batch orders be computed together rather than each client's loader replayed. The classification task does all five (the MLP and the CNNs), and so do the six linear examples; the causal-LM task does not. |
 | Model | its federated state is exactly its parameters, all trainable; no dropout at `p > 0`, which draws from the process-wide generator; no batch normalisation, whose statistics are state |
 | Rule | declares a batched update on its own class: `fedavg` in every update mode, with or without `max_grad_norm`; `local_sgd` with momentum, Nesterov, weight decay and a cosine rate; `local_adamw`, its step cap included; `fedprox`; `scaffold`, whose `c_i` is gathered from each client and its new value kept there. The last four under both of their modes. `fedlalr`, `delta_sgd`, `fedavg_ft` and `centralized` run sequentially. |
 | Runtime | `experiment.seed` set, so every loader draws from its own generator; `use_amp: false`; CPU or CUDA; not the `centralized` strategy |

@@ -70,6 +70,11 @@ EXAMPLES = {
         ("simplex-lsq", "simplex-lsq-feasible"),
     ),
     "nonconvex-simplex": ("nonconvex_simplex", "simplex_point", ("nonconvex-simplex",)),
+    "fed-logistic-l1": (
+        "fed_logistic_l1",
+        "logistic_vector",
+        ("fed-logistic-l1-synthetic-lambda0.03",),
+    ),
 }
 
 

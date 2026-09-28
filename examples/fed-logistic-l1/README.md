@@ -1,0 +1,119 @@
+# examples/fed-logistic-l1 — linear classifiers with a penalty, and the datasets they are posed on
+
+A problem here is a loss of the margin, a penalty on the iterate and its weight
+`λ`, posed on a dataset of rows `(a_i, b_i)` with `b_i ∈ {-1, +1}`:
+
+```
+min_x  F(x) = (1/n) Σ_{i=1}^n loss(b_i xᵀa_i) + λ r(x)
+```
+
+over `x ∈ ℝ^d`, with no constraint set. Each setting is one generator config
+and one directory of arm configs, named `fed-<loss>-<penalty>-<dataset>-lambda<λ>`:
+
+```bash
+fedbrew generate --config data/configs/examples/fed-logistic-l1-synthetic-lambda0.03.yaml
+fedbrew run --config configs/examples/fed-logistic-l1-synthetic-lambda0.03/fedavg.yaml
+python examples/fed-logistic-l1/run.py --setting fed-logistic-l1-synthetic-lambda0.03
+```
+
+The loss, the penalty and `λ` are written twice, in the generator config's
+`problem` block and in the run config's `model` block, and the task refuses a
+run whose two halves disagree: the rows come from the shards and the objective
+from the model block, so a mismatch would score the run against another
+problem's optimum.
+
+## The problems
+
+### Logistic loss with an L1 penalty
+
+```
+F(x) = (1/n) Σ_i log(1 + exp(-b_i xᵀa_i)) + λ‖x‖₁          (loss: logistic, penalty: l1)
+∇ℓ(x) = -(1/n) Σ_i b_i σ(-b_i xᵀa_i) a_i                   ∇²ℓ(x) ⪯ AᵀA / 4n
+```
+
+Convex and non-smooth at every point with a zero coordinate. `∇ℓ` is Lipschitz
+with `L = ‖A‖₂²/4n`, which the manifest records as `reference.lipschitz`. `F`
+is coercive, so a minimiser exists without a box. `F*` is certified at
+generation (below).
+
+## How it is federated
+
+Clients `c = 1..N` hold disjoint row sets `I_c`, all of the same size `m`, and
+client `c` optimises `F_c(x) = (1/m) Σ_{i ∈ I_c} loss(b_i xᵀa_i) + λ r(x)`, with
+the **whole** penalty in every client, as `examples/fed-lasso` does. At equal
+`m`, uniform and example-weighted aggregation are the same average and both are
+`F` exactly; `problem.py`'s `_self_check` asserts both spellings on stored rows.
+
+Every client's rows are its train, eval and test split at once
+(`client_test_source: identical_to_train`): `F_c` is defined over all `m`
+rows, so holding some out would change the objective. The central pass
+evaluates `F` on the global shard, every client's rows stacked.
+
+**The deal.** Rows are sorted by a margin (a stable sort) and dealt in blocks
+of `partition_block`, round robin: client `c` holds blocks `c, c + N, c + 2N,
+…`. A block of 1 is a stratified deal; a block of `m` gives each client one
+contiguous band of margins. The block is the heterogeneity dial.
+
+## The datasets
+
+### synthetic — the planted signal on the Halton design
+
+`fed-logistic-l1-synthetic-lambda0.03`: 32 clients × 64 rows, `d = 32`. No
+draw anywhere:
+
+- **design** `a_ij = Φ⁻¹(vdc(i, p_j))`, the Halton sequence through the normal
+  quantile, `p_j` the `j`-th prime;
+- **truth** `x_true`: 3 non-zeros at coordinates 0, 10 and 21, values `2.0`,
+  `-1.0`, `0.5` (fed-lasso's rule, scaled by `signal_scale = 2`);
+- **labels** `b_i = +1` if `σ(x_trueᵀa_i) > vdc(i, p_d)`, else `-1`, with `p_d`
+  the first prime the design does not use: a threshold in a base a column
+  already uses correlates with that column, and corrupts `x*` while the
+  support still matches;
+- **clients** dealt by the margin `x_trueᵀa_i` in blocks of 32 — a client sees
+  between 22% and 80% positives against a pooled 50%.
+
+At `λ = 0.03`: `x* = (1.456, -0.645, 0.257)` on the planted support, so support
+recovery holds (it does over `λ ∈ [0.02, 0.07]`), and
+`F* = 0.5121519380638806`, certified to a KKT residual of `1.7e-17`.
+`‖x* − x_true‖` is a floor that `distance_to_truth` cannot go below, measured
+by solving rather than given by a formula.
+
+## The reference optimum
+
+A convex problem's `x*` has no closed form. It is solved once, at generation,
+and written into the manifest with `F*` and its KKT residual; the task reads
+them as values and reports `central_test_optimality_gap = F(x) − F*`.
+
+- **L1.** FISTA at the step `1/L` identifies the support; Newton on the
+  support, with its signs fixed, takes the residual to machine precision.
+  The certificate is the residual on the full vector,
+  `max_k |∇ℓ(x)_k + λ sign(x_k)|` on the support and `max(|∇ℓ(x)_k| − λ, 0)` off
+  it, and generation refuses a reference above `1e-12`.
+
+`F*` is `F` at the stored `x*`, summed in the order the global shard stacks the
+rows, which is the order the gap is computed in.
+
+## The batched executor
+
+The task is batchable (chapter 11 §9): `split_rows`, `row_batches`,
+`functional_loss` and `functional_eval` are the arithmetic `train_step` and
+`eval_step` run, so `runtime.performance.executor: batched` trains every
+client of a round together. `tests/test_fed_logistic_l1.py` holds one FedAvg
+round of each problem, batched, to the sequential run within the executor's
+`1e-12`.
+
+## Which shipped algorithms can solve it
+
+**The L1 problem: none**, for fed-lasso's reason. There is no proximal
+operator anywhere in fedbrew, so every arm runs subgradient descent on a
+non-smooth objective: `exact_zeros` reads `d` at round 0 and 0 from round 1
+on, and the support exists only at `support_tolerance`.
+
+## Files
+
+| Path | What it is |
+| --- | --- |
+| `problem.py` | the losses, penalties and their gradients, the generator, the reference solves, the task and the model, `register()` and `_self_check()` |
+| `run.py` | runs one setting's arms through `fedbrew run` and tables their final round |
+| `../../data/configs/examples/fed-*-lambda*.yaml` | one generator config per setting |
+| `../../configs/examples/fed-*-lambda*/fedavg.yaml` | one FedAvg arm per setting, its step `1/L` and untuned |

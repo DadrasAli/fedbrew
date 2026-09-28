@@ -28,13 +28,17 @@ examples/    pl-1d/                     (7 arms)
              fed-lasso/  fed-lasso-l2/  fed-lasso-smooth/  (9 arms each, 1 arm)
              simplex-lsq/  simplex-lsq-feasible/               (8 arms, 3 arms)
              nonconvex-simplex/                                       (8 arms)
+             fed-logistic-l1-synthetic-lambda0.03/                    (1 arm)
 ```
 
 `examples/` is one directory per *dial setting* rather than per dataset,
 because those examples turn a dial by generating different data:
 `drift-quad-rate/` and `drift-quad-floor/` hold the same eight arms as
 `drift-quad/` against a second and a third generated dataset, and the `-l2`,
-`-smooth` and `-feasible` directories are controls of the same shape. Their task, model and generator are defined
+`-smooth` and `-feasible` directories are controls of the same shape. The
+`fed-<loss>-<penalty>-<dataset>-lambda<λ>` directories are
+`examples/fed-logistic-l1`'s settings, one problem on one dataset each, with
+one untuned FedAvg arm. Their task, model and generator are defined
 outside the package, in each example's `problem.py`, which every config names
 — the key that does that is [chapter 04](../docs/04-configuration.md)'s, and
 what it is for is [chapter 12](../docs/12-extending.md)'s.
