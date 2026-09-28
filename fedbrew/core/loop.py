@@ -20,9 +20,11 @@ from fedbrew.core.artifacts import (
     round_metrics_gap,
 )
 from fedbrew.core.checkpointing import (
+    CHECKPOINT_FORMAT,
     DEFAULT_SELECTION_METRIC,
     StagedCheckpoints,
     selection_mode_for_metric,
+    stack_client_states,
 )
 from fedbrew.core.config import (
     CLIENT_METRIC_BASES,
@@ -1595,6 +1597,9 @@ def _build_checkpoint_payload(
 
     server_state = server.save_state()
     checkpoint_state = {
+        # The layout, which load_checkpoint reads any of: client states are
+        # written stacked (stack_client_states).
+        "checkpoint_format": CHECKPOINT_FORMAT,
         "round_id": round_id,
         "model_state": server_payload["model_state"],
         "metrics": metrics,
@@ -1627,7 +1632,7 @@ def _build_checkpoint_payload(
 
     client_states = _collect_client_states(client)
     if client_states is not None:
-        checkpoint_state["client_states"] = client_states
+        checkpoint_state["client_states"] = stack_client_states(client_states)
     return checkpoint_state
 
 

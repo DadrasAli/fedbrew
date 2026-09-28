@@ -42,7 +42,7 @@ import yaml
 
 from fedbrew.clients.lazy_pool import LazyClientPool
 from fedbrew.core import runner
-from fedbrew.core.checkpointing import refuse_a_reconfigured_resume
+from fedbrew.core.checkpointing import load_checkpoint, refuse_a_reconfigured_resume
 from fedbrew.core.config import ClientStatisticsConfig
 from fedbrew.core.loop import (
     _aggregate_client_split_metrics,
@@ -263,7 +263,9 @@ class TheResumePathRefusesInWordsTest(unittest.TestCase):
 
     def _doctored(self, name: str, edit: Callable[[dict[str, Any]], Any]) -> tuple[Path, Path]:
         directory = self._copy(name)
-        checkpoint = torch.load(directory / "checkpoints" / "latest.pt", weights_only=False)
+        # load_checkpoint's layout, whichever format the file is in: each edit
+        # below is of a client_states mapping.
+        checkpoint = load_checkpoint(directory / "checkpoints" / "latest.pt")
         target = directory / "checkpoints" / "doctored.pt"
         torch.save(edit(checkpoint), target)
         return directory, target

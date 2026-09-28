@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import re
+import struct
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
@@ -273,12 +275,233 @@ def save_best_checkpoint(
 
 
 def load_checkpoint(path: str | Path) -> dict[str, Any]:
-    """Load a checkpoint dictionary from disk."""
+    """Load a checkpoint dictionary from disk, in any format this code has written.
+
+    What it returns is format 1's layout whichever format the file is in:
+    ``client_states`` one mapping per client, and no ``checkpoint_format``
+    key. Everything that reads a checkpoint reads that.
+    """
 
     checkpoint = torch.load(Path(path), map_location="cpu", weights_only=False)
     if not isinstance(checkpoint, dict):
         raise RunRefused("checkpoint must contain a dictionary")
-    return cast(dict[str, Any], checkpoint)
+    return read_checkpoint_format(cast(dict[str, Any], checkpoint))
+
+
+#: The layout of the checkpoints this code writes, under the top-level key
+#: ``checkpoint_format``. Format 1, which has no such key, holds
+#: ``client_states`` as one mapping per client; format 2 holds them stacked
+#: (:func:`stack_client_states`). :func:`load_checkpoint` reads both, and the
+#: states it gives are the same.
+CHECKPOINT_FORMAT = 2
+
+
+def read_checkpoint_format(checkpoint: dict[str, Any]) -> dict[str, Any]:
+    """Put a loaded checkpoint in format 1's layout, refusing a format this code does not know.
+
+    Raises:
+        RunRefused: The checkpoint names a format that is not an integer from
+            1 to :data:`CHECKPOINT_FORMAT`, or its stacked client states are
+            not in format 2's layout.
+    """
+
+    version = checkpoint.pop("checkpoint_format", 1)
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise RunRefused(f"checkpoint_format must be a positive integer, got {version!r}")
+    if version > CHECKPOINT_FORMAT:
+        raise RunRefused(
+            f"this checkpoint was written in checkpoint format {version}, and this "
+            f"code reads formats 1 to {CHECKPOINT_FORMAT}. Resume it with the version "
+            "that wrote it."
+        )
+    if version >= 2 and "client_states" in checkpoint:
+        checkpoint["client_states"] = unstack_client_states(checkpoint["client_states"])
+    return checkpoint
+
+
+def stack_client_states(states: Mapping[Any, Any]) -> dict[str, Any]:
+    """Every client's state, one column per key: format 2's ``client_states``.
+
+    Format 1 pickled 1000 client states as 1000 dicts of some twenty values
+    each, and ``torch.save`` calls a Python hook for every object it pickles:
+    about 37,000 calls, 28 ms of every MNIST MLP round at 1000 clients
+    (measured on 2026-09-27, an A100 node's host). Here each key is one column
+    over the clients, and a column is:
+
+    - ``shared``: one value every client holds, stored once -- a setting;
+    - ``client_id``: each client's own id;
+    - ``int``, ``float``, ``bool``: one tensor of the clients' Python numbers,
+      int64, float64 or bool, each read back as the number it was;
+    - ``tensor``: tensors of one dtype, shape and device, stacked on a leading
+      client dimension -- SCAFFOLD's control variates are one per parameter;
+    - ``mapping``: dicts with the same keys, as columns of their own;
+    - ``values``: anything else, one entry per client.
+
+    A client whose state is not a dict with the first client's keys, in the
+    same order, is kept whole under ``separate``. ``clients`` is every id, in
+    order, so :func:`unstack_client_states` gives back the same mapping, in the
+    same order, with the same values: the same types, and tensors with the
+    same dtype, shape and bits, each in storage of its own.
+    """
+
+    ids = list(states)
+    template = next((state for state in states.values() if type(state) is dict), None)
+    keys = list(template) if template is not None else []
+    grouped = [
+        client_id
+        for client_id in ids
+        if type(states[client_id]) is dict and list(states[client_id]) == keys
+    ]
+    members = set(grouped)
+    rows = [states[client_id] for client_id in grouped]
+    return {
+        "clients": ids,
+        "columns": {key: _column([row[key] for row in rows], grouped) for key in keys}
+        if rows
+        else {},
+        "separate": {client_id: states[client_id] for client_id in ids if client_id not in members},
+    }
+
+
+def unstack_client_states(stacked: Any) -> Any:
+    """Format 1's ``client_states`` from format 2's (:func:`stack_client_states`).
+
+    Anything that is not a mapping is returned as it is, for the resume to
+    refuse as it refuses such a value in format 1.
+
+    Raises:
+        RunRefused: A mapping that is not in format 2's layout.
+    """
+
+    if not isinstance(stacked, Mapping):
+        return stacked
+    if set(stacked) != {"clients", "columns", "separate"}:
+        raise RunRefused(
+            "checkpoint client_states are not in format 2's stacked layout "
+            f"(clients, columns, separate): {sorted(map(str, stacked))}"
+        )
+    ids, columns, separate = stacked["clients"], stacked["columns"], stacked["separate"]
+    grouped = [client_id for client_id in ids if client_id not in separate]
+    decoded = {key: _column_values(column, grouped) for key, column in columns.items()}
+    rows = iter(
+        [dict(zip(decoded, row, strict=True)) for row in zip(*decoded.values(), strict=True)]
+        if decoded
+        else [{} for _ in grouped]
+    )
+    return {
+        client_id: separate[client_id] if client_id in separate else next(rows) for client_id in ids
+    }
+
+
+def _column(values: list[Any], ids: list[Any]) -> dict[str, Any]:
+    """One key's values over the clients, as the column that holds them."""
+
+    first = values[0]
+    kinds = set(map(type, values))
+    if len(kinds) != 1:
+        return {"values": values}
+    kind = kinds.pop()
+    if kind in (str, int, bool, type(None)) and values.count(first) == len(values):
+        return {"shared": first}
+    if kind is str and values == ids:
+        return {"client_id": True}
+    if kind in _NUMBER_DTYPES:
+        return _number_column(kind, values)
+    if kind is torch.Tensor and _stackable(values):
+        return {"tensor": torch.stack(values)}
+    if kind is dict and all(list(value) == list(first) for value in values):
+        return {"mapping": {key: _column([value[key] for value in values], ids) for key in first}}
+    if kind in (list, tuple) and _all_same(values):
+        return {"shared": first}
+    return {"values": values}
+
+
+#: A number column's tensor dtype, by the clients' Python type; each reads
+#: back as the number it was.
+_NUMBER_DTYPES = {bool: torch.bool, int: torch.int64, float: torch.float64}
+
+
+def _number_column(kind: type, values: list[Any]) -> dict[str, Any]:
+    """Python numbers of one type as one tensor; integers past int64 one entry each."""
+
+    try:
+        return {kind.__name__: torch.tensor(values, dtype=_NUMBER_DTYPES[kind])}
+    except (OverflowError, RuntimeError):
+        return {"values": values}
+
+
+def _stackable(tensors: list[torch.Tensor]) -> bool:
+    """Whether plain tensors stack into one whose rows read back as each of them."""
+
+    first = tensors[0]
+    return all(
+        tensor.layout is torch.strided
+        and not tensor.requires_grad
+        and not tensor.is_quantized
+        and tensor.dtype is first.dtype
+        and tensor.shape == first.shape
+        and tensor.device == first.device
+        for tensor in tensors
+    )
+
+
+def _all_same(values: list[Any]) -> bool:
+    """Whether every list or tuple in ``values`` is the first: equal, elements of its types.
+
+    A list of names -- what a client's ``metrics`` is -- is compared in C;
+    only a list holding floats or containers is compared element by element.
+    """
+
+    first = values[0]
+    if values.count(first) != len(values):
+        return False
+    types = list(map(type, first))
+    if all(kind in (str, int, bool, type(None)) for kind in types):
+        return all(list(map(type, value)) == types for value in values)
+    return all(_same(value, first) for value in values)
+
+
+def _same(left: Any, right: Any) -> bool:
+    """Whether two plain values are the same value of the same types, floats bit for bit."""
+
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, float):
+        return struct.pack("<d", left) == struct.pack("<d", right)
+    if isinstance(left, list | tuple):
+        return len(left) == len(right) and all(
+            _same(a, b) for a, b in zip(left, right, strict=True)
+        )
+    return isinstance(left, str | int | bool | type(None)) and left == right
+
+
+def _column_values(column: Mapping[str, Any], ids: list[Any]) -> list[Any]:
+    """Each client's value from one column, in ``ids``' order."""
+
+    ((kind, held),) = column.items()
+    if kind == "shared":
+        # A mutable setting -- a list of metric names -- is each client's own.
+        if isinstance(held, str | int | float | type(None)):
+            return [held] * len(ids)
+        if type(held) is list and all(
+            isinstance(item, str | int | float | type(None)) for item in held
+        ):
+            return [list(held) for _ in ids]
+        return [copy.deepcopy(held) for _ in ids]
+    if kind == "client_id":
+        return list(ids)
+    if kind in ("int", "float", "bool"):
+        return held.tolist()
+    if kind == "tensor":
+        return [row.clone() for row in held.unbind(0)]
+    if kind == "mapping":
+        decoded = {key: _column_values(inner, ids) for key, inner in held.items()}
+        if not decoded:
+            return [{} for _ in ids]
+        return [dict(zip(decoded, row, strict=True)) for row in zip(*decoded.values(), strict=True)]
+    if kind == "values":
+        return list(held)
+    raise RunRefused(f"checkpoint client_states hold a column of unknown kind {kind!r}")
 
 
 def find_latest_checkpoint(output_dir: str | Path) -> Path | None:

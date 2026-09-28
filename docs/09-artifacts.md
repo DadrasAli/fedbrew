@@ -332,6 +332,24 @@ run's history is `round_metrics.csv`, which a resume replays (§5), so the list
 is gone, and a checkpoint that still carries it resumes with it ignored.
 `tests/test_checkpoint_size_is_constant_in_rounds.py` guards it.
 
+**Client states are written stacked (checkpoint format 2).** Format 1 held
+`client_states` as one dict per client, and `torch.save` calls a Python hook
+for every object it pickles: about 37,000 calls for 1000 clients' twenty-odd
+settings each, 28 ms of every MNIST MLP round at 1000 clients under
+`save_last` (measured on 2026-09-27). A checkpoint now carries
+`checkpoint_format: 2`, and `client_states` holds `clients` (every id, in
+order), `columns` (one per key: a setting every client shares stored once,
+the clients' numbers as one int64, float64 or bool tensor, same-shaped tensors
+such as SCAFFOLD's control variates stacked on a leading client dimension,
+dicts as columns of their own, anything else one entry per client) and
+`separate` (any client whose state has other keys, kept whole) —
+`stack_client_states`, `fedbrew/core/checkpointing.py`. `load_checkpoint`
+reads either format and gives format 1's layout, so every reader, the resume
+included, sees one; the states are the same values of the same types, floats
+and tensors bit for bit, and a resume from either is the same run. A format
+it does not know is refused. `tests/test_client_states_are_stacked.py` guards
+it.
+
 A checkpoint carries enough to continue, not just to evaluate:
 
 | Contents | Why |
@@ -622,6 +640,7 @@ python -m pytest tests/test_run_provenance.py \
 | `tests/test_flush_cadence.py` | §2: `runtime.flush_every` changes no number; the CSVs are at or past every visible checkpoint after each flush and between them; a SIGKILL anywhere, then `--resume-latest`, ends bit-identical to the uninterrupted run. |
 | `tests/test_round_metrics_are_appended.py` | §2: `round_metrics.csv` appends rather than rewrites, byte-for-byte what a rewrite writes; a row cut short is dropped, and a kill inside the append is resumable. |
 | `tests/test_checkpoint_no_duplicate_model.py` | The model is stored once. |
+| `tests/test_client_states_are_stacked.py` | §4: client states are written one column per key and read back exactly, format 1 is still read, an unknown format is refused, and a resume from either format is bit-identical to the other and to the uninterrupted run. |
 | `tests/test_checkpoint_size_is_constant_in_rounds.py` | §4: `latest.pt` is the same size after 3 rounds and 30 for every server family; a checkpoint carrying the old history still resumes. |
 | `tests/test_resume_is_all_or_nothing.py` | §5: a SCAFFOLD resume that would strand the control variate is refused, and the narrower cases are not. |
 | `tests/test_best_checkpoint_selection_is_not_frozen.py` | §4: a non-finite selection metric is skipped rather than made the run's best. |

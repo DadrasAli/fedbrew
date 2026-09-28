@@ -44,6 +44,7 @@ from unittest import mock
 import torch
 import yaml
 
+from fedbrew.core.checkpointing import load_checkpoint
 from fedbrew.core.runner import run
 from fedbrew.data.manifest_dataset import ManifestFederatedDataset
 from tests.test_reproducibility import TIMING
@@ -189,8 +190,8 @@ class ExecutorRuns(unittest.TestCase):
     def _compare_checkpoint(
         self, batched: Path, sequential: Path, exact: bool, tolerance: float
     ) -> None:
-        loaded_b = torch.load(batched, weights_only=False)
-        loaded_s = torch.load(sequential, weights_only=False)
+        loaded_b = load_checkpoint(batched)
+        loaded_s = load_checkpoint(sequential)
         model = loaded_s["model_state"]
         pairs = [("model_state", loaded_b["model_state"], model)]
         for client, state in loaded_s["client_states"].items():
