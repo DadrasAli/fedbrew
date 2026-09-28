@@ -602,6 +602,40 @@ evaluation is not batched across settings. A setting's timing columns
 includes the other settings' turns: its fold waits for the round's other
 settings to plan. A group is not resumed as a group.
 
+## 11. Modes of the batched step
+
+An opt-in key, `runtime.performance.precision`, changes how the batched
+executor's training step runs (`StepContext`,
+`fedbrew/core/batched_executor.py`). It needs `executor: batched`, and its
+default, `reference`, leaves the step as §9 describes it. It changes the
+training step only: the update arithmetic stays at the model's precision,
+and the post-fit pass and every evaluation run at the model's own precision,
+so what a run reports is measured the way the reference measures it.
+`run.json` records what ran (`reproducibility.executor`, chapter 09 §3.3),
+and the plan header prints it, in amber when it is not what was asked for.
+
+| Mode | What the step does | Applies to |
+| --- | --- | --- |
+| `reference` | the model's own precision | everything |
+| `f32_f64` | steps a float64 model in float32: parameters, data rows, masks and values cast once per round, the trained stack cast back | a float64 model (the linear examples) |
+| `tf32` | float32 matmuls and convolutions on TensorFloat32 (`allow_tf32`), for the step only | a float32 model on CUDA |
+| `bf16` | the loss under bfloat16 autocast | a float32 model |
+
+A mode that does not apply runs the reference and says why.
+
+**How far each is from the reference.** Measured against the batched
+reference run of the same config over four rounds (2026-09-28, CPU), and
+held by a test at the bound given:
+
+| Mode | Measured, worst model tensor / worst cell | Held to | Test |
+| --- | --- | --- | --- |
+| `f32_f64`, fed-lasso-l2, simplex-lsq, pl-1d | at most 5.6e-7 / 6.0e-6 | `1e-4` | `tests/test_precision_modes.py` |
+| `f32_f64`, fed-lasso | 1.1e-3 / 1.4e-4 | not held: the L1 kink (§9) turns float32 rounding into steps `lam` apart | — |
+| `bf16`, the MLP | 9.5e-3 / 9.1e-3 in a loss spread | `5e-2`, model and loss cells | `tests/test_precision_modes.py` |
+| `tf32`, the MLP on CUDA | measured in the step 6 GPU run | `5e-2`, bf16's: TF32 keeps 10 mantissa bits to bfloat16's 7 | same, marked `cuda` |
+
+Accuracy cells under `bf16` move by whole examples and are not held.
+
 ## For agents
 
 ### Paths
@@ -687,6 +721,7 @@ python tools/bench_compare_runs.py --help
 | `tests/test_batched_executor.py` | §9: the keys, the fallback and its record, client isolation, the refusals, the generator, and one chunk at a time. |
 | `tests/test_batch_orders.py` | §9: every planned order is its loader's own, for every task, update mode, shuffle, `drop_last` and `max_local_steps`, 520 clients at once included; the bulk seeds are `dataloader_seed`'s. |
 | `tests/test_batched_evaluator.py` | §9: ragged, shuffled and missing evaluation splits through both evaluators, the refusal's words, and the central pass's kept model and shard. |
+| `tests/test_precision_modes.py` | §11: `f32_f64` within `1e-4` on the smooth examples, and in a group of settings each as alone; `bf16` within `5e-2` on the MLP; `tf32` within `5e-2` on CUDA; each mode trained otherwise than the reference; a mode that does not apply runs the reference bit for bit and says why; the key needs the batched executor. |
 | `tests/test_program_values.py` | §9: a bucket shares its program's shape, not its values; a client stepped beside clients with other values is the client stepped alone, bit for bit, in every shape and both float widths, and a client alone is `torch.optim`'s SGD and AdamW step. |
 | `tests/test_sweep.py` | §10: `fedbrew sweep` groups the configs equal but for the run's name and the numeric hyperparameters it lists, runs any other config alone and one that does not load alone, keeps two configs that would write one directory apart, `--plan` runs nothing, `--run-group` refuses configs that are not one group, and a sweep of a group and a config alone writes both, the group recorded; the exit status. |
 | `tests/test_settings_group.py` | §10: a group of one is its run alone bit for bit; each setting matches its run alone within the tolerance, its checkpoints' generator state exactly, under the stacked and the per-client paths, server settings, a budget that splits rounds, and the MLP; a diverging or refused setting stops alone, the others bit-identical to the group without it; run.json's `group`; how units are packed. |

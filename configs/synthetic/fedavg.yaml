@@ -91,6 +91,7 @@ runtime:
     # identical across every arm of a comparison.
     matmul_precision: highest
     cudnn_benchmark: false
+    precision: reference
     # Absent from the mnist family, which this config otherwise mirrors --
     # added here because this one is the config every reader runs first, and
     # left unset it was not fine. This workload is the same shape as

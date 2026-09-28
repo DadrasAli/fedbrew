@@ -772,6 +772,7 @@ _KNOWN_EXTRA_KEYS: dict[str, frozenset[str]] = {
             "shard_cache_bytes",
             "executor",
             "executor_chunk_bytes",
+            "precision",
         }
     ),
     # Only the four the loader takes from the config. batch_size, shuffle,
@@ -803,7 +804,9 @@ _KNOWN_EXTRA_KEYS: dict[str, frozenset[str]] = {
 #: the choice -- and the arithmetic -- depends on what else the machine was
 #: doing. Adding a key here is a claim that it is safe to compare across;
 #: chapter 10 owns the argument for each.
-NUMERICS_PERFORMANCE_KEYS: frozenset[str] = frozenset({"matmul_precision", "cudnn_benchmark"})
+NUMERICS_PERFORMANCE_KEYS: frozenset[str] = frozenset(
+    {"matmul_precision", "cudnn_benchmark", "precision"}
+)
 
 #: The complement, derived rather than restated: no key can be in both, and a
 #: new performance key is throughput-only until someone argues otherwise.
@@ -923,6 +926,10 @@ def _validate_performance_values(config: FullConfig) -> None:
 #: ``sequential``, says so in the plan header, and records why in run.json.
 EXECUTORS: frozenset[str] = frozenset({"sequential", "batched"})
 
+#: What ``runtime.performance.precision`` accepts: the reference, or a mode the
+#: batched executor trains in (chapter 11 §11).
+PRECISIONS: tuple[str, ...] = ("reference", "f32_f64", "tf32", "bf16")
+
 
 def _validate_executor_values(performance: Mapping[str, Any]) -> None:
     """Refuse an executor the runner does not have, or a chunk budget it cannot use."""
@@ -934,6 +941,7 @@ def _validate_executor_values(performance: Mapping[str, Any]) -> None:
             + ", ".join(sorted(EXECUTORS))
             + f", got {executor!r}"
         )
+    _validate_step_modes(performance)
     chunk_bytes = performance.get("executor_chunk_bytes")
     if chunk_bytes is not None and (
         isinstance(chunk_bytes, bool) or not isinstance(chunk_bytes, int) or chunk_bytes <= 0
@@ -941,6 +949,29 @@ def _validate_executor_values(performance: Mapping[str, Any]) -> None:
         raise RunRefused(
             "runtime.performance.executor_chunk_bytes must be a positive integer, "
             f"got {chunk_bytes!r}"
+        )
+
+
+def _validate_step_modes(performance: Mapping[str, Any]) -> None:
+    """Refuse a precision the executor does not have, or one without it.
+
+    A precision changes how the batched executor's step runs, so a config
+    that asks for one without ``executor: batched`` would record a mode that
+    never ran.
+    """
+
+    precision = performance.get("precision")
+    if precision is not None and precision not in PRECISIONS:
+        raise RunRefused(
+            "runtime.performance.precision must be one of "
+            + ", ".join(PRECISIONS)
+            + f", got {precision!r}"
+        )
+    asked = ["precision"] if precision not in (None, "reference") else []
+    if asked and performance.get("executor") != "batched":
+        raise RunRefused(
+            f"runtime.performance.{asked[0]} is a mode of the batched executor's step; "
+            "set runtime.performance.executor: batched"
         )
 
 

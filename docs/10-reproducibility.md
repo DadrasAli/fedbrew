@@ -117,6 +117,12 @@ not.
   typo cannot leave a run training at `highest` while `run.json` claims
   otherwise.
 
+- **`runtime.performance.precision`.** `precision`'s modes `f32_f64`, `tf32`
+  and `bf16` train the batched executor's step at a lower precision -- float32, TensorFloat32
+  matmuls, a bfloat16 loss -- and evaluate at the model's own. Each is held
+  to a measured bound against `reference` (chapter 11 §11), and a run in one
+  is not comparable to a run in another.
+
 - **`runtime.use_amp: true`** trains in float16 where autocast allows it.
 
 - **`client.eval_batch_size`** changes floating-point summation order in metric

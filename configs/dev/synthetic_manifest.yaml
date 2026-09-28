@@ -65,6 +65,7 @@ runtime:
     # identical across every arm of a comparison.
     matmul_precision: highest
     cudnn_benchmark: false
+    precision: reference
 
 defaults:
   global_rounds: 3

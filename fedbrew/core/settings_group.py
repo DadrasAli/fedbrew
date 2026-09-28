@@ -51,6 +51,7 @@ from fedbrew.clients.batch_orders import RoundOrders
 from fedbrew.clients.batched_update import ClientBatchPlan, data_versions, plan_round
 from fedbrew.core.batched_executor import (
     DEFAULT_EXECUTOR_CHUNK_BYTES,
+    StepContext,
     TrainedChunk,
     _Bucket,
     _plans,
@@ -193,6 +194,8 @@ class SettingsGroup:
         self.varies = list(varies)
         self.identity = hashlib.sha256("\0".join(self.configs).encode()).hexdigest()[:12]
         self.chunk_bytes = DEFAULT_EXECUTOR_CHUNK_BYTES
+        #: How the combined steps run: the settings' ``StepContext``.
+        self.context: StepContext | None = None
         #: The group's record, shared by every setting's run.json.
         self.largest_chunk_rows = 0
         self._registered: dict[int, _Prep] = {}
@@ -358,6 +361,7 @@ class SettingsGroup:
                 rows_of[key],
                 orders_of[key],
                 _ranges(rows),
+                self.context,
             ).run()
             for key, rows in buckets.items()
         }
@@ -578,6 +582,10 @@ class GroupSetting:
         if executor is None:
             return None, record
         self.group.chunk_bytes = executor.chunk_bytes
+        # Every setting asks for the same precision; the first's context
+        # steps them all.
+        if self.group.context is None:
+            self.group.context = executor.context
         self.record["largest_chunk_rows"] = 0
         return GroupExecutor(self, executor.chunk_bytes, record), record
 

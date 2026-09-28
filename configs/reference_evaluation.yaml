@@ -86,6 +86,7 @@ runtime:
     # identical across every arm of a comparison.
     matmul_precision: highest
     cudnn_benchmark: false
+    precision: reference
 
 # One block per data split. Evaluation is the expensive part of a round, so
 # these knobs control cost only: which metrics come out is fixed, and is

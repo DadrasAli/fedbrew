@@ -404,6 +404,7 @@ strategy does not load clean under another.
 | `shard_cache_bytes` | int | `4294967296` (4 GiB) | Forced to `0` for the centralized strategy, whose pooled view would only hold a second copy. |
 | `executor` | `sequential` \| `batched` | `sequential` | How a round's sampled clients are run. `batched` trains them together, to summation order; a configuration it cannot batch runs `sequential` and the plan header and `run.json` say why. Chapter 11 §9. |
 | `executor_chunk_bytes` | int > 0 | `1073741824` (1 GiB) | The memory one chunk of batched clients may take. Chapter 11 §9. |
+| `precision` | `reference` \| `f32_f64` \| `tf32` \| `bf16` | `reference` | **Changes the numbers.** The batched executor's training step at a lower precision: `f32_f64` steps a float64 model in float32, `tf32` lets CUDA's float32 matmuls use TensorFloat32, `bf16` runs the loss under bfloat16 autocast. Every evaluation stays at the model's precision. A mode that does not apply to the model or device runs the reference, and the plan header and `run.json` say why. Needs `executor: batched`. Chapter 11 §11. |
 | `dataloader` | mapping | — | Four keys, below. |
 
 These three are checked by `validate_config` and then **applied**, not

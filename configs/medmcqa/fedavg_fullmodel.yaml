@@ -84,6 +84,7 @@ runtime:
     # like-for-like with these. See docs/10-reproducibility.md.
     matmul_precision: high
     cudnn_benchmark: false
+    precision: reference
     reuse_model: true
     fast_batching: true
     shard_cache_bytes: 4294967296

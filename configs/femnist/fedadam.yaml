@@ -91,6 +91,7 @@ runtime:
     # like-for-like with these. See docs/10-reproducibility.md.
     matmul_precision: high
     cudnn_benchmark: false
+    precision: reference
     # The three below are throughput-only and do not change results.
     # See docs/10-reproducibility.md.
     reuse_model: true

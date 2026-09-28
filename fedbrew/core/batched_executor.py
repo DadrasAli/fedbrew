@@ -47,6 +47,7 @@ from __future__ import annotations
 import copy
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import partial
 from typing import Any
@@ -94,6 +95,7 @@ class BatchedExecutor:
         self,
         chunk_bytes: int = DEFAULT_EXECUTOR_CHUNK_BYTES,
         record: dict[str, Any] | None = None,
+        context: StepContext | None = None,
     ) -> None:
         """Args:
         chunk_bytes: The memory one chunk of clients may take, estimated
@@ -101,6 +103,8 @@ class BatchedExecutor:
             At least one client is taken whatever it costs.
         record: Kept current with ``largest_chunk_clients``, the most
             clients one chunk has held -- run.json's record of the executor.
+        context: How the training step runs (``runtime.performance.precision``);
+            None is the reference, at the model's own precision.
         """
 
         if isinstance(chunk_bytes, bool) or int(chunk_bytes) <= 0:
@@ -108,6 +112,7 @@ class BatchedExecutor:
         self.chunk_bytes = int(chunk_bytes)
         self.record = record if record is not None else {}
         self.record.setdefault("largest_chunk_clients", 0)
+        self.context = context
         #: The stacked rows of the last round's buckets, kept while the round is
         #: one chunk: at full participation the same clients' unchanged data
         #: would otherwise be stacked again every round.
@@ -197,7 +202,9 @@ class BatchedExecutor:
                 self.record["largest_chunk_clients"], stop - start
             )
             chunk_started = time.perf_counter()
-            trained = train_chunk(task, template, plans[start:stop], orders, kept, self._rows)
+            trained = train_chunk(
+                task, template, plans[start:stop], orders, kept, self._rows, self.context
+            )
             if kept is None:
                 self._rows = {}
             yield start, stop, plans, trained, time.perf_counter() - chunk_started
@@ -351,6 +358,7 @@ def _train_buckets(
     orders: tuple[RoundOrders, RoundOrders],
     kept: Mapping[tuple[int, ...], _Rows] | None,
     keep: dict[tuple[int, ...], _Rows] | None,
+    context: StepContext | None = None,
 ) -> tuple[list[str], list[tuple[list[int], dict[str, Tensor], Any, Any]]]:
     """Train one chunk's clients, bucket by bucket.
 
@@ -367,7 +375,16 @@ def _train_buckets(
     trained = [
         (
             members,
-            *_run_bucket(task, template, buffers, [plans[i] for i in members], orders, kept, keep),
+            *_run_bucket(
+                task,
+                template,
+                buffers,
+                [plans[i] for i in members],
+                orders,
+                kept,
+                keep,
+                context=context,
+            ),
         )
         for members in buckets.values()
     ]
@@ -381,6 +398,7 @@ def _train_chunk(
     orders: tuple[RoundOrders, RoundOrders],
     kept: Mapping[tuple[int, ...], _Rows] | None = None,
     keep: dict[tuple[int, ...], _Rows] | None = None,
+    context: StepContext | None = None,
 ) -> list[ClientBatchFit]:
     """Train one chunk's clients, bucket by bucket, and return each one's share.
 
@@ -391,7 +409,7 @@ def _train_chunk(
     """
 
     return chunk_fits(
-        task, template, plans, *_train_buckets(task, template, plans, orders, kept, keep)
+        task, template, plans, *_train_buckets(task, template, plans, orders, kept, keep, context)
     )
 
 
@@ -450,6 +468,7 @@ def _train_chunk_stacked(
     orders: tuple[RoundOrders, RoundOrders],
     kept: Mapping[tuple[int, ...], _Rows] | None = None,
     keep: dict[tuple[int, ...], _Rows] | None = None,
+    context: StepContext | None = None,
 ) -> ChunkFit:
     """``_train_chunk``, for a rule that builds its results stacked: each bucket as columns.
 
@@ -462,7 +481,7 @@ def _train_chunk_stacked(
     """
 
     return chunk_fit_stacked(
-        task, template, *_train_buckets(task, template, plans, orders, kept, keep)
+        task, template, *_train_buckets(task, template, plans, orders, kept, keep, context)
     )
 
 
@@ -559,6 +578,7 @@ def _run_bucket(
     kept: Mapping[tuple[int, ...], _Rows] | None,
     keep: dict[tuple[int, ...], _Rows] | None,
     parts: Sequence[tuple[int, int]] | None = None,
+    context: StepContext | None = None,
 ) -> tuple[dict[str, Tensor], Any, Any]:
     """One bucket's clients trained on their stacked rows, kept rows reused.
 
@@ -573,7 +593,7 @@ def _run_bucket(
         rows = _Rows(task, sources)
     if keep is not None:
         keep[key] = rows
-    return _Bucket(task, template, buffers, plans, rows, orders, parts).run()
+    return _Bucket(task, template, buffers, plans, rows, orders, parts, context).run()
 
 
 class _Rows:
@@ -601,6 +621,26 @@ class _Rows:
         first = self.tensors[0]
         self.device = first.device
         self.bytes = sum(tensor.numel() * tensor.element_size() for tensor in self.tensors)
+        self._cast: dict[torch.dtype, _Rows] = {}
+
+    def as_dtype(self, dtype: torch.dtype) -> _Rows:
+        """These rows with every floating tensor in ``dtype``: themselves, when it is theirs.
+
+        The copy is kept with the rows, so rows kept for the next round are
+        cast once.
+        """
+
+        if all(not tensor.is_floating_point() or tensor.dtype == dtype for tensor in self.tensors):
+            return self
+        if dtype not in self._cast:
+            rows = copy.copy(self)
+            rows.tensors = tuple(
+                tensor.to(dtype) if tensor.is_floating_point() else tensor
+                for tensor in self.tensors
+            )
+            rows._cast = {}
+            self._cast[dtype] = rows
+        return self._cast[dtype]
 
     def serving(self, sources: list[Any]) -> _Rows:
         """These rows, held as the rows of other splits over the same tensors, unedited.
@@ -901,32 +941,47 @@ class _Bucket:
         rows: _Rows,
         orders: tuple[RoundOrders, RoundOrders],
         parts: Sequence[tuple[int, int]] | None = None,
+        context: StepContext | None = None,
     ) -> None:
         self.task = task
-        self.model = model
-        self.buffers = buffers
         self.plans = plans
         self.program = plans[0].program
         self.structure = plans[0].structure
         self.size = len(plans)
         self.stacked = self.size > 1
         first = next(model.parameters())
-        self.device, self.dtype = first.device, first.dtype
+        self.device, self.model_dtype = first.device, first.dtype
         self.parameters = dict(model.named_parameters())
+        #: The reference unless the run asks for a precision: the step then
+        #: runs at ``dtype`` (float32 under f32_f64), under autocast or TF32,
+        #: and the post-fit pass as the reference runs it.
+        self.context = context or StepContext()
+        self.dtype = self.context.train_dtype(self.model_dtype)
+        self.model = model
+        self.buffers = buffers
+        # The pass measures the model as trained, at its own precision.
+        self.eval_model, self.eval_buffers = model, buffers
+        self.buffers = {
+            name: value.to(self.dtype) if value.is_floating_point() else value
+            for name, value in self.buffers.items()
+        }
         self.rows = rows
         slots = [plan.slot for plan in plans]
         train, evaluation = orders
-        self.steps = _Steps(rows, train, slots, self.dtype)
+        self.steps = _Steps(rows.as_dtype(self.dtype), train, slots, self.dtype)
         self.evaluation = evaluation
         self.parts = list(parts) if parts is not None and len(parts) > 1 else None
-        self.eval_steps = _Steps(rows, evaluation, slots, self.dtype)
+        self.eval_steps = _Steps(rows, evaluation, slots, self.model_dtype)
         self.eval_counts = evaluation.steps[torch.tensor(slots, dtype=torch.long)].tolist()
         self.weights = update_weights(self.steps.lengths, self.structure, self.program)
         self._weights_on_device: Tensor | None = None
         #: Each client's own learning rate, momentum, ...: the bucket shares
         #: its program's shape, not its values.
         self.values = ProgramValues(
-            [plan.program for plan in plans], len(self.structure), self.dtype, self.device
+            [plan.program for plan in plans],
+            len(self.structure),
+            self.dtype,
+            self.device,
         )
         #: Whether a step's gradients are taken as one backward through the
         #: stacked losses' sum rather than vmap(grad): the form the task
@@ -945,11 +1000,19 @@ class _Bucket:
             {name: _placed(state[name], self.parameters[name]) for name in self.parameters}
             for state in states  # type: ignore[union-attr]
         ]
+        placed = [self._trained_dtype(state) for state in placed]
         if not self.stacked:
             return placed[0], None
         if all(state is states[0] for state in states):
             return placed[0], None
         return {name: torch.stack([s[name] for s in placed]) for name in self.parameters}, 0
+
+    def _trained_dtype(self, state: dict[str, Tensor]) -> dict[str, Tensor]:
+        """A state in the dtype the step runs at: itself, but under f32_f64."""
+
+        if self.dtype == self.model_dtype:
+            return state
+        return {name: value.to(self.dtype) for name, value in state.items()}
 
     def _start(self) -> dict[str, Tensor]:
         """Every client's starting parameters.
@@ -959,10 +1022,12 @@ class _Bucket:
         """
 
         if all(plan.start is self.plans[0].start for plan in self.plans):
-            shared = {
-                name: _placed(self.plans[0].start[name], parameter)
-                for name, parameter in self.parameters.items()
-            }
+            shared = self._trained_dtype(
+                {
+                    name: _placed(self.plans[0].start[name], parameter)
+                    for name, parameter in self.parameters.items()
+                }
+            )
             if not self.stacked:
                 return shared
             return {
@@ -970,7 +1035,9 @@ class _Bucket:
                 for name, value in shared.items()
             }
         start = [
-            {name: _placed(plan.start[name], self.parameters[name]) for name in self.parameters}
+            self._trained_dtype(
+                {name: _placed(plan.start[name], self.parameters[name]) for name in self.parameters}
+            )
             for plan in self.plans
         ]
         if not self.stacked:
@@ -1025,61 +1092,17 @@ class _Bucket:
         the clients, with each client's count, for the chunk's one host copy.
         """
 
+        with self.context.training(self.device):
+            params, outputs, step = self._train()
+        return self._finish(params, outputs, step)
+
+    def _train(self) -> tuple[dict[str, Tensor], list[dict[str, Tensor]], int]:
+        """Every step: the trained stack, each step's outputs, and how many batches were taken."""
+
         program = self.program
-        task, model, buffers = self.task, self.model, self.buffers
-
-        def loss(params: Any, batch: Any, mask: Any) -> Any:
-            return task.functional_loss(model, params, buffers, batch, mask)
-
-        gradient = torch.func.grad(loss, has_aux=True)
-
-        def batch_update(  # type: ignore[no-untyped-def]
-            params, state, batch, mask, reference, client_control, server_control, values, *, step
-        ):
-            grads, outputs = gradient(params, batch, mask)
-            params, state = apply_update(
-                program,
-                params,
-                grads,
-                state,
-                step,
-                reference,
-                client_control,
-                server_control,
-                values=values,
-            )
-            return params, state, outputs
-
-        def gradient_sum(total, params, batch, mask, weight):  # type: ignore[no-untyped-def]
-            grads, outputs = gradient(params, batch, mask)
-            return accumulate(total, grads, weight), outputs
-
-        def combined_update(  # type: ignore[no-untyped-def]
-            params,
-            state,
-            total,
-            denominator,
-            reference,
-            client_control,
-            server_control,
-            values,
-            *,
-            step,
-        ):
-            if program.combine == "full":
-                total = divide(total, denominator)
-            return apply_update(
-                program,
-                params,
-                total,
-                state,
-                step,
-                reference,
-                client_control,
-                server_control,
-                values=values,
-            )
-
+        batch_update, gradient_sum, combined_update = step_functions(
+            self.task, self.model, self.buffers, program, self.context.autocast(self.device)
+        )
         client_dim = 0 if self.stacked else None
         params = self._start()
         state: Any = initial_optimizer_state(program.optimizer, params)
@@ -1093,7 +1116,7 @@ class _Bucket:
         corrections = [reference, client_control, server_control]
         outputs: list[dict[str, Tensor]] = []
 
-        model.train()
+        self.model.train()
         if self.summed:
             return self._run_summed(params, state, corrections, outputs)
         step = 0
@@ -1102,7 +1125,7 @@ class _Bucket:
                 batch, mask = self._gather(step)
                 step += 1
                 params, state, step_outputs = self._call(
-                    partial(batch_update, step=number),
+                    batch_update,
                     [
                         (params, client_dim),
                         (state, client_dim),
@@ -1110,6 +1133,7 @@ class _Bucket:
                         (mask, client_dim),
                         *corrections,
                         self._values(number),
+                        (number, None),
                     ],
                 )
                 outputs.append(step_outputs)
@@ -1131,7 +1155,7 @@ class _Bucket:
                 outputs.append(step_outputs)
                 step += 1
             params, state = self._call(
-                partial(combined_update, step=number),
+                combined_update,
                 [
                     (params, client_dim),
                     (state, client_dim),
@@ -1139,16 +1163,19 @@ class _Bucket:
                     self._denominators(first, count),
                     *corrections,
                     self._values(number),
+                    (number, None),
                 ],
             )
 
-        return self._finish(params, outputs, step)
+        return params, outputs, step
 
     def _finish(
         self, params: dict[str, Tensor], outputs: list[dict[str, Tensor]], step: int
     ) -> tuple[dict[str, Tensor], Any, Any]:
         """The trained stack, the step outputs, and the post-fit pass's."""
 
+        if self.dtype != self.model_dtype:
+            params = {name: value.to(self.model_dtype) for name, value in params.items()}
         training = (outputs, [step] * self.size)
         evaluated: Any = None
         if self.plans[0].evaluate:
@@ -1168,7 +1195,7 @@ class _Bucket:
         state: Any,
         corrections: list[tuple[Any, int | None]],
         outputs: list[dict[str, Tensor]],
-    ) -> tuple[dict[str, Tensor], Any, Any]:
+    ) -> tuple[dict[str, Tensor], list[dict[str, Tensor]], int]:
         """``run``'s steps with each gradient taken as ``_summed_gradients`` takes it.
 
         The rule's step -- correction, clipping, optimizer -- and the
@@ -1273,7 +1300,7 @@ class _Bucket:
                     self._values(number),
                 ],
             )
-        return self._finish(params, outputs, step)
+        return params, outputs, step
 
     def _summed_gradients(
         self, params: dict[str, Tensor], batch: tuple[Tensor, ...], mask: Tensor | None
@@ -1289,9 +1316,11 @@ class _Bucket:
         """
 
         task, model, buffers = self.task, self.model, self.buffers
+        autocast = self.context.autocast(self.device)
 
         def loss(params: Any, batch: Any, mask: Any) -> Any:
-            return task.functional_loss(model, params, buffers, batch, mask)
+            with _autocast(autocast):
+                return task.functional_loss(model, params, buffers, batch, mask)
 
         leaves = {name: value.detach().requires_grad_() for name, value in params.items()}
         with torch.enable_grad():
@@ -1316,7 +1345,13 @@ class _Bucket:
         steps = _Steps(rows, self.evaluation, [plan.slot for plan in plans], self.dtype)
         counts = self.eval_counts[first:stop]
         outputs = measure_splits(
-            self.task, self.model, self.buffers, own, 0 if stacked else None, steps, counts
+            self.task,
+            self.eval_model,
+            self.eval_buffers,
+            own,
+            0 if stacked else None,
+            steps,
+            counts,
         )
         return outputs, counts
 
@@ -1325,8 +1360,8 @@ class _Bucket:
 
         outputs = measure_splits(
             self.task,
-            self.model,
-            self.buffers,
+            self.eval_model,
+            self.eval_buffers,
             params,
             0 if self.stacked else None,
             self.eval_steps,
@@ -1346,6 +1381,116 @@ def gradient_form(task: Any) -> str:
     if form not in GRADIENT_FORMS:
         raise ValueError(f"batched_gradient must be one of {GRADIENT_FORMS}, got {form!r}")
     return form
+
+
+def step_functions(
+    task: Any,
+    model: nn.Module,
+    buffers: Mapping[str, Tensor],
+    program: Any,
+    autocast: str | None,
+) -> tuple[Callable[..., Any], Callable[..., Any], Callable[..., Any]]:
+    """The three per-client functions a bucket's steps are made of.
+
+    ``batch_update``: one batch's gradient and the update on it;
+    ``gradient_sum``: one batch's gradient added into a pass's sum;
+    ``combined_update``: the update on a pass's combined gradient. The loss
+    runs under bfloat16 autocast on ``autocast``'s device type, when given.
+    """
+
+    def loss(params: Any, batch: Any, mask: Any) -> Any:
+        with _autocast(autocast):
+            return task.functional_loss(model, params, buffers, batch, mask)
+
+    gradient = torch.func.grad(loss, has_aux=True)
+
+    def batch_update(  # type: ignore[no-untyped-def]
+        params, state, batch, mask, reference, client_control, server_control, values, step
+    ):
+        grads, outputs = gradient(params, batch, mask)
+        params, state = apply_update(
+            program,
+            params,
+            grads,
+            state,
+            step,
+            reference,
+            client_control,
+            server_control,
+            values=values,
+        )
+        return params, state, outputs
+
+    def gradient_sum(total, params, batch, mask, weight):  # type: ignore[no-untyped-def]
+        grads, outputs = gradient(params, batch, mask)
+        return accumulate(total, grads, weight), outputs
+
+    def combined_update(  # type: ignore[no-untyped-def]
+        params, state, total, denominator, reference, client_control, server_control, values, step
+    ):
+        if program.combine == "full":
+            total = divide(total, denominator)
+        return apply_update(
+            program,
+            params,
+            total,
+            state,
+            step,
+            reference,
+            client_control,
+            server_control,
+            values=values,
+        )
+
+    return batch_update, gradient_sum, combined_update
+
+
+def _autocast(device_type: str | None) -> Any:
+    """bfloat16 autocast on ``device_type``, or nothing."""
+
+    if device_type is None:
+        return nullcontext()
+    return torch.autocast(device_type=device_type, dtype=torch.bfloat16)
+
+
+class StepContext:
+    """How a run's batched training step runs: the reference, or the precision it asks for.
+
+    ``f32_f64`` steps a float64 model in float32; ``tf32`` lets float32
+    matmuls and convolutions on CUDA use TensorFloat32; ``bf16`` runs the loss
+    under bfloat16 autocast. The update arithmetic and every evaluation stay
+    at the model's precision.
+    """
+
+    def __init__(self, precision: str = "reference") -> None:
+        self.precision = precision
+
+    def train_dtype(self, dtype: torch.dtype) -> torch.dtype:
+        """The dtype a model of ``dtype`` is stepped in."""
+
+        if self.precision == "f32_f64" and dtype == torch.float64:
+            return torch.float32
+        return dtype
+
+    def autocast(self, device: torch.device) -> str | None:
+        """The device type the loss is autocast on, or None."""
+
+        return device.type if self.precision == "bf16" else None
+
+    @contextmanager
+    def training(self, device: torch.device) -> Iterator[None]:
+        """Where a bucket's steps run: under TF32 when the run asks for it on CUDA."""
+
+        if self.precision != "tf32" or device.type != "cuda":
+            yield
+            return
+        held = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        try:
+            yield
+        finally:
+            torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = held
 
 
 def _placed(value: Tensor, like: Tensor) -> Tensor:
@@ -1374,29 +1519,35 @@ def batched_unsupported(components: Any) -> str | None:
     (``batched_unsupported`` on a built client, which also checks the seed).
     """
 
+    return _batched_check(components)[0]
+
+
+def _batched_check(components: Any) -> tuple[str | None, nn.Module | None]:
+    """``batched_unsupported``'s reason, and the model it built to check, if it got that far."""
+
     config = components.config
     if config.server.strategy == "centralized":
-        return "the centralized strategy trains one client, so there is nothing to batch"
+        return "the centralized strategy trains one client, so there is nothing to batch", None
     if config.runtime.use_amp:
-        return "runtime.use_amp is on, and GradScaler's loss scale is sequential state"
+        return "runtime.use_amp is on, and GradScaler's loss scale is sequential state", None
     task = components.task
     if not isinstance(task, BatchableTask):
         return (
             f"task {type(task).__name__} provides no functional_loss and functional_eval "
             "(fedbrew.tasks.base.BatchableTask)"
-        )
+        ), None
     client_ids = list(components.clients)
     if not client_ids:
-        return "the run has no clients"
+        return "the run has no clients", None
     client = components.clients[client_ids[0]]
     unsupported = getattr(client, "batched_unsupported", None)
     if not callable(unsupported):
-        return f"update rule {type(client).__name__} declares no batched update"
+        return f"update rule {type(client).__name__} declares no batched update", None
     model = task.build_model(getattr(client, "model_config", None))
     reason = _model_unsupported(task, model)
     if reason is not None:
-        return reason
-    return unsupported()
+        return reason, model
+    return unsupported(), model
 
 
 def _model_unsupported(task: Any, model: nn.Module) -> str | None:
@@ -1434,9 +1585,39 @@ def select_executor(components: Any) -> tuple[BatchedExecutor | None, dict[str, 
     performance = components.config.runtime.extra.get("performance") or {}
     if performance.get("executor", "sequential") != "batched":
         return None, {"used": "sequential"}
-    reason = batched_unsupported(components)
+    precision_asked = str(performance.get("precision", "reference"))
+    reason, model = _batched_check(components)
     if reason is not None:
-        return None, {"used": "sequential", "fallback": reason}
-    record: dict[str, Any] = {"used": "batched", "largest_chunk_clients": 0}
+        record = {"used": "sequential", "fallback": reason}
+        _record_modes(record, precision_asked, "reference", "the run is sequential")
+        return None, record
+    record = {"used": "batched", "largest_chunk_clients": 0}
+    assert model is not None
+    precision, why = _precision_for(precision_asked, model)
+    _record_modes(record, precision_asked, precision, why)
     chunk_bytes = performance.get("executor_chunk_bytes", DEFAULT_EXECUTOR_CHUNK_BYTES)
-    return BatchedExecutor(chunk_bytes, record=record), record
+    context = StepContext(precision)
+    return BatchedExecutor(chunk_bytes, record=record, context=context), record
+
+
+def _precision_for(asked: str, model: nn.Module) -> tuple[str, str | None]:
+    """The precision a run's step runs at, and why it is not the one asked for, if it is not."""
+
+    first = next(model.parameters())
+    dtype, device = first.dtype, first.device.type
+    if asked == "f32_f64" and dtype != torch.float64:
+        return "reference", f"f32_f64 steps a float64 model in float32, and this model is {dtype}"
+    if asked == "tf32" and device != "cuda":
+        return "reference", f"tf32 is a mode of CUDA's float32 matmuls, and this run is on {device}"
+    if asked in {"tf32", "bf16"} and dtype != torch.float32:
+        return "reference", f"{asked} applies to a float32 model, and this model is {dtype}"
+    return asked, None
+
+
+def _record_modes(record: dict[str, Any], asked: str, precision: str, why: str | None) -> None:
+    """What run.json records of the precision a run asked for: what ran, and why, if not that."""
+
+    if asked != "reference":
+        record["precision"] = (
+            {"used": precision} if precision == asked else {"used": precision, "fallback": why}
+        )

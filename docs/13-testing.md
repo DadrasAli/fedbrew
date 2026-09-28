@@ -235,8 +235,9 @@ in two parts: `-m 'not quickstart and not cuda'` on CPU nodes, and
 counts as a failure. The two expressions partition the suite, so every test
 runs in exactly one. `tests/conftest.py` keeps the mark honest: a test that
 skips with a reason naming CUDA or a GPU and is not marked fails, since it
-would otherwise run in neither part. One test is marked today,
-`tests/test_fed_lasso_evaluates_on_its_device.py`'s round on CUDA.
+would otherwise run in neither part. Two tests are marked today,
+`tests/test_fed_lasso_evaluates_on_its_device.py`'s round on CUDA and
+`tests/test_precision_modes.py`'s `tf32` run.
 
 ## 3. The three kinds of test
 

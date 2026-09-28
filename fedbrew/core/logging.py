@@ -263,10 +263,27 @@ def _executor_rows(executor: Mapping[str, Any] | None) -> list[Row]:
         # Amber: batched was asked for and the run is sequential. It changes
         # no number, and it is the difference between the run time the config
         # was written for and the one it will take.
-        return [Row("Executor", f"sequential; batched falls back: {fallback}", tone=AMBER)]
-    if executor.get("used") == "batched":
-        return [Row("Executor", "batched")]
-    return []
+        rows = [Row("Executor", f"sequential; batched falls back: {fallback}", tone=AMBER)]
+    elif executor.get("used") == "batched":
+        rows = [Row("Executor", "batched")]
+    else:
+        return []
+    return rows + _mode_rows(executor)
+
+
+def _mode_rows(executor: Mapping[str, Any]) -> list[Row]:
+    """The batched step's modes a run asked for: what runs, in amber when it is not that."""
+
+    rows = []
+    for key, label in (("precision", "Precision"),):
+        mode = executor.get(key)
+        if not isinstance(mode, Mapping):
+            continue
+        if mode.get("fallback"):
+            rows.append(Row(label, f"{mode.get('used')}: {mode['fallback']}", tone=AMBER))
+        else:
+            rows.append(Row(label, str(mode.get("used"))))
+    return rows
 
 
 def _identity_rows(

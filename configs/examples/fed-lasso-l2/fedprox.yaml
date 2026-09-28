@@ -112,6 +112,7 @@ runtime:
     # CPU and touches no cuDNN kernel. Written because "irrelevant" and
     # "unstated" are different claims, and only the first is the intended one.
     cudnn_benchmark: false
+    precision: reference
     # One thread. These problems are 16-dimensional and torch keeps an
     # intra-op region on one thread below a grain size of 32768 elements, so
     # no reduction here is threaded at any setting. The pin states the number

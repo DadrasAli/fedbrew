@@ -98,6 +98,7 @@ runtime:
     # like-for-like with these. See docs/10-reproducibility.md.
     matmul_precision: high
     cudnn_benchmark: false
+    precision: reference
     dataloader:
       num_workers: 0
       pin_memory: true

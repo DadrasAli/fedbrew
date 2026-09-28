@@ -118,6 +118,7 @@ runtime:
     # is like-for-like.
     matmul_precision: highest
     cudnn_benchmark: false
+    precision: reference
 
 evaluation:
   # One block per split. `every` is in rounds and always pins both endpoints:
