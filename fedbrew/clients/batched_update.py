@@ -26,10 +26,12 @@ FedProx's mu, the clipping norm -- are not part of what clients must share to
 be stepped together, only its shape is (:attr:`LocalProgram.shape`): the step
 arithmetic reads them as each client's own tensors (:class:`ProgramValues`),
 so clients of different runs with different values, the settings of a group
-(``fedbrew/core/settings_group.py``), are rows of one stack. Each scalar form
-torch's optimizers use has a tensor form that rounds the same: ``add(b,
-alpha=s)`` is one fused multiply-add, as ``addcmul(a, b, s)`` is, and
-``addcdiv(b, d, value=s)`` is ``addcdiv(a, b * s, d)``.
+(``fedbrew/core/settings_group.py``), are rows of one stack. On the CPU each
+scalar form torch's optimizers use has a tensor form that rounds the same:
+``add(b, alpha=s)`` is one fused multiply-add, as ``addcmul(a, b, s)`` is, and
+``addcdiv(b, d, value=s)`` is ``addcdiv(a, b * s, d)``. On CUDA they differ in
+the last bit (chapter 11 §9), so there a batched client is the sequential one
+to the executor's tolerance.
 
 A rule opts in by declaring ``_batched_rule`` on its own class and
 implementing ``batched_plan`` and ``batched_result``

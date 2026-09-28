@@ -421,10 +421,17 @@ number of updates, each over the same number of batches, and a step with the
 same terms: momentum, weight decay, FedProx's correction and clipping each
 present or not -- are stepped together. Their values need not match: the
 learning rate, momentum, weight decay, `mu` and clipping norm are each
-client's own tensors (`ProgramValues`), and each scalar form torch's
-optimizers use has a tensor form that rounds the same (`add(b, alpha=s)` is
-one fused multiply-add, as `addcmul(a, b, s)` is), so a client stepped beside
-clients with other values is the client stepped alone, bit for bit. Within a bucket a batch shorter than the others is padded with one
+client's own tensors (`ProgramValues`), and on the CPU each scalar form
+torch's optimizers use has a tensor form that rounds the same (`add(b,
+alpha=s)` is one fused multiply-add, as `addcmul(a, b, s)` is), so a client
+stepped beside clients with other values is the client stepped alone, bit for
+bit. On CUDA the pairs part: on an A100 under torch 2.5.1, `addcmul` differs
+from `add(alpha)` in the last bit of about one element in ten and
+`addcdiv(a, b * s, d)` from `addcdiv(value=s)` in about one in six, in both
+widths. There a batched client matches the sequential one to the executor's
+tolerance rather than bit for bit, while each setting of a group still
+matched its own batched run alone bit for bit (the MNIST MLP at 1,000
+clients, eight learning rates; measured on 2026-09-28). Within a bucket a batch shorter than the others is padded with one
 of the client's own rows and masked, and the task's functions take the mean
 over the real rows. Consecutive clients join a chunk while its estimated
 memory fits `executor_chunk_bytes`: per client, its parameters times three
