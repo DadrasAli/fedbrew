@@ -62,6 +62,7 @@ from fedbrew.clients.batched_update import (
     ClientBatchPlan,
     ProgramValues,
     accumulate,
+    adopt_orders,
     apply_update,
     data_versions,
     divide,
@@ -72,6 +73,7 @@ from fedbrew.clients.batched_update import (
 from fedbrew.clients.torch_sgd_client import trainable_parameter_count
 from fedbrew.core.execution import ClientPool, FitObserver
 from fedbrew.core.protocol import FitRequest, FitResult
+from fedbrew.core.round_planner import RoundPlanner, auto_workers, planned_for, roster_plan
 from fedbrew.core.stacked_results import StackedFitResults
 from fedbrew.core.torch_utils import StateStack
 from fedbrew.tasks.base import BatchableTask
@@ -125,6 +127,9 @@ class BatchedExecutor:
         #: one chunk: at full participation the same clients' unchanged data
         #: would otherwise be stacked again every round.
         self._rows: dict[tuple[int, ...], _Rows] = {}
+        #: Plans each round's orders ahead, off the loop (``round_planner``);
+        #: None plans them in the round, with ``plan_round``.
+        self.planner: RoundPlanner | None = None
 
     def fit(
         self,
@@ -199,7 +204,7 @@ class BatchedExecutor:
         task = members[0].task
         template = task.build_model(members[0].model_config)
         plans = _plans(members, requests, template)
-        orders = plan_round(plans, requests[0].round_id)
+        orders = self._orders(plans, requests[0].round_id)
         chunks = list(self._chunks(task, template, plans, orders[0]))
         # Kept only while a round is one chunk, so what is held between rounds
         # is what one chunk holds anyway.
@@ -216,6 +221,27 @@ class BatchedExecutor:
             if kept is None:
                 self._rows = {}
             yield start, stop, plans, trained, time.perf_counter() - chunk_started
+
+    def _orders(
+        self, plans: list[ClientBatchPlan], round_id: int
+    ) -> tuple[RoundOrders, RoundOrders]:
+        """The round's orders: the planner's, when they are these plans', else ``plan_round``'s."""
+
+        planner = self.planner
+        if planner is not None:
+            planned = planner.plan(round_id)
+            if planned_for(planner.roster, planned, plans):
+                return adopt_orders(plans, planned.train, planned.evaluation)
+            planner.record["mismatch"] = f"round {round_id}'s plans are not the roster's"
+            planner.close()
+            self.planner = None
+        return plan_round(plans, round_id)
+
+    def close(self) -> None:
+        """Stop the planner's workers."""
+
+        if self.planner is not None:
+            self.planner.close()
 
     def _chunks(
         self, task: Any, template: nn.Module, plans: list[ClientBatchPlan], train: RoundOrders
@@ -1697,13 +1723,16 @@ def _model_unsupported(task: Any, model: nn.Module) -> str | None:
     return None
 
 
-def select_executor(components: Any) -> tuple[BatchedExecutor | None, dict[str, Any]]:
+def select_executor(
+    components: Any, plan_ahead: bool = True
+) -> tuple[BatchedExecutor | None, dict[str, Any]]:
     """The executor ``runtime.performance.executor`` asks for, or the reference if it cannot be.
 
     Returns it -- None for the sequential reference -- and the record run.json
     keeps under ``reproducibility.executor``: which one ran, and, when
     ``batched`` was asked for and the run could not be batched, why. A batched
     executor keeps its record current as it runs (``largest_chunk_clients``).
+    ``plan_ahead`` gives it a planner of its rounds' orders (``round_planner``).
     """
 
     performance = components.config.runtime.extra.get("performance") or {}
@@ -1722,7 +1751,34 @@ def select_executor(components: Any) -> tuple[BatchedExecutor | None, dict[str, 
     _record_modes(record, compile_asked, precision_asked, precision, why)
     chunk_bytes = chunk_budget(performance.get("executor_chunk_bytes"), model, record)
     context = StepContext(compile_asked, precision, record)
-    return BatchedExecutor(chunk_bytes, record=record, context=context), record
+    executor = BatchedExecutor(chunk_bytes, record=record, context=context)
+    if plan_ahead:
+        executor.planner = round_planner(components, model, record)
+    return executor, record
+
+
+def round_planner(components: Any, model: nn.Module, record: dict[str, Any]) -> RoundPlanner | None:
+    """The planner of a batched run's orders, recorded under ``planner``; None where there is none.
+
+    Its workers run on a CUDA run only: there the host's planning is what the
+    device waits on, while a CPU run's training occupies the cores a worker
+    would take.
+    """
+
+    roster, reason = roster_plan(components)
+    if roster is None:
+        record["planner"] = {"used": "off", "reason": reason}
+        return None
+    planner_record: dict[str, Any] = {"used": "on"}
+    record["planner"] = planner_record
+    rounds = int(components.config.server.global_rounds or 0)
+    return RoundPlanner(roster, rounds, workers=planner_workers(model), record=planner_record)
+
+
+def planner_workers(model: nn.Module) -> int:
+    """How many planner processes a run on ``model``'s device starts: none on the CPU."""
+
+    return auto_workers() if next(model.parameters()).device.type == "cuda" else 0
 
 
 def chunk_budget(asked: Any, model: nn.Module, record: dict[str, Any]) -> int:

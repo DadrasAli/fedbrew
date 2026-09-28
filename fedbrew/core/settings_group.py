@@ -580,7 +580,9 @@ class GroupSetting:
     def select_executor(self, components: Any) -> tuple[Any, dict[str, Any]]:
         """The executor alone would select; a batched one becomes the group's."""
 
-        executor, record = select_executor(components)
+        # A group plans its settings' rounds together (_round_orders), so no
+        # setting's executor plans its own ahead.
+        executor, record = select_executor(components, plan_ahead=False)
         if executor is None:
             return None, record
         if self.group.budget_record is None:

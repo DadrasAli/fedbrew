@@ -407,11 +407,7 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
             request,
             self.batched_program(request),
             self.batched_start(request, model) if start is None else start,
-            LocalLoop(
-                epochs=self.local_iterations,
-                per_update="epoch" if full else "batch",
-                max_updates=self.max_local_steps,
-            ),
+            self.batched_loop(),
             (lambda: no_training_batches(self.client_id))
             if full
             else self._no_training_batches_refusal,
@@ -422,6 +418,15 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
                 max_local_steps=self.max_local_steps,
                 client_id=self.client_id,
             ),
+        )
+
+    def batched_loop(self) -> LocalLoop:
+        """The batches this rule's own loop takes of its loader's epochs, per update."""
+
+        return LocalLoop(
+            epochs=self.local_iterations,
+            per_update="epoch" if self.update_mode == FULL_GRADIENT_UPDATE_MODE else "batch",
+            max_updates=self.max_local_steps,
         )
 
     def batched_start(self, request: FitRequest, model: torch.nn.Module) -> Mapping[str, Any]:

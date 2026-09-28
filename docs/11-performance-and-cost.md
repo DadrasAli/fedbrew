@@ -406,6 +406,30 @@ cover, both about values whose exact answer is 0:
   the smooth control, `fed-lasso-l2`, which agrees on the A100 to 2e-16 of
   the model's scale over 150 rounds.
 
+**Planned ahead.** A round's orders depend on the roster and the round's
+number, never on what a round trains: FedAvg samples from
+`derive_seed(seed, "participation", round)` (`sampled_client_ids`,
+`fedbrew/servers/fedavg.py`, which `sample_clients` itself calls), and each
+loader is seeded from the round and the client. So a batched run plans them
+from the roster read once at the start (`fedbrew/core/round_planner.py`),
+with the calls `plan_round` makes, and the round adopts them as `plan_round`
+would (`adopt_orders`) after checking they are its plans' -- the same clients,
+loaders, loops and seeds; a round whose plans are not falls back to
+`plan_round`, recorded. On a CUDA run worker processes plan a few rounds
+ahead of the loop, as many as the job's CPUs less two, at most four, and hand
+each round over through shared memory; on a CPU run, whose training
+occupies those cores, the loop plans each round itself. A worker that dies,
+raises or does not answer within two minutes leaves the planning to the
+loop, with the same function. `run.json` records `executor.planner`: `used`,
+`workers`, the seconds the loop waited on them (`waited_sec`), and any
+`fallback` or `mismatch`; `used: off` names why a run's rounds could not be
+planned ahead (another sampler, a rule that plans its update its own way, a
+task without a loader order). A settings group plans its rounds together
+(§10) and plans none ahead. `tests/test_round_planner.py` holds the planned
+orders to `plan_round`'s, tensor for tensor, for every update mode, sampling
+scheme and loader setting, and runs planned in the loop, in this process
+and by two workers to each other, bit for bit.
+
 **What is batchable.** A run is batched when all of these hold; otherwise it
 runs sequentially, the plan header says `Executor: sequential; batched falls
 back: <reason>` in amber, and `run.json` records the reason
@@ -697,6 +721,7 @@ Accuracy cells under `bf16` move by whole examples and are not held.
 | `fedbrew/core/batched_executor.py` | §9: `BatchedExecutor`, its buckets and chunks, and `select_executor`'s fallback |
 | `fedbrew/clients/batched_update.py` | §9: a rule's update as steps over a stack, the plan a rule declares, and the round's planning |
 | `fedbrew/clients/batch_orders.py` | §9: every client's batch order for a round, from the loaders' declarations: seeds, permutations, batches |
+| `fedbrew/core/round_planner.py` | §9: each round's sampled clients and orders planned from the roster, ahead of the loop, by worker processes |
 | `fedbrew/core/batched_evaluator.py` | §9: the due clients' splits measured together, and the central pass's kept model and shard |
 | `tools/` | the benchmark and profiling scripts |
 

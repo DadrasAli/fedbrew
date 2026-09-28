@@ -369,11 +369,7 @@ def plan_round(plans: Sequence[ClientBatchPlan], round_id: int) -> tuple[RoundOr
         [plan.loop for plan in plans],
         lambda replayed: replayed[0],
     )
-    steps = train.steps.tolist()
-    for plan in plans:
-        if not steps[plan.slot]:
-            raise plan.refuse()
-        plan.structure = train.structure[plan.slot]
+    _adopt_training(plans, train)
     evaluation = _phase_orders(
         plans,
         round_id,
@@ -382,10 +378,43 @@ def plan_round(plans: Sequence[ClientBatchPlan], round_id: int) -> tuple[RoundOr
         [LocalLoop(epochs=1)] * len(plans),
         lambda replayed: [[batch] for batch in replayed[1]],
     )
+    _adopt_evaluation(plans, evaluation)
+    return train, evaluation
+
+
+def adopt_orders(
+    plans: Sequence[ClientBatchPlan], train: RoundOrders, evaluation: RoundOrders
+) -> tuple[RoundOrders, RoundOrders]:
+    """``plan_round``'s effect on ``plans`` for orders planned elsewhere (``round_planner``).
+
+    ``train`` and ``evaluation`` must be what ``plan_round`` would compute for
+    these plans, client ``k`` of each being ``plans[k]``: the slots, structures,
+    post-fit row counts and refusal are filled and raised as it does.
+    """
+
+    for slot, plan in enumerate(plans):
+        plan.slot = slot
+    _adopt_training(plans, train)
+    _adopt_evaluation(plans, evaluation)
+    return train, evaluation
+
+
+def _adopt_training(plans: Sequence[ClientBatchPlan], train: RoundOrders) -> None:
+    """Each plan's structure, and the first client with no training batch refused."""
+
+    steps = train.steps.tolist()
+    for plan in plans:
+        if not steps[plan.slot]:
+            raise plan.refuse()
+        plan.structure = train.structure[plan.slot]
+
+
+def _adopt_evaluation(plans: Sequence[ClientBatchPlan], evaluation: RoundOrders) -> None:
+    """Each plan's post-fit row count: the example count its pass reports."""
+
     rows = evaluation.lengths.sum(dim=1).tolist()
     for plan in plans:
         plan.eval_rows = rows[plan.slot]
-    return train, evaluation
 
 
 def _phase_orders(

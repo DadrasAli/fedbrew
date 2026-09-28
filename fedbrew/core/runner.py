@@ -165,26 +165,14 @@ def run(
     print_round_table_header(config)
     run_metadata["started_at"] = _utc_timestamp()
     run_started = time.perf_counter()
-    state = run_fl_loop(
-        server=components.server,
-        client=components.clients,
-        dataset=components.dataset,
-        global_rounds=config.server.global_rounds or 0,
-        output_dir=output_dir,
-        resume_from=config.runtime.extra.get("resume_from"),
-        checkpointing=config.runtime.extra.get("checkpointing"),
-        evaluation=config.evaluation,
-        client_statistics=config.client_statistics,
-        evaluation_seed=config.experiment.seed,
-        divergence=config.divergence,
-        flush_every=config.runtime.extra.get("flush_every", 1),
-        on_round_end=_round_progress_reporter(config, progress),
-        on_round_flush=_run_json_writer(config, run_metadata, output_dir, run_started),
-        on_client_progress=client_progress_reporter(config, progress),
-        on_termination=_termination_reporter(config),
-        executor=executor,
-        evaluator=evaluator_for(executor),
-    )
+    try:
+        state = _run_loop(
+            config, components, executor, output_dir, run_metadata, progress, run_started
+        )
+    finally:
+        close = getattr(executor, "close", None)
+        if callable(close):
+            close()
     run_metadata["finished_at"] = _utc_timestamp()
     _record_durations(run_metadata, run_started)
 
@@ -239,6 +227,39 @@ def run(
         {"status": state.status, **state.termination} if state.termination else None,
     )
     return state
+
+
+def _run_loop(
+    config: FullConfig,
+    components: ExperimentComponents,
+    executor: Any,
+    output_dir: Path,
+    run_metadata: dict[str, Any],
+    progress: RoundProgress,
+    run_started: float,
+) -> ExperimentState:
+    """The round loop, with this run's components, executor and reporters."""
+
+    return run_fl_loop(
+        server=components.server,
+        client=components.clients,
+        dataset=components.dataset,
+        global_rounds=config.server.global_rounds or 0,
+        output_dir=output_dir,
+        resume_from=config.runtime.extra.get("resume_from"),
+        checkpointing=config.runtime.extra.get("checkpointing"),
+        evaluation=config.evaluation,
+        client_statistics=config.client_statistics,
+        evaluation_seed=config.experiment.seed,
+        divergence=config.divergence,
+        flush_every=config.runtime.extra.get("flush_every", 1),
+        on_round_end=_round_progress_reporter(config, progress),
+        on_round_flush=_run_json_writer(config, run_metadata, output_dir, run_started),
+        on_client_progress=client_progress_reporter(config, progress),
+        on_termination=_termination_reporter(config),
+        executor=executor,
+        evaluator=evaluator_for(executor),
+    )
 
 
 def _client_roster_size(components: ExperimentComponents) -> int | None:

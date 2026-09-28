@@ -110,7 +110,16 @@ class SelectionIsRecordedTest(ExecutorRuns):
 
     def test_a_batchable_run_records_its_largest_chunk(self) -> None:
         output = self.run_config(example_config("fed-lasso"), "batched")
-        self.assertEqual(self._record(output), {"used": "batched", "largest_chunk_clients": 8})
+        self.assertEqual(
+            self._record(output),
+            {
+                "used": "batched",
+                "largest_chunk_clients": 8,
+                # Planned from the roster in this process: a CPU run starts no
+                # planner workers (round_planner).
+                "planner": {"used": "on", "workers": 0, "waited_sec": 0.0},
+            },
+        )
 
     def test_the_sequential_default_is_recorded(self) -> None:
         output = self.run_config(example_config("fed-lasso"), "sequential")

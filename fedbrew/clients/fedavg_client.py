@@ -184,11 +184,7 @@ class FedAvgClient(TorchSGDClient):
             request,
             self.batched_program(request),
             self.batched_start(request, model) if start is None else start,
-            LocalLoop(
-                epochs=self.local_iterations,
-                per_update="batch" if _COMBINE_OF_MODE[self.update_mode] == "batch" else "epoch",
-                single_batch=self.update_mode == "single_batch",
-            ),
+            self.batched_loop(),
             lambda: no_training_batches(self.client_id),
             lambda loader: sgd_mode_updates(
                 loader,
@@ -196,6 +192,15 @@ class FedAvgClient(TorchSGDClient):
                 update_mode=self.update_mode,
                 client_id=self.client_id,
             ),
+        )
+
+    def batched_loop(self) -> LocalLoop:
+        """The batches one update of ``run_sgd_update_mode`` takes of its loader's epochs."""
+
+        return LocalLoop(
+            epochs=self.local_iterations,
+            per_update="batch" if _COMBINE_OF_MODE[self.update_mode] == "batch" else "epoch",
+            single_batch=self.update_mode == "single_batch",
         )
 
     def _batched_extra_metrics(self, plan: ClientBatchPlan) -> dict[str, float]:

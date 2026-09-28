@@ -218,54 +218,23 @@ class FedAvgServer(ServerStrategy):
         """Select participating clients for a round.
 
         The draw is a function of the seed, the round and the client *ids* --
-        not of the order the roster arrived in. See the two comments below for
-        why each half of that matters.
+        not of the order the roster arrived in; ``sampled_client_ids`` draws
+        it, and says why each half of that matters.
         """
 
         if not clients:
             return []
-        if self.participation_probability is not None:
-            return self._bernoulli_sample(clients, round_id)
-        if self.participation_rate >= 1.0:
+        if self.participation_probability is None and self.participation_rate >= 1.0:
             return list(clients)
-
-        sample_size = max(1, math.ceil(len(clients) * self.participation_rate))
-        # Hashed, not added. Random(seed + round_id) makes seeds s and s+1 one
-        # sequence read from two offsets: seed 43 sees at round r exactly the
-        # clients seed 42 saw at round r+1, for every round but the last. A
-        # replicate set built that way shares its participation schedule, so the
-        # spread across it leaves out the part of run-to-run variance that comes
-        # from which clients take part.
-        rng = random.Random(derive_seed(self.seed, "participation", round_id))
-        # Sorted, for the reason loop._sampled_client_infos states about
-        # its own draw: so the schedule does not depend on the order the
-        # dataset happens to list clients in. That order is clients.jsonl's
-        # line order, which both generators write sorted -- so this changes
-        # nothing about a dataset either of them produced. What it removes is
-        # the coupling: FEMNIST's _client_id rewrites
-        # any writer id that is not filename-safe to writer_<sha256[:16]>, and
-        # one such writer is enough to make the file order differ from the id
-        # order, at which point every round's participants change with nothing
-        # to signal it. Measured on a 3597-writer roster in that state: 0 of 36
-        # clients in common per round at participation_rate 0.01.
         by_id = _clients_by_id(clients)
-        chosen = rng.sample(sorted(by_id), sample_size)
+        chosen = sampled_client_ids(
+            list(by_id),
+            self.seed,
+            round_id,
+            self.participation_rate,
+            self.participation_probability,
+        )
         return [by_id[client_id] for client_id in chosen]
-
-    def _bernoulli_sample(self, clients: Sequence[ClientInfo], round_id: int) -> list[ClientInfo]:
-        """Each client independently, with ``participation_probability``.
-
-        Drawn over the sorted ids from the same per-round seed as the fixed-size
-        draw, so the roster's order does not move the schedule, and returned in
-        roster order, so probability 1.0 selects exactly what rate 1.0 does, in
-        the same order.
-        """
-
-        by_id = _clients_by_id(clients)
-        rng = random.Random(derive_seed(self.seed, "participation", round_id))
-        probability = self.participation_probability
-        chosen = {client_id for client_id in sorted(by_id) if rng.random() < probability}
-        return [client for client in clients if client.client_id in chosen]
 
     def configure_round(
         self,
@@ -628,6 +597,60 @@ def _participation(
         ):
             raise ValueError(f"{name} must be in (0, 1], got {value!r}")
     return rate, probability
+
+
+def sampled_client_ids(
+    client_ids: Sequence[str],
+    seed: int,
+    round_id: int,
+    participation_rate: float,
+    participation_probability: float | None,
+) -> list[str]:
+    """The ids ``FedAvgServer.sample_clients`` selects from a roster of distinct ids, in its order.
+
+    A function of the seed, the round and the ids alone -- nothing a round
+    trains -- so a planner can draw any round's clients ahead of it
+    (``fedbrew/core/round_planner.py``) with the very draws the server makes.
+
+    The draw is over the ids sorted by name, not the order the roster arrived
+    in, for the reasons ``sample_clients`` states. Under
+    ``participation_probability`` each id is kept independently and the kept
+    ids are returned in roster order, so probability 1.0 selects exactly what
+    rate 1.0 does, in the same order; under a fixed ``participation_rate``
+    they are returned in the order drawn.
+    """
+
+    if not client_ids:
+        return []
+    if participation_probability is None and participation_rate >= 1.0:
+        return list(client_ids)
+    # Hashed, not added. Random(seed + round_id) makes seeds s and s+1 one
+    # sequence read from two offsets: seed 43 sees at round r exactly the
+    # clients seed 42 saw at round r+1, for every round but the last. A
+    # replicate set built that way shares its participation schedule, so the
+    # spread across it leaves out the part of run-to-run variance that comes
+    # from which clients take part.
+    rng = random.Random(derive_seed(seed, "participation", round_id))
+    if participation_probability is not None:
+        chosen = {
+            client_id
+            for client_id in sorted(client_ids)
+            if rng.random() < participation_probability
+        }
+        return [client_id for client_id in client_ids if client_id in chosen]
+    sample_size = max(1, math.ceil(len(client_ids) * participation_rate))
+    # Sorted, for the reason loop._sampled_client_infos states about its own
+    # draw: so the schedule does not depend on the order the dataset happens
+    # to list clients in. That order is clients.jsonl's line order, which
+    # both generators write sorted -- so this changes nothing about a dataset
+    # either of them produced. What it removes is the coupling: FEMNIST's
+    # _client_id rewrites any writer id that is not filename-safe to
+    # writer_<sha256[:16]>, and one such writer is enough to make the file
+    # order differ from the id order, at which point every round's
+    # participants change with nothing to signal it. Measured on a 3597-writer
+    # roster in that state: 0 of 36 clients in common per round at
+    # participation_rate 0.01.
+    return rng.sample(sorted(client_ids), sample_size)
 
 
 def _clients_by_id(clients: Sequence[ClientInfo]) -> dict[str, ClientInfo]:
