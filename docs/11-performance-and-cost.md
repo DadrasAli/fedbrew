@@ -517,7 +517,28 @@ identical.
 
 Runs whose configs differ only in numeric hyperparameters -- a learning-rate
 grid, say -- can run as the settings of one group, in one process
-(`fedbrew/core/settings_group.py`, `run_group`). Each setting is
+(`fedbrew/core/settings_group.py`, `run_group`).
+
+```bash
+fedbrew sweep configs/sweep/lr-*.yaml          # groups them, then runs each group and the rest
+fedbrew sweep --plan configs/sweep/lr-*.yaml   # prints the grouping, runs nothing
+```
+
+`fedbrew sweep` (`fedbrew/core/sweep.py`) groups its configs itself. Two
+share a group when both load, both ask for `runtime.performance.executor:
+batched`, neither resumes, and they are equal on every key but those that
+name a run (`experiment.output_dir`, `run_id`, ...) and these: the client's
+`learning_rate`, `momentum`, `weight_decay`, `proximal_mu` and
+`max_grad_norm`, and the server's `server_learning_rate` and `beta1`. A key
+one config has and the other lacks is a difference, so seeds, data, models
+and local iterations are always the same inside a group; configs that would
+write the same directory go to different groups. Each group of two or more
+runs as one child process (`fedbrew sweep --run-group`), every other config
+as `fedbrew run --config` would, one child after another in command-line
+order. The sweep exits 1 if any run crashed, otherwise 2 if any was refused,
+otherwise 0.
+
+Each setting is
 `runner.run` of its own config on its own thread, writing its own run
 directory as it would alone; `run.json` records the group
 (`reproducibility.group`, chapter 09 §3.3). What the settings share:
@@ -659,6 +680,7 @@ python tools/bench_compare_runs.py --help
 | `tests/test_batch_orders.py` | §9: every planned order is its loader's own, for every task, update mode, shuffle, `drop_last` and `max_local_steps`, 520 clients at once included; the bulk seeds are `dataloader_seed`'s. |
 | `tests/test_batched_evaluator.py` | §9: ragged, shuffled and missing evaluation splits through both evaluators, the refusal's words, and the central pass's kept model and shard. |
 | `tests/test_program_values.py` | §9: a bucket shares its program's shape, not its values; a client stepped beside clients with other values is the client stepped alone, bit for bit, in every shape and both float widths, and a client alone is `torch.optim`'s SGD and AdamW step. |
+| `tests/test_sweep.py` | §10: `fedbrew sweep` groups the configs equal but for the run's name and the numeric hyperparameters it lists, runs any other config alone and one that does not load alone, keeps two configs that would write one directory apart, `--plan` runs nothing, `--run-group` refuses configs that are not one group, and a sweep of a group and a config alone writes both, the group recorded; the exit status. |
 | `tests/test_settings_group.py` | §10: a group of one is its run alone bit for bit; each setting matches its run alone within the tolerance, its checkpoints' generator state exactly, under the stacked and the per-client paths, server settings, a budget that splits rounds, and the MLP; a diverging or refused setting stops alone, the others bit-identical to the group without it; run.json's `group`; how units are packed. |
 | `tests/test_stacked_fold.py` | A stack's rows fold to their mean, and one row exactly. |
 | `tests/test_stacked_results.py` | §9: the stacked path is each client's result exactly: the same metrics to the bit, the same refusals naming the same client, the model to `1e-12`; one bucket bit-identical to one result at a time. |

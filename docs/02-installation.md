@@ -189,11 +189,12 @@ a job, not on the login node — the point is what the compute node sees.
 
 ## 5. The command surface
 
-One console script with eleven subcommands (`fedbrew/cli/dispatch.py`).
+One console script with twelve subcommands (`fedbrew/cli/dispatch.py`).
 
 | Subcommand | Does |
 | --- | --- |
 | `run` | Run an experiment. |
+| `sweep` | Run several configs; those that differ only in numeric hyperparameters run as one group in one process (chapter 11 §10). |
 | `generate` | Generate federated data manifests. |
 | `report` | Create Markdown reports from a run directory. |
 | `inspect-data` | Validate and inspect one generated dataset. |

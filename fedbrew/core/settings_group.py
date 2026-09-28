@@ -1,7 +1,8 @@
 """A group of settings run in one process, their clients trained as one batch.
 
 The settings of a group are runs whose configs differ only in numeric
-hyperparameters. Each is
+hyperparameters (``fedbrew/core/sweep.py``, ``fedbrew sweep``, forms the
+groups). Each is
 ``runner.run`` of its own config, unchanged, on its own thread, writing its
 own run directory as it would alone. What they share:
 
@@ -39,7 +40,7 @@ import threading
 import time
 import traceback
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -197,7 +198,7 @@ class SettingsGroup:
         self._registered: dict[int, _Prep] = {}
         self._rounds: dict[int, _Round] = {}
         self._orders: dict[int, _Prep] = {}
-        self._dataset: tuple[Any, dict[str, Any], dict[str, Any]] | None = None
+        self._dataset: tuple[Any, dict[str, Any], dict[str, Any], str] | None = None
         #: Stacked rows of the last combined chunk, reused by the next chunk
         #: that trains the same splits: with a shared dataset, every
         #: setting's same clients.
@@ -209,16 +210,27 @@ class SettingsGroup:
     # -- the dataset ------------------------------------------------------
 
     def dataset_for(self, config: Any) -> Any:
-        """The group's dataset, if this setting's generators stand where the first's stood."""
+        """The group's dataset, if this setting's data and generators are the first setting's.
 
+        Shared only when the setting's data configuration and seed are the
+        first's and its process-wide generators stand where the first's stood
+        before it built the dataset; the setting's generators are then moved
+        to where the first's stood after. Otherwise it builds its own.
+        """
+
+        key = repr((asdict(config.data), config.experiment.seed))
         before = capture_rng_state()
-        if self._dataset is not None and _same_generators(before, self._dataset[1]):
-            dataset, _, after = self._dataset
+        if (
+            self._dataset is not None
+            and self._dataset[3] == key
+            and _same_generators(before, self._dataset[1])
+        ):
+            dataset, _, after, _ = self._dataset
             restore_rng_state(after)
             return dataset
         dataset = build_dataset(config)
         if self._dataset is None:
-            self._dataset = (dataset, before, capture_rng_state())
+            self._dataset = (dataset, before, capture_rng_state(), key)
         return dataset
 
     # -- a round ----------------------------------------------------------

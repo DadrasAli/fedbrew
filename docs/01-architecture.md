@@ -38,10 +38,12 @@ one process, one device per run, no network layer, no client daemon and no
 secure aggregation. Clients are Python objects the server calls in sequence
 (chapter 11 §2 says why they run one at a time), and "communication" is a tensor
 handed from one object to another, so its cost is measured and reported —
-`communicated_bytes`, chapter 08 §4.2 — not incurred. There is no sweep runner —
-a sweep is a grid of generated configs submitted as independent jobs, and
-`SLURMs/` shows two ways to do it — and no plotting: a run writes CSVs and
-`run.json`, and a figure is something you build from them.
+`communicated_bytes`, chapter 08 §4.2 — not incurred. A sweep is a grid of
+generated configs: submitted as independent jobs (`SLURMs/` shows two ways),
+or handed to `fedbrew sweep`, which runs the configs that differ only in
+numeric hyperparameters as one group in one process (chapter 11 §10) and each
+other config as `fedbrew run` would. There is no plotting: a run writes CSVs
+and `run.json`, and a figure is something you build from them.
 
 ## 2. One round
 

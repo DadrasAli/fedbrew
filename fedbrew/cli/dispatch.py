@@ -15,6 +15,10 @@ from importlib import import_module
 #: Subcommand name -> (target module, one-line help for ``fedbrew --help``).
 COMMANDS: dict[str, tuple[str, str]] = {
     "run": ("fedbrew.core.runner", "Run a fedbrew experiment."),
+    "sweep": (
+        "fedbrew.core.sweep",
+        "Run several configs; those differing only in numeric hyperparameters run as one group.",
+    ),
     "generate": ("fedbrew.data.generate", "Generate federated data manifests."),
     "report": ("fedbrew.cli.make_report", "Create fedbrew Markdown reports."),
     "inspect-data": (

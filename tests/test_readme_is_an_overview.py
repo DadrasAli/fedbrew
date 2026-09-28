@@ -151,8 +151,7 @@ LIMITATIONS: dict[str, tuple[str, tuple[str, ...]]] = {
         (
             "It simulates federated learning and does not deploy it",
             "one device per run",
-            "There is no sweep runner",
-            "no plotting",
+            "There is no plotting",
         ),
     ),
     "A research harness, not a deployment framework": (
