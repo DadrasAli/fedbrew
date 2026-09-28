@@ -1,5 +1,8 @@
 # examples/fed-logistic-l1 — linear classifiers with a penalty, and the datasets they are posed on
 
+The example keeps the name it was first written under, for the logistic loss
+with an L1 penalty; it now poses four problems, the tanh loss among them.
+
 A problem here is a loss of the margin, a penalty on the iterate and its weight
 `λ`, posed on a dataset of rows `(a_i, b_i)` with `b_i ∈ {-1, +1}`:
 
@@ -71,6 +74,20 @@ reports no `optimality_gap` or `distance_to_optimum`. `F` is smooth with
 `∇F` Lipschitz at `L + 2λ`. Settings: `fed-logistic-nonconvex-<dataset>-lambda<λ>`
 on synthetic-1000 (`λ = 0.001`), the three kappa datasets (0.01), a9a (0.001),
 ijcnn1-32 (0.01) and gisette (0.001).
+
+### The tanh-loss SVM with a squared-L2 penalty
+
+```
+F(x) = 1 + (1/n) Σ_i tanh(-b_i xᵀa_i) + (λ/2)‖x‖²      (loss: tanh, penalty: l2sq)
+loss'(z) = 1 − tanh(z)²      |loss''(z)| ≤ 4/(3√3)
+```
+
+The loss `1 − tanh(b aᵀx)`, a smooth, bounded surrogate of the 0-1 loss:
+nonconvex in `x`, so `F` is, even with the ridge term. `∇F` is Lipschitz at
+`(4/(3√3))‖A‖²/n + λ`. There is **no certified `F*`**, as for the nonconvex
+penalty. Settings: `fed-tanh-l2sq-<dataset>-lambda<λ>` on synthetic-1000
+(`λ = 0.001`), the three kappa datasets (0.01), a9a (0.001), ijcnn1-32 (0.01)
+and gisette (0.001).
 
 ## How it is federated
 
@@ -217,7 +234,7 @@ client a round at full participation, is gradient descent on `F` at step
 `1/(L + λ)` and converges to `x*`; with more local steps, client drift moves
 its fixed point, and the gap measures by how much.
 
-**The nonconvex-penalty problem: gradient arms reach a stationary point**,
+**The nonconvex-penalty and tanh-loss problems: gradient arms reach a stationary point**,
 not a certified minimum; with no `F*` there is no gap to read, and `F(x)` and
 the distance to `x_true` are what a run reports.
 

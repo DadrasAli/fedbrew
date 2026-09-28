@@ -109,7 +109,7 @@ class ShippedConfigTests(unittest.TestCase):
         # dev configs that ran non-deterministic without saying how strict
         # say so too. The count is pinned so a config cannot quietly stop
         # stating its strictness.
-        self.assertEqual(seen, 124)
+        self.assertEqual(seen, 131)
 
     def test_every_config_that_sets_determinism_states_its_strictness(self) -> None:
         for path, config in _run_configs():

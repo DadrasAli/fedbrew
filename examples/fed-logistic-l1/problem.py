@@ -245,12 +245,26 @@ def _logistic_weights(signed: Tensor) -> Tensor:
     return torch.sigmoid(signed)
 
 
+def _tanh(signed: Tensor, mask: Tensor | None = None) -> Tensor:
+    """`1 + mean tanh(z)`, the tanh-loss SVM's `1 - tanh(b a.x)`: the constant added once."""
+
+    return 1.0 + row_mean(torch.tanh(signed), mask)
+
+
+def _tanh_weights(signed: Tensor) -> Tensor:
+    """`d loss_i / d z_i`: `1 - tanh(z)^2`."""
+
+    return 1.0 - torch.tanh(signed).square()
+
+
 #: The losses of the margin, each as (the mean over a batch's rows of `z =
 #: -b a.x`, its derivative in `z` per row, whether it is convex, and the bound
 #: on its second derivative that makes `grad l` Lipschitz with `L = bound *
 #: ||A||^2 / n`).
 LOSSES: dict[str, tuple[Callable[..., Tensor], Callable[[Tensor], Tensor], bool, float]] = {
     "logistic": (_logistic, _logistic_weights, True, 0.25),
+    # |tanh''| <= 4 / (3 sqrt 3), attained where tanh(z)^2 = 1/3.
+    "tanh": (_tanh, _tanh_weights, False, 4.0 / (3.0 * math.sqrt(3.0))),
 }
 
 
@@ -299,6 +313,7 @@ PROBLEMS: tuple[tuple[str, str], ...] = (
     ("logistic", "l1"),
     ("logistic", "l2sq"),
     ("logistic", "nonconvex"),
+    ("tanh", "l2sq"),
 )
 
 
