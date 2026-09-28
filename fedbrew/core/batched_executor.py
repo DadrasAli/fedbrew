@@ -75,7 +75,7 @@ from fedbrew.core.execution import ClientPool, FitObserver
 from fedbrew.core.protocol import FitRequest, FitResult
 from fedbrew.core.round_planner import RoundPlanner, auto_workers, planned_for, roster_plan
 from fedbrew.core.stacked_results import StackedFitResults
-from fedbrew.core.torch_utils import StateStack
+from fedbrew.core.torch_utils import StateStack, uploaded
 from fedbrew.tasks.base import BatchableTask
 
 #: ``runtime.performance.executor_chunk_bytes`` when unset: 1 GiB.
@@ -130,6 +130,9 @@ class BatchedExecutor:
         #: Plans each round's orders ahead, off the loop (``round_planner``);
         #: None plans them in the round, with ``plan_round``.
         self.planner: RoundPlanner | None = None
+        #: ``runtime.performance.cuda_graphs``, which a resident round reads
+        #: (``fedbrew/core/resident_graphs.py``).
+        self.cuda_graphs = False
 
     def fit(
         self,
@@ -1048,6 +1051,7 @@ class _Bucket:
         parts: Sequence[tuple[int, int]] | None = None,
         context: StepContext | None = None,
         values: ProgramValues | None = None,
+        steps: tuple[_Steps, _Steps] | None = None,
     ) -> None:
         self.task = task
         self.plans = plans
@@ -1080,10 +1084,16 @@ class _Bucket:
         self.rows = rows
         slots = [plan.slot for plan in plans]
         train, evaluation = orders
-        self.steps = _Steps(rows.as_dtype(self.dtype), train, slots, self.dtype)
+        if steps is None:
+            steps = (
+                _Steps(rows.as_dtype(self.dtype), train, slots, self.dtype),
+                _Steps(rows, evaluation, slots, self.model_dtype),
+            )
+        # Built by the caller where its host half is computed ahead of the
+        # round (the resident round's ``_prepare``), over these rows.
+        self.steps, self.eval_steps = steps
         self.evaluation = evaluation
         self.parts = list(parts) if parts is not None and len(parts) > 1 else None
-        self.eval_steps = _Steps(rows, evaluation, slots, self.model_dtype)
         self.eval_counts = evaluation.steps[torch.tensor(slots, dtype=torch.long)].tolist()
         self.weights = update_weights(self.steps.lengths, self.structure, self.program)
         self._weights_on_device: Tensor | None = None
@@ -1715,21 +1725,6 @@ def _vmapped(function: Callable[..., Any], dims: tuple[Any, ...], *values: Any) 
     return torch.func.vmap(function, in_dims=dims)(*values)
 
 
-def uploaded(tensor: Tensor, device: torch.device | str) -> Tensor:
-    """A host tensor on ``device``, the same values: on CUDA from pinned memory, without waiting.
-
-    ``tensor.to(cuda)`` from pageable memory returns only once the copy is
-    done, which waits for everything already queued on the device; staged in
-    pinned memory the copy is queued behind that work and the host goes on.
-    The caching host allocator keeps the pinned block until the copy has run.
-    """
-
-    device = torch.device(device)
-    if device.type != "cuda" or tensor.device.type != "cpu":
-        return tensor.to(device)
-    return tensor.pin_memory().to(device, non_blocking=True)
-
-
 def _placed(value: Tensor, like: Tensor) -> Tensor:
     """A received tensor on the model's device and in its dtype, as load_state_dict copies it."""
 
@@ -1839,6 +1834,7 @@ def select_executor(
     chunk_bytes = chunk_budget(performance.get("executor_chunk_bytes"), model, record)
     context = StepContext(compile_asked, precision, record)
     executor = BatchedExecutor(chunk_bytes, record=record, context=context)
+    executor.cuda_graphs = compile_mode(performance.get("cuda_graphs"))
     if plan_ahead:
         executor.planner = round_planner(components, model, record)
     return executor, record

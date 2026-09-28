@@ -341,6 +341,7 @@ are folded in one weighted reduction per tensor (chapter 07 §3.3).
 | --- | --- | --- | --- |
 | `executor` | `sequential` \| `batched` | `sequential` | How a round's sampled clients are run. |
 | `executor_chunk_bytes` | int > 0 \| `auto` | `1073741824` (1 GiB) | The memory one chunk of clients may take. Read only by `batched`. `auto`: half the device's free memory at the start of the run, below. |
+| `cuda_graphs` | `on` \| `off` | `off` | Replays a resident round's training from a CUDA graph recorded once per round shape (§9.1). Read only by `batched`, on CUDA. |
 
 **What it computes.** Per client, what the sequential executor computes:
 
@@ -618,6 +619,22 @@ computes, bit for bit on the same device:
   the last flush the writer finished, and a resume from that flush's
   `latest.pt` continues the run bit for bit. A round's timings are its
   phases on the device's own timeline, from events read back at the flush.
+- **CUDA graphs** (`cuda_graphs: on`, `fedbrew/core/resident_graphs.py`). A
+  round is computed in two halves: the host's (`_prepare`: its chunks and
+  buckets, and every tensor its steps and fold read -- batch row indices and
+  lengths, gathered rows' indices, fold weights and total), and the
+  device's (`_execute`), which reads nothing else. The second time a round of
+  one shape comes -- the same buckets, clients' positions, batch widths,
+  sliced and masked steps, program and post-fit pass, all in the shape's
+  key -- its device half is recorded as a CUDA graph, and every later round of
+  that shape copies its host tensors and starting model into the graph's
+  buffers and replays it: the same kernels on the same inputs, in the same
+  order, bit for bit the eager round. The client and central evaluations run
+  eagerly after it. A round folded on the CPU, one with a bucket of one
+  client, and a combined-gradient update run eagerly; so does every round
+  after a capture or a replay fails, with a notice and a record
+  (`executor.cuda_graphs`: `used`, `captured`, `replayed`, or `fallback`),
+  and a run that is not resident or not on CUDA records `used: off` and why.
 - **Stops.** A divergence verdict or a refusal inside a flush window ends the
   run at that round, exactly as the per-round loop ends it; the rounds
   trained after it are dropped. An aggregate that is not finite is run once
@@ -810,6 +827,7 @@ Accuracy cells under `bf16` move by whole examples and are not held.
 | `fedbrew/core/resident.py` | §9.1: the resident round: rows, model and records held on the device, recorded at the flush |
 | `fedbrew/core/resident_evaluation.py` | §9.1: the resident round's client splits and central pass, measured on the device at the round |
 | `fedbrew/core/resident_flush.py` | §9.1: the flush's one copy to the host, its writer thread, and the round's device timings |
+| `fedbrew/core/resident_graphs.py` | §9.1: `cuda_graphs`: a resident round's training recorded once per shape and replayed |
 | `fedbrew/core/batched_evaluator.py` | §9: the due clients' splits measured together, and the central pass's kept model and shard |
 | `tools/` | the benchmark and profiling scripts |
 

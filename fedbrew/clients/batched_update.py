@@ -523,7 +523,7 @@ class ProgramValues:
         def column(values: list[float], kind: torch.dtype = dtype) -> Tensor:
             # Cast where it is built, then placed: the cast rounds the same on
             # either device, and the copy does not wait on the device's queue.
-            from fedbrew.core.batched_executor import uploaded
+            from fedbrew.core.torch_utils import uploaded
 
             return uploaded(torch.tensor(values, dtype=torch.float64).to(dtype=kind), device)
 

@@ -9,7 +9,7 @@ import torch
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset, TensorDataset
 
-from fedbrew.core.torch_utils import OptimizerLike, SeedWorker, resolve_torch_device
+from fedbrew.core.torch_utils import OptimizerLike, SeedWorker, resolve_torch_device, uploaded
 from fedbrew.tasks.base import (
     LoaderOrder,
     TaskAdapter,
@@ -398,7 +398,7 @@ class TorchClassificationTask(TaskAdapter):
             for key in ("loss", "correct", "total")
         }
         positions = torch.arange(len(outputs), device=device).unsqueeze(1)
-        counts_tensor = torch.tensor(list(counts), device=device)
+        counts_tensor = uploaded(torch.tensor(list(counts)), device)
         # Selected, not multiplied: a split's padding positions are empty
         # batches whose mean loss is NaN, and NaN * 0 is NaN.
         real = positions < counts_tensor.unsqueeze(0)

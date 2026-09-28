@@ -774,6 +774,7 @@ _KNOWN_EXTRA_KEYS: dict[str, frozenset[str]] = {
             "executor_chunk_bytes",
             "compile",
             "precision",
+            "cuda_graphs",
         }
     ),
     # Only the four the loader takes from the config. batch_size, shuffle,
@@ -964,6 +965,9 @@ def _validate_step_modes(performance: Mapping[str, Any]) -> None:
     compiled = performance.get("compile")
     if compiled is not None and compiled not in (True, False, "on", "off"):
         raise RunRefused(f"runtime.performance.compile must be on or off, got {compiled!r}")
+    graphs = performance.get("cuda_graphs")
+    if graphs is not None and graphs not in (True, False, "on", "off"):
+        raise RunRefused(f"runtime.performance.cuda_graphs must be on or off, got {graphs!r}")
     precision = performance.get("precision")
     if precision is not None and precision not in PRECISIONS:
         raise RunRefused(
@@ -976,6 +980,7 @@ def _validate_step_modes(performance: Mapping[str, Any]) -> None:
         for key, value in (
             ("compile", compiled in (True, "on")),
             ("precision", precision not in (None, "reference")),
+            ("cuda_graphs", graphs in (True, "on")),
         )
         if value
     ]

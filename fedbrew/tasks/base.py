@@ -200,7 +200,10 @@ def row_count(rows: Tensor, mask: Tensor | None = None) -> Tensor:
     """How many real rows a batch holds, as a float64 tensor: its ``total``."""
 
     if mask is None:
-        return torch.tensor(float(len(rows)), dtype=torch.float64, device=rows.device)
+        # Filled on the device: ``torch.tensor(..., device=)`` would copy the
+        # number from the host, which waits for the device's queue and cannot
+        # be recorded in a CUDA graph (fedbrew/core/resident_graphs.py).
+        return torch.full((), float(len(rows)), dtype=torch.float64, device=rows.device)
     return mask.sum().to(torch.float64)
 
 

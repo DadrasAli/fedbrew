@@ -88,6 +88,7 @@ class ResidentEvaluation:
         self._data: dict[int, Any] = {}
         self._rows: dict[str, Any] = {}
         self._planned: dict[tuple[Any, ...], _Planned] = {}
+        self._plans: dict[tuple[int, tuple[str, ...]], tuple[ClientEvalPlan, str | None]] = {}
         self.central = _central_rows(rounds)
 
     # -- the client splits ---------------------------------------------------
@@ -128,8 +129,19 @@ class ResidentEvaluation:
         )
 
     def _plan(self, place: int, splits: list[str]) -> tuple[ClientEvalPlan, str | None]:
-        """``batched_evaluation_plan``'s plan for a client, and the split it refuses, if any."""
+        """``batched_evaluation_plan``'s plan for a client, and the split it refuses, if any.
 
+        The same every round for the same client and splits -- its data and its
+        unseeded loader orders -- so it is made once.
+        """
+
+        key = (place, tuple(splits))
+        held = self._plans.get(key)
+        if held is None:
+            held = self._plans[key] = self._new_plan(place, splits)
+        return held
+
+    def _new_plan(self, place: int, splits: list[str]) -> tuple[ClientEvalPlan, str | None]:
         client_id = self.rounds.roster.client_ids[place]
         plan = ClientEvalPlan(
             splits=list(splits), client_id=client_id, seed=self.rounds.representative.base_seed

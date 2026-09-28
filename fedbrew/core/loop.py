@@ -1707,6 +1707,7 @@ def _checkpoint_payload_builder(
     server_payload: dict[str, Any],
     metrics: dict[str, float],
     round_id: int,
+    client_states: Callable[[], dict[str, Any] | None] | None = None,
 ) -> Callable[[], dict[str, Any] | None] | None:
     """Build the round's checkpoint payload on demand; None when there is no model.
 
@@ -1718,7 +1719,9 @@ def _checkpoint_payload_builder(
 
     if "model_state" not in server_payload:
         return None
-    return lambda: _build_checkpoint_payload(server, client, server_payload, metrics, round_id)
+    return lambda: _build_checkpoint_payload(
+        server, client, server_payload, metrics, round_id, client_states
+    )
 
 
 def _build_checkpoint_payload(
@@ -1727,7 +1730,15 @@ def _build_checkpoint_payload(
     server_payload: dict[str, Any],
     metrics: dict[str, float],
     round_id: int,
+    client_states: Callable[[], dict[str, Any] | None] | None = None,
 ) -> dict[str, Any] | None:
+    """The round's checkpoint; ``client_states`` gives the stacked client states, if it is given.
+
+    The resident round (``fedbrew/core/resident.py``) gives the ones it
+    stacked last while its pool has built no client since: its rules keep no
+    state that a round changes.
+    """
+
     if "model_state" not in server_payload:
         return None
 
@@ -1766,10 +1777,17 @@ def _build_checkpoint_payload(
         if field in checkpoint_state:
             server_state.pop(field, None)
 
-    client_states = _collect_client_states(client)
-    if client_states is not None:
-        checkpoint_state["client_states"] = stack_client_states(client_states)
+    stacked = client_states() if client_states is not None else _stacked_client_states(client)
+    if stacked is not None:
+        checkpoint_state["client_states"] = stacked
     return checkpoint_state
+
+
+def _stacked_client_states(client: ClientPool) -> dict[str, Any] | None:
+    """Every built client's state, stacked (format 2), or None for a pool that keeps none."""
+
+    client_states = _collect_client_states(client)
+    return None if client_states is None else stack_client_states(client_states)
 
 
 def _without_client_states(payload: dict[str, Any]) -> dict[str, Any]:

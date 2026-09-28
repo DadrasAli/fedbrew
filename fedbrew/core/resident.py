@@ -52,6 +52,7 @@ from fedbrew.core.batched_executor import (
     StagedLayout,
     _Bucket,
     _Rows,
+    _Steps,
     cut_chunks,
     finished_chunk,
     finished_values,
@@ -65,6 +66,7 @@ from fedbrew.core.federated_state import model_state_size
 from fedbrew.core.metrics import filter_metrics
 from fedbrew.core.protocol import FitRequest, RoundInfo
 from fedbrew.core.resident_flush import DeferredStaged, FlushWriter, HostCopy, RoundClock
+from fedbrew.core.resident_graphs import RoundGraphs
 from fedbrew.core.round_planner import PlannedRound
 from fedbrew.core.stacked_results import StackedFitResults
 from fedbrew.core.torch_utils import StateStack
@@ -98,6 +100,11 @@ def resident_rounds_for(context: Any) -> ResidentRounds | None:
     executor.record["rounds"] = (
         {"used": "resident"} if reason is None else {"used": "per_round", "reason": reason}
     )
+    if reason is not None and executor.cuda_graphs:
+        executor.record["cuda_graphs"] = {
+            "used": "off",
+            "fallback": f"CUDA graphs replay resident rounds; this run's are per round: {reason}",
+        }
     return rounds if reason is None else None
 
 
@@ -217,6 +224,33 @@ class ResidentRows:
 
         self._kept, self._fresh = self._fresh, {}
 
+    def single(self, row: int) -> _Rows:
+        """One client's own rows, unpadded, as ``_Rows`` of one split holds them."""
+
+        return self._rows([row])
+
+    def everyone(self) -> _Rows:
+        """Every client's rows, stacked, as ``_Rows`` of every split holds them."""
+
+        rows = self._kept.get(("everyone",))
+        if rows is None:
+            rows = self._kept[("everyone",)] = self._rows(self._everyone)
+        return rows
+
+    def gathered(self, index: Tensor, longest: int) -> _Rows:
+        """The rows at the stacked rows ``index`` (on the device), padded to ``longest``."""
+
+        rows: _Rows = object.__new__(_Rows)
+        rows.sources, rows.versions, rows.lengths = [], [], []
+        rows.longest, rows.stacked = longest, True
+        rows.tensors = tuple(
+            tensor.index_select(0, index)[:, :longest].contiguous() for tensor in self.tensors
+        )
+        rows.device = rows.tensors[0].device
+        rows.bytes = sum(tensor.numel() * tensor.element_size() for tensor in rows.tensors)
+        rows._cast = {}
+        return rows
+
     def _rows(self, places: list[int]) -> _Rows:
         """``_Rows`` of these stacked rows: one's own, or several padded to their longest."""
 
@@ -273,6 +307,67 @@ class ChunkRun:
     parts: list[Any]
     columns: list[Tensor]
     seconds: float = 0.0
+
+
+@dataclass(slots=True)
+class _RowsShape:
+    """What a bucket's ``_Steps`` read of its rows while the round is planned: their shape."""
+
+    longest: int
+    stacked: bool
+    device: torch.device
+    tensors: tuple[Tensor, ...] = ()
+
+
+@dataclass(slots=True)
+class _BucketPlan:
+    """One bucket's host half: its clients, its rows, its steps, and where its inputs are."""
+
+    chunk: int
+    members: list[int]
+    slots: list[int]
+    rows_index: list[int]
+    structure: tuple[int, ...]
+    kind: str
+    longest: int
+    train: Any
+    evaluation: Any
+    inputs: dict[Any, int] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class RoundPlan:
+    """A round's host half: its chunks and buckets, and the tensors its device half reads."""
+
+    planned: PlannedRound
+    chunks: list[tuple[int, int]]
+    host_fold: bool
+    weights: list[float]
+    total_weight: float
+    buckets: list[_BucketPlan] = field(default_factory=list)
+    uploads: list[Tensor] = field(default_factory=list)
+    inputs: dict[Any, int] = field(default_factory=dict)
+    key: Any = None
+
+    def add(self, tensor: Tensor) -> int:
+        """Another tensor for the device half to read; its place among the inputs."""
+
+        self.uploads.append(tensor)
+        return len(self.uploads) - 1
+
+
+def _steps_key(steps: Any) -> tuple[Any, ...]:
+    """What of a bucket's steps its kernels depend on: their shape, and how each batch is cut."""
+
+    return (
+        steps.size,
+        tuple(steps._indices.shape),
+        tuple(steps.widths),
+        tuple(steps.full),
+        tuple(steps.aligned),
+        steps.sliced,
+        tuple(steps.first_starts) if steps.sliced else (),
+    )
 
 
 @dataclass(slots=True)
@@ -350,6 +445,14 @@ class ResidentRounds:
             self.rows = ResidentRows(self.task, self.splits)
         self.model = self._placed(context.server._model_state)
         self.copier = HostCopy(self.device)
+        self._client_states: tuple[Any, dict[str, Any] | None] | None = None
+        self.graphs = RoundGraphs(self.device, executor.cuda_graphs, executor.record)
+        #: The dtypes the fold sums the model's tensors in, in order of first use.
+        self.accumulation_dtypes = list(
+            dict.fromkeys(
+                _accumulation_dtype(self.parameters[key].dtype) for key in self.state_keys
+            )
+        )
         from fedbrew.core.resident_evaluation import ResidentEvaluation
 
         self.evaluation = ResidentEvaluation(self) if self.unsupported is None else None
@@ -443,30 +546,229 @@ class ResidentRounds:
                 ).refuse()
 
     def _train(self, planned: PlannedRound, device_round: DeviceRound) -> None:
-        """Every chunk's buckets trained and folded, in order; the round's staged records."""
+        """Every chunk's buckets trained and folded, in order; the round's staged records.
 
-        program = device_round.program
-        costs = self._costs(planned, device_round, program)
-        chunks = list(cut_chunks(costs, self.executor.chunk_bytes))
-        fold = _Fold(self, device_round, host=self._has_single_bucket(planned, chunks))
-        for start, stop in chunks:
+        The round's host half is computed first (``_prepare``); its device half
+        (``_execute``) reads nothing but the tensors that computes, so it runs
+        eagerly or as the graph of its shape (``RoundGraphs``) alike.
+        """
+
+        plan = self._prepare(planned, device_round)
+        for start, stop in plan.chunks:
             self.executor.record["largest_chunk_clients"] = max(
                 self.executor.record["largest_chunk_clients"], stop - start
             )
-            chunk_started = time.perf_counter()
-            trained = self._train_chunk(planned, device_round, start, stop)
+        outputs, graphed = self.graphs.run(
+            plan.key,
+            plan.uploads,
+            self.model,
+            lambda inputs, model: self._execute(plan, device_round, inputs, model),
+        )
+        results, mean, finite = outputs
+        for index, (start, stop) in enumerate(plan.chunks):
             parts, columns, layout = staged_chunk(
                 self.task,
-                [(members, training, evaluated) for members, _, training, evaluated in trained],
+                [
+                    (members, training, evaluated)
+                    for chunk, members, training, evaluated in results
+                    if chunk == index
+                ],
             )
-            for members, stack, _, _ in trained:
-                fold.add([start + member for member in members], stack)
-            device_round.chunks.append(
-                ChunkRun(start, stop, layout, parts, columns, time.perf_counter() - chunk_started)
-            )
-        device_round.mean, device_round.finite = fold.result()
-        self.model = device_round.mean
-        self.rows.round_done()  # type: ignore[union-attr]
+            device_round.chunks.append(ChunkRun(start, stop, layout, parts, columns))
+        if graphed:
+            # The graph's own outputs are what its next replay writes over.
+            mean = {name: value.clone() for name, value in mean.items()}
+            finite = finite.clone()
+        device_round.mean, device_round.finite = mean, finite
+        self.model = mean
+
+    def _prepare(self, planned: PlannedRound, device_round: DeviceRound) -> RoundPlan:
+        """The round's host half: its chunks and buckets, and every tensor its device half reads."""
+
+        program = device_round.program
+        chunks = list(
+            cut_chunks(self._costs(planned, device_round, program), self.executor.chunk_bytes)
+        )
+        server = self.context.server
+        if server.aggregation_weighting == "uniform":
+            weights = [1.0] * len(planned.positions)
+        else:
+            weights = [float(rows) for rows in device_round.eval_rows]
+        total_weight = 0.0
+        for weight in weights:
+            total_weight += float(weight)
+        plan = RoundPlan(
+            planned=planned,
+            chunks=chunks,
+            host_fold=self._has_single_bucket(planned, chunks),
+            weights=weights,
+            total_weight=total_weight,
+        )
+        for index, (start, stop) in enumerate(chunks):
+            groups: dict[tuple[int, ...], list[int]] = {}
+            for slot in range(start, stop):
+                groups.setdefault(device_round.structures[slot], []).append(slot - start)
+            for structure, members in groups.items():
+                plan.buckets.append(self._bucket_plan(plan, index, start, structure, members))
+        if not plan.host_fold:
+            for dtype in self.accumulation_dtypes:
+                plan.inputs[("divisor", dtype)] = plan.add(torch.tensor(total_weight, dtype=dtype))
+        plan.key = self._key(plan, device_round)
+        return plan
+
+    def _bucket_plan(
+        self,
+        plan: RoundPlan,
+        chunk: int,
+        start: int,
+        structure: tuple[int, ...],
+        members: list[int],
+    ) -> _BucketPlan:
+        """One bucket's host half: its clients, its rows' shape, its steps and their indices."""
+
+        rows = self.rows
+        assert rows is not None
+        slots = [start + member for member in members]
+        places = [plan.planned.positions[slot] for slot in slots]
+        index = [rows.index[place] for place in places]
+        longest = max(rows.lengths[row] for row in index)
+        size = len(slots)
+        if size == 1:
+            kind = "single"
+        elif index == rows._everyone and longest == rows.longest:
+            kind = "everyone"
+        else:
+            kind = "gathered"
+        shape = _RowsShape(longest, size > 1, self.device)
+        context = self.executor.context
+        dtype = context.train_dtype(self.template_dtype) if context else self.template_dtype
+        bucket = _BucketPlan(
+            chunk=chunk,
+            members=members,
+            slots=slots,
+            rows_index=index,
+            structure=structure,
+            kind=kind,
+            longest=longest,
+            train=_Steps(shape, plan.planned.train, slots, dtype),  # type: ignore[arg-type]
+            evaluation=_Steps(shape, plan.planned.evaluation, slots, self.template_dtype),  # type: ignore[arg-type]
+        )
+        if kind == "gathered":
+            bucket.inputs["index"] = plan.add(torch.tensor(index, dtype=torch.long))
+        if size > 1:
+            offsets = torch.arange(size, dtype=torch.long).view(-1, 1, 1) * longest
+            for name, steps in (("train", bucket.train), ("eval", bucket.evaluation)):
+                # What ``_Steps._device`` computes and uploads, computed here.
+                bucket.inputs[f"{name}_flat"] = plan.add(steps._indices + offsets)
+                bucket.inputs[f"{name}_lengths"] = plan.add(steps._lengths)
+            if not plan.host_fold:
+                for dtype_ in self.accumulation_dtypes:
+                    scale = torch.tensor([plan.weights[slot] for slot in slots], dtype=dtype_)
+                    bucket.inputs[("scale", dtype_)] = plan.add(scale)
+        return bucket
+
+    def _key(self, plan: RoundPlan, device_round: DeviceRound) -> Any:
+        """What makes two rounds the same graph: None for a round only eager runs.
+
+        A round folded on the CPU, one with a bucket of one client, and one
+        whose update combines a pass's gradients (its weights uploaded as it
+        steps) run eagerly.
+        """
+
+        program = device_round.program
+        if plan.host_fold or program.combine != "batch":
+            return None
+        if any(bucket.kind == "single" for bucket in plan.buckets):
+            return None
+        return (
+            repr(program),
+            device_round.evaluate,
+            tuple(
+                (
+                    bucket.chunk,
+                    tuple(bucket.members),
+                    bucket.structure,
+                    bucket.kind,
+                    bucket.longest,
+                    _steps_key(bucket.train),
+                    _steps_key(bucket.evaluation),
+                )
+                for bucket in plan.buckets
+            ),
+        )
+
+    def _execute(
+        self,
+        plan: RoundPlan,
+        device_round: DeviceRound,
+        inputs: Sequence[Tensor],
+        model: dict[str, Tensor],
+    ) -> tuple[list[tuple[int, list[int], Any, Any]], dict[str, Tensor], Tensor]:
+        """The round's device half: every bucket trained and folded, from ``inputs`` and ``model``.
+
+        Reads no host tensor but the round's inputs, and waits for nothing, so
+        a graph can record it (``RoundGraphs``).
+        """
+
+        fold = _Fold(self, plan, inputs)
+        results = []
+        for bucket in plan.buckets:
+            rows = self._rows_for(bucket, inputs)
+            context = self.executor.context
+            dtype = context.train_dtype(self.template_dtype) if context else self.template_dtype
+            bucket.train.rows = rows.as_dtype(dtype)
+            bucket.evaluation.rows = rows
+            # What a step gathers lazily is this call's: a capture that failed
+            # left tensors it recorded but never computed.
+            bucket.train._every = bucket.evaluation._every = None
+            bucket.train._on_device = bucket.evaluation._on_device = None
+            if bucket.kind != "single":
+                bucket.train._on_device = (
+                    inputs[bucket.inputs["train_flat"]],
+                    inputs[bucket.inputs["train_lengths"]],
+                )
+                bucket.evaluation._on_device = (
+                    inputs[bucket.inputs["eval_flat"]],
+                    inputs[bucket.inputs["eval_lengths"]],
+                )
+            members = [
+                _MemberPlan(
+                    program=device_round.program,
+                    structure=bucket.structure,
+                    slot=slot,
+                    start=model,
+                    evaluate=device_round.evaluate,
+                    eval_rows=device_round.eval_rows[slot],
+                    train_data=None,
+                )
+                for slot in bucket.slots
+            ]
+            stack, training, evaluated = _Bucket(
+                self.task,
+                self.template,
+                self.buffers,
+                members,  # type: ignore[arg-type]
+                rows,
+                (plan.planned.train, plan.planned.evaluation),
+                context=self.executor.context,
+                values=self._program_values(
+                    device_round.program, len(bucket.slots), len(bucket.structure)
+                ),
+                steps=(bucket.train, bucket.evaluation),
+            ).run()
+            fold.add(bucket, stack)
+            results.append((bucket.chunk, bucket.members, training, evaluated))
+        mean, finite = fold.result()
+        return results, mean, finite
+
+    def _rows_for(self, bucket: _BucketPlan, inputs: Sequence[Tensor]) -> _Rows:
+        rows = self.rows
+        assert rows is not None
+        if bucket.kind == "single":
+            return rows.single(bucket.rows_index[0])
+        if bucket.kind == "everyone":
+            return rows.everyone()
+        return rows.gathered(inputs[bucket.inputs["index"]], bucket.longest)
 
     def _costs(self, planned: PlannedRound, device_round: DeviceRound, program: Any) -> list[int]:
         """``client_costs`` of the round's clients, from the resident rows' sizes."""
@@ -494,52 +796,6 @@ class ResidentRounds:
             if 1 in counts.values():
                 return True
         return False
-
-    def _train_chunk(
-        self, planned: PlannedRound, device_round: DeviceRound, start: int, stop: int
-    ) -> list[tuple[list[int], dict[str, Tensor], Any, Any]]:
-        """``_train_buckets`` of the chunk: per bucket its positions in the chunk and its passes."""
-
-        buckets: dict[tuple[int, ...], list[int]] = {}
-        for slot in range(start, stop):
-            buckets.setdefault(device_round.structures[slot], []).append(slot - start)
-        trained = []
-        for structure, members in buckets.items():
-            slots = [start + member for member in members]
-            stack, training, evaluated = self._bucket(planned, device_round, structure, slots).run()
-            trained.append((members, stack, training, evaluated))
-        return trained
-
-    def _bucket(
-        self,
-        planned: PlannedRound,
-        device_round: DeviceRound,
-        structure: tuple[int, ...],
-        slots: list[int],
-    ) -> _Bucket:
-        places = [planned.positions[slot] for slot in slots]
-        plans = [
-            _MemberPlan(
-                program=device_round.program,
-                structure=structure,
-                slot=slot,
-                start=self.model,
-                evaluate=device_round.evaluate,
-                eval_rows=device_round.eval_rows[slot],
-                train_data=None,
-            )
-            for slot in slots
-        ]
-        return _Bucket(
-            self.task,
-            self.template,
-            self.buffers,
-            plans,  # type: ignore[arg-type]
-            self.rows.bucket(places),  # type: ignore[union-attr]
-            (planned.train, planned.evaluation),
-            context=self.executor.context,
-            values=self._program_values(device_round.program, len(slots), len(structure)),
-        )
 
     def _program_values(self, program: Any, size: int, steps: int) -> ProgramValues:
         """``ProgramValues`` of ``size`` clients sharing ``program``, made once per shape."""
@@ -714,6 +970,22 @@ class ResidentRounds:
         round_info.metrics.update(metrics)
         return server._federated_payload(metrics=metrics)
 
+    def client_states(self) -> dict[str, Any] | None:
+        """Every built client's state, stacked, as a checkpoint holds them: again only when needed.
+
+        The pool's snapshot changes when it builds a client, and a resident
+        round's rules keep nothing a round changes, so the last stacking is
+        reused until the pool holds another client.
+        """
+
+        from fedbrew.core.loop import _stacked_client_states
+
+        pool = self.context.client
+        held = (len(getattr(pool, "_clients", pool)), len(getattr(pool, "_saved_states", ())))
+        if self._client_states is None or self._client_states[0] != held:
+            self._client_states = (held, _stacked_client_states(pool))
+        return self._client_states[1]
+
     def close(self) -> None:
         self.rows = None
 
@@ -740,37 +1012,35 @@ class _Fold:
     On the device when every bucket holds several clients: each bucket's
     ``weights @ rows`` added into sums on the device, and the sums divided by
     the total weight as a device tensor -- where addition and that division
-    round as the CPU's do. With a bucket of one client, whose row the
-    accumulator adds on the CPU with ``add_(row, alpha=weight)``, the whole
-    round is folded as the accumulator folds it, on the CPU.
+    round as the CPU's do. The weights and the total come as the round's
+    inputs (``RoundPlan``), so a replayed round reads its own. With a bucket
+    of one client, whose row the accumulator adds on the CPU with
+    ``add_(row, alpha=weight)``, the whole round is folded as the accumulator
+    folds it, on the CPU.
     """
 
-    def __init__(self, rounds: ResidentRounds, device_round: DeviceRound, host: bool) -> None:
+    def __init__(self, rounds: ResidentRounds, plan: RoundPlan, inputs: Sequence[Tensor]) -> None:
         self.rounds = rounds
-        self.host = host
-        server = rounds.context.server
-        places = device_round.positions
-        if server.aggregation_weighting == "uniform":
-            self.weights = [1.0] * len(places)
-        else:
-            self.weights = [float(rows) for rows in device_round.eval_rows]
-        self.total_weight = 0.0
-        for weight in self.weights:
-            self.total_weight += float(weight)
+        self.plan = plan
+        self.inputs = inputs
+        self.host = plan.host_fold
         self.totals: dict[str, Tensor] = {}
 
-    def add(self, positions: list[int], stack: Mapping[str, Tensor]) -> None:
-        """One bucket's rows, client ``positions[r]`` of the round at row ``r``."""
+    def add(self, bucket: _BucketPlan, stack: Mapping[str, Tensor]) -> None:
+        """One bucket's rows, the round's client ``bucket.slots[r]`` at row ``r``."""
 
-        weights = [self.weights[position] for position in positions]
+        weights = [self.plan.weights[slot] for slot in bucket.slots]
         for key in self.rounds.state_keys:
             tensor = stack[key]
-            flat = tensor.reshape(len(positions), -1)
+            flat = tensor.reshape(len(weights), -1)
             total = self._total(key, tensor)
-            if len(positions) == 1:
+            if len(weights) == 1:
                 total.add_(tensor[0].detach().cpu(), alpha=weights[0])
                 continue
-            scale = uploaded(torch.tensor(weights, dtype=total.dtype), tensor.device)
+            if self.host:
+                scale = uploaded(torch.tensor(weights, dtype=total.dtype), tensor.device)
+            else:
+                scale = self.inputs[bucket.inputs[("scale", total.dtype)]]
             part = (scale @ flat.to(total.dtype)).reshape(total.shape)
             total.add_(part.cpu() if self.host else part)
 
@@ -789,10 +1059,10 @@ class _Fold:
         for key, total in self.totals.items():
             dtype = self.rounds.parameters[key].dtype
             if self.host:
-                value = total.div_(self.total_weight).to(dtype)
+                value = total.div_(self.plan.total_weight).to(dtype)
                 mean[key] = value.to(self.rounds.device)
             else:
-                divisor = uploaded(torch.tensor(self.total_weight, dtype=total.dtype), total.device)
+                divisor = self.inputs[self.plan.inputs[("divisor", total.dtype)]]
                 mean[key] = total.div_(divisor).to(dtype)
         finite = torch.stack([torch.isfinite(value).all() for value in mean.values()]).all()
         return mean, finite
@@ -1074,7 +1344,12 @@ class _Loop:
         checkpoint_started = time.perf_counter()
         self.staged = _update_checkpoints(
             _checkpoint_payload_builder(
-                context.server, context.client, context.server_payload, metrics, round_id
+                context.server,
+                context.client,
+                context.server_payload,
+                metrics,
+                round_id,
+                self.rounds.client_states,
             ),
             metrics,
             context.output_dir,

@@ -864,3 +864,18 @@ def as_cpu_tensor(key: str, value: Any) -> Tensor:
     if not isinstance(value, Tensor):
         raise TypeError(f"state value for {key} is not a tensor")
     return value.detach().cpu()
+
+
+def uploaded(tensor: Tensor, device: torch.device | str) -> Tensor:
+    """A host tensor on ``device``, the same values: on CUDA from pinned memory, without waiting.
+
+    ``tensor.to(cuda)`` from pageable memory returns only once the copy is
+    done, which waits for everything already queued on the device; staged in
+    pinned memory the copy is queued behind that work and the host goes on.
+    The caching host allocator keeps the pinned block until the copy has run.
+    """
+
+    device = torch.device(device)
+    if device.type != "cuda" or tensor.device.type != "cpu":
+        return tensor.to(device)
+    return tensor.pin_memory().to(device, non_blocking=True)

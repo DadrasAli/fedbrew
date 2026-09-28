@@ -219,9 +219,9 @@ class _fold_sites:  # noqa: N801 -- used as a context manager, named for what it
         real = resident._Fold.__init__
         hosts = self.hosts
 
-        def spy(fold: Any, rounds: Any, device_round: Any, host: bool) -> None:
-            hosts.append(host)
-            real(fold, rounds, device_round, host)
+        def spy(fold: Any, rounds: Any, plan: Any, inputs: Any) -> None:
+            hosts.append(plan.host_fold)
+            real(fold, rounds, plan, inputs)
 
         self._patch = mock.patch.object(resident._Fold, "__init__", spy)
         self._patch.start()
@@ -452,6 +452,62 @@ class TheFlushsWritesTest(unittest.TestCase):
             writer.close()
 
 
+def _cuda_usable() -> bool:
+    """A CUDA device this process can allocate on."""
+
+    if not torch.cuda.is_available():
+        return False
+    try:
+        torch.zeros(1, device="cuda")
+    except RuntimeError:
+        return False
+    return True
+
+
+@pytest.mark.cuda
+@unittest.skipUnless(_cuda_usable(), "needs a usable CUDA device")
+class OnCudaTest(ResidentRuns):
+    """On CUDA: the resident round, eager and replayed from CUDA graphs, is the per-round path."""
+
+    def _arms(self) -> Iterator[tuple[str, dict[str, Any], Any]]:
+        from tests.test_batched_executor_tolerance import cnn_config, images
+
+        mnist = classification_config(**FEDAVG, update_mode="single_batch")
+        yield "mnist-like", mnist, nullcontext
+        femnist = cnn_config(**FEDAVG, update_mode="single_batch")
+        femnist["server"].update(participation_rate=None, participation_probability=0.6)
+
+        @contextmanager
+        def data() -> Iterator[None]:
+            with images(), ragged():
+                yield
+
+        yield "femnist-like", femnist, data
+        several = classification_config(**FEDAVG, update_mode="sequential_epoch")
+        yield "several buckets", several, ragged
+
+    def test_eager_and_replayed(self) -> None:
+        for label, config, data in self._arms():
+            with self.subTest(arm=label):
+                config = _clean(config)
+                config["defaults"]["global_rounds"] = 6
+                config["runtime"]["device"] = "cuda"
+                config["runtime"]["checkpointing"].update(save_every_round=True)
+                with data():
+                    eager = self.run_config(config, "batched")
+                    graphed = self.run_config(config, "batched", cuda_graphs="on")
+                    with per_round():
+                        reference = self.run_config(config, "batched")
+                self.assertEqual(_executor(eager)["rounds"], {"used": "resident"})
+                self.assertSameRun(eager, reference)
+                self.assertSameRun(graphed, reference)
+                graphs = _executor(graphed)["cuda_graphs"]
+                self.assertEqual(graphs["used"], "on", graphs)
+                if label == "mnist-like":
+                    # One shape every round: recorded at round 2, replayed from then on.
+                    self.assertEqual((graphs["captured"], graphs["replayed"]), (1, 5))
+
+
 class WhoTakesItTest(ResidentRuns):
     def test_a_rule_with_per_client_state_runs_per_round_and_says_why(self) -> None:
         config = classification_rule_config({"update_rule": "fedprox", "proximal_mu": 0.01})
@@ -459,6 +515,22 @@ class WhoTakesItTest(ResidentRuns):
         rounds = _executor(output)["rounds"]
         self.assertEqual(rounds["used"], "per_round")
         self.assertIn("keeps per-client state", rounds["reason"])
+
+    def test_cuda_graphs_on_the_cpu_are_recorded_off(self) -> None:
+        config = classification_config(**FEDAVG, update_mode="single_batch")
+        config["runtime"].setdefault("performance", {})["cuda_graphs"] = "on"
+        output = self.run_config(_clean(config), "batched")
+        graphs = _executor(output)["cuda_graphs"]
+        self.assertEqual(graphs["used"], "off")
+        self.assertIn("need a CUDA device", graphs["fallback"])
+
+    def test_cuda_graphs_without_the_batched_executor_are_refused(self) -> None:
+        from fedbrew.core.refusal import RunRefused
+
+        config = classification_config(**FEDAVG, update_mode="single_batch")
+        config["runtime"].setdefault("performance", {})["cuda_graphs"] = "on"
+        with self.assertRaisesRegex(RunRefused, "cuda_graphs is a mode of the batched"):
+            self.run_config(_clean(config), "sequential")
 
     def test_the_sequential_executor_records_nothing_of_it(self) -> None:
         config = classification_config(**FEDAVG, update_mode="single_batch")
