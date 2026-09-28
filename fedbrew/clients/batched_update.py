@@ -21,6 +21,16 @@ needs the update in pieces it can stack:
   over the client dimension; without it they are the sequential arithmetic bit
   for bit, which is what the one-client tolerance test checks.
 
+A program's numeric values -- the learning rate, momentum, weight decay,
+FedProx's mu, the clipping norm -- are not part of what clients must share to
+be stepped together, only its shape is (:attr:`LocalProgram.shape`): the step
+arithmetic reads them as each client's own tensors (:class:`ProgramValues`),
+so clients of different runs with different values, the settings of a group
+(``fedbrew/core/settings_group.py``), are rows of one stack. Each scalar form
+torch's optimizers use has a tensor form that rounds the same: ``add(b,
+alpha=s)`` is one fused multiply-add, as ``addcmul(a, b, s)`` is, and
+``addcdiv(b, d, value=s)`` is ``addcdiv(a, b * s, d)``.
+
 A rule opts in by declaring ``_batched_rule`` on its own class and
 implementing ``batched_plan`` and ``batched_result``
 (:class:`fedbrew.clients.torch_sgd_client.TorchSGDClient`). A subclass that
@@ -96,6 +106,31 @@ class LocalProgram:
     scaffold: bool = False
     weighting: str | None = None
 
+    @property
+    def shape(self) -> tuple[Any, ...]:
+        """What clients stepped together must share: every branch the step takes, no value.
+
+        Which terms the step has -- momentum, weight decay, FedProx's
+        correction, clipping, each present or not -- and everything read as a
+        Python number rather than per client (AdamW's betas and eps).
+        """
+
+        spec = self.optimizer
+        return (
+            spec.kind,
+            spec.momentum != 0.0,
+            spec.weight_decay != 0.0,
+            spec.nesterov,
+            spec.beta1,
+            spec.beta2,
+            spec.eps,
+            self.combine,
+            self.max_grad_norm is not None,
+            bool(self.proximal_mu),
+            self.scaffold,
+            self.weighting,
+        )
+
 
 @dataclass(slots=True)
 class ClientBatchPlan:
@@ -133,9 +168,9 @@ class ClientBatchPlan:
 
     @property
     def bucket(self) -> tuple[Any, ...]:
-        """What two clients must share to be stepped together."""
+        """What two clients must share to be stepped together: their values need not match."""
 
-        return (self.program, self.structure, self.evaluate)
+        return (self.program.shape, self.structure, self.evaluate)
 
 
 @dataclass(slots=True)
@@ -429,6 +464,72 @@ def round_orders(
 # ---------------------------------------------------------------------------
 
 
+class ProgramValues:
+    """The numeric values of several clients' programs, one tensor per value over the clients.
+
+    ``programs`` share a :attr:`LocalProgram.shape`. Each value is computed as
+    the scalar step computes it, in Python floats, and held in the dtype the
+    step applies it in -- ``dtype``, the parameters', as torch casts a scalar
+    to the tensor it scales -- except the clipping norm the combined modes
+    compare in float64. AdamW's step size depends on the step, so it is held
+    for each of ``steps`` steps.
+    """
+
+    def __init__(
+        self,
+        programs: Sequence[LocalProgram],
+        steps: int,
+        dtype: torch.dtype,
+        device: torch.device | str,
+    ) -> None:
+        first = programs[0]
+
+        def column(values: list[float], kind: torch.dtype = dtype) -> Tensor:
+            return torch.tensor(values, dtype=torch.float64).to(device=device, dtype=kind)
+
+        specs = [program.optimizer for program in programs]
+        self._values: dict[str, Tensor] = {}
+        self._step_sizes: Tensor | None = None
+        if first.optimizer.kind == "adamw":
+            self._values["decay"] = column([1 - spec.lr * spec.weight_decay for spec in specs])
+            self._step_sizes = column(
+                [
+                    [-(spec.lr / (1 - spec.beta1 ** float(step))) for spec in specs]
+                    for step in range(1, steps + 1)
+                ]
+            )
+        else:
+            self._values["negated_lr"] = column([-spec.lr for spec in specs])
+            if first.optimizer.momentum != 0.0:
+                self._values["momentum"] = column([spec.momentum for spec in specs])
+            if first.optimizer.weight_decay != 0.0:
+                self._values["weight_decay"] = column([spec.weight_decay for spec in specs])
+        if first.proximal_mu:
+            self._values["proximal_mu"] = column([program.proximal_mu for program in programs])
+        if first.max_grad_norm is not None:
+            norms = [float(program.max_grad_norm) for program in programs]  # type: ignore[arg-type]
+            self._values["max_grad_norm"] = column(norms)
+            self._values["max_grad_norm_wide"] = column(norms, torch.float64)
+
+    def at(self, step: int) -> dict[str, Tensor]:
+        """Every value the ``step``-th applied update reads (from 1), per client."""
+
+        if self._step_sizes is None:
+            return self._values
+        return {**self._values, "step_size": self._step_sizes[step - 1]}
+
+
+def _per_client(value: Tensor, like: Tensor) -> Tensor:
+    """A client's value, in ``like``'s dtype, shaped to scale it element by element.
+
+    Under vmap ``value`` is one client's scalar; on a stack stepped as a whole
+    (``_run_summed``'s unclipped step) it is one value per row of ``like``.
+    """
+
+    value = value.to(like.dtype)
+    return value.reshape(tuple(value.shape) + (1,) * (like.dim() - value.dim()))
+
+
 def initial_optimizer_state(spec: OptimizerSpec, params: Mapping[str, Tensor]) -> dict[str, Any]:
     """The state an optimizer starts a round with: none for SGD, zero moments for AdamW."""
 
@@ -464,34 +565,35 @@ def divide(accumulated: Mapping[str, Tensor], denominator: float | Tensor) -> di
     return {name: value.div(denominator) for name, value in accumulated.items()}
 
 
-def clip_batch_gradients(gradients: Mapping[str, Tensor], max_norm: float) -> dict[str, Tensor]:
+def clip_batch_gradients(gradients: Mapping[str, Tensor], max_norm: Tensor) -> dict[str, Tensor]:
     """``torch.nn.utils.clip_grad_norm_`` on one batch's gradients, out of place.
 
     Each tensor's 2-norm, the norm of those, ``max_norm / (norm + 1e-6)``
     clamped at 1, and every gradient scaled by it: its single-device path,
     which on the CPU computes each tensor's norm as ``linalg.vector_norm``.
+    ``max_norm`` is the client's, in the gradients' dtype; its division is
+    torch's ``float / tensor``, the reciprocal times the float.
     """
 
     norms = [torch.linalg.vector_norm(gradient, 2.0) for gradient in gradients.values()]
     total = torch.linalg.vector_norm(torch.stack(norms), 2.0)
-    coefficient = torch.clamp(float(max_norm) / (total + 1e-6), max=1.0)
+    coefficient = torch.clamp(torch.reciprocal(total + 1e-6) * max_norm.to(total.dtype), max=1.0)
     return {name: gradient.mul(coefficient) for name, gradient in gradients.items()}
 
 
-def clip_combined(accumulated: Mapping[str, Tensor], max_norm: float) -> dict[str, Tensor]:
+def clip_combined(accumulated: Mapping[str, Tensor], max_norm: Tensor) -> dict[str, Tensor]:
     """``_clip_accumulated_update``, without its host round trip.
 
     The norm is compared, and the scale computed, in float64 as the Python
     floats there are; scaling by 1.0 where it does not clip changes nothing.
+    ``max_norm`` is the client's, in float64.
     """
 
     total = torch.sqrt(sum((value**2).sum() for value in accumulated.values()))
     wide = total.to(torch.float64)
     # A true division, as Python's: `float / tensor` is torch's reciprocal
     # times the float, which rounds twice.
-    scale = torch.where(
-        wide > float(max_norm), torch.div(wide.new_tensor(float(max_norm)), wide + 1e-6), 1.0
-    )
+    scale = torch.where(wide > max_norm, torch.div(max_norm, wide + 1e-6), 1.0)
     return {name: value.mul(scale.to(value.dtype)) for name, value in accumulated.items()}
 
 
@@ -504,22 +606,30 @@ def apply_update(
     reference: Mapping[str, Tensor] | None = None,
     client_control: Mapping[str, Tensor] | None = None,
     server_control: Mapping[str, Tensor] | None = None,
+    *,
+    values: Mapping[str, Tensor],
 ) -> tuple[dict[str, Tensor], dict[str, Any]]:
     """One applied update from its gradient: correction, clipping, optimizer step.
 
     ``step`` counts applied updates from 1. The order is the sequential one:
     FedProx's and SCAFFOLD's optimizer wrappers correct ``.grad`` inside
     ``step()``; ``_ClippingOptimizer`` clips inside it; the combined modes clip
-    the combined gradient before stepping on it.
+    the combined gradient before stepping on it. ``program`` gives the
+    update's shape, and ``values`` (``ProgramValues.at(step)``) the client's
+    numbers.
     """
 
     grads = dict(gradients)
     if program.combine != "batch" and program.max_grad_norm is not None:
-        grads = clip_combined(grads, program.max_grad_norm)
+        grads = clip_combined(grads, values["max_grad_norm_wide"])
     if program.proximal_mu:
         assert reference is not None
         grads = {
-            name: gradient.add(params[name] - reference[name], alpha=program.proximal_mu)
+            name: torch.addcmul(
+                gradient,
+                params[name] - reference[name],
+                _per_client(values["proximal_mu"], gradient),
+            )
             for name, gradient in grads.items()
         }
     if program.scaffold:
@@ -529,10 +639,10 @@ def apply_update(
             for name, gradient in grads.items()
         }
     if program.combine == "batch" and program.max_grad_norm is not None:
-        grads = clip_batch_gradients(grads, program.max_grad_norm)
+        grads = clip_batch_gradients(grads, values["max_grad_norm"])
     if program.optimizer.kind == "adamw":
-        return _adamw_step(program.optimizer, params, grads, state, step)
-    return _sgd_step(program.optimizer, params, grads, state, step)
+        return _adamw_step(program.optimizer, params, grads, state, step, values)
+    return _sgd_step(program.optimizer, params, grads, state, step, values)
 
 
 def _sgd_step(
@@ -541,23 +651,28 @@ def _sgd_step(
     gradients: Mapping[str, Tensor],
     state: Mapping[str, Any],
     step: int,
+    values: Mapping[str, Tensor],
 ) -> tuple[dict[str, Tensor], dict[str, Any]]:
-    """``torch.optim.SGD``'s ``_single_tensor_sgd``, dampening 0, out of place."""
+    """``torch.optim.SGD``'s ``_single_tensor_sgd``, dampening 0, out of place.
+
+    Its ``add(b, alpha=s)`` is ``addcmul(a, b, s)`` with the client's ``s``.
+    """
 
     new_params: dict[str, Tensor] = {}
     buffers: dict[str, Tensor] = {}
     for name, param in params.items():
         grad = gradients[name]
         if spec.weight_decay != 0:
-            grad = grad.add(param, alpha=spec.weight_decay)
+            grad = torch.addcmul(grad, param, _per_client(values["weight_decay"], param))
         if spec.momentum != 0:
+            momentum = _per_client(values["momentum"], grad)
             if step == 1:
                 buffer = torch.clone(grad)
             else:
-                buffer = state["momentum"][name].mul(spec.momentum).add(grad, alpha=1)
+                buffer = state["momentum"][name].mul(momentum).add(grad, alpha=1)
             buffers[name] = buffer
-            grad = grad.add(buffer, alpha=spec.momentum) if spec.nesterov else buffer
-        new_params[name] = param.add(grad, alpha=-spec.lr)
+            grad = torch.addcmul(grad, buffer, momentum) if spec.nesterov else buffer
+        new_params[name] = torch.addcmul(param, grad, _per_client(values["negated_lr"], param))
     return new_params, ({"momentum": buffers} if buffers else {})
 
 
@@ -567,30 +682,34 @@ def _adamw_step(
     gradients: Mapping[str, Tensor],
     state: Mapping[str, Any],
     step: int,
+    values: Mapping[str, Tensor],
 ) -> tuple[dict[str, Tensor], dict[str, Any]]:
     """``torch.optim.AdamW``'s ``_single_tensor_adamw``, no amsgrad, out of place.
 
     The step count is the Python float torch reads off its step tensor, so the
-    bias corrections are the same Python arithmetic.
+    bias corrections are the same Python arithmetic. The client's decay
+    ``1 - lr * weight_decay`` and step size ``-lr / bias_correction1`` are
+    computed so too (``ProgramValues``); ``addcdiv(b, d, value=s)`` is
+    ``addcdiv(a, b * s, d)``.
     """
 
     count = float(step)
-    bias_correction1 = 1 - spec.beta1**count
     bias_correction2 = 1 - spec.beta2**count
-    step_size = spec.lr / bias_correction1
     bias_correction2_sqrt = bias_correction2**0.5
     new_params: dict[str, Tensor] = {}
     exp_avgs: dict[str, Tensor] = {}
     exp_avg_sqs: dict[str, Tensor] = {}
     for name, param in params.items():
         grad = gradients[name]
-        param = param.mul(1 - spec.lr * spec.weight_decay)
+        param = param.mul(_per_client(values["decay"], param))
         exp_avg = state["exp_avg"][name].lerp(grad, 1 - spec.beta1)
         exp_avg_sq = (
             state["exp_avg_sq"][name].mul(spec.beta2).addcmul(grad, grad, value=1 - spec.beta2)
         )
         denominator = (exp_avg_sq.sqrt() / bias_correction2_sqrt).add(spec.eps)
-        new_params[name] = param.addcdiv(exp_avg, denominator, value=-step_size)
+        new_params[name] = torch.addcdiv(
+            param, exp_avg * _per_client(values["step_size"], exp_avg), denominator
+        )
         exp_avgs[name] = exp_avg
         exp_avg_sqs[name] = exp_avg_sq
     return new_params, {"exp_avg": exp_avgs, "exp_avg_sq": exp_avg_sqs}

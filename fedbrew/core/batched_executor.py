@@ -57,6 +57,7 @@ from fedbrew.clients.batch_orders import RoundOrders
 from fedbrew.clients.batched_update import (
     ClientBatchFit,
     ClientBatchPlan,
+    ProgramValues,
     accumulate,
     apply_update,
     data_versions,
@@ -805,6 +806,11 @@ class _Bucket:
         self.eval_counts = evaluation.steps[torch.tensor(slots, dtype=torch.long)].tolist()
         self.weights = update_weights(self.steps.lengths, self.structure, self.program)
         self._weights_on_device: Tensor | None = None
+        #: Each client's own learning rate, momentum, ...: the bucket shares
+        #: its program's shape, not its values.
+        self.values = ProgramValues(
+            [plan.program for plan in plans], len(self.structure), self.dtype, self.device
+        )
         #: Whether a step's gradients are taken as one backward through the
         #: stacked losses' sum rather than vmap(grad): the form the task
         #: declares, by measurement (``batched_gradient``); one client is
@@ -877,6 +883,14 @@ class _Bucket:
             self._weights_on_device = self.weights.to(self.device)
         return self._weights_on_device[:, step], 0
 
+    def _values(self, step: int) -> tuple[dict[str, Tensor], int | None]:
+        """Each client's values for the ``step``-th applied update (from 1)."""
+
+        values = self.values.at(step)
+        if not self.stacked:
+            return {name: value[0] for name, value in values.items()}, None
+        return values, 0
+
     def _denominators(self, first: int, count: int) -> tuple[Any, int | None]:
         """Each client's sum of the weights of the batches ``first`` on of one update."""
 
@@ -903,11 +917,19 @@ class _Bucket:
         gradient = torch.func.grad(loss, has_aux=True)
 
         def batch_update(  # type: ignore[no-untyped-def]
-            params, state, batch, mask, reference, client_control, server_control, *, step
+            params, state, batch, mask, reference, client_control, server_control, values, *, step
         ):
             grads, outputs = gradient(params, batch, mask)
             params, state = apply_update(
-                program, params, grads, state, step, reference, client_control, server_control
+                program,
+                params,
+                grads,
+                state,
+                step,
+                reference,
+                client_control,
+                server_control,
+                values=values,
             )
             return params, state, outputs
 
@@ -916,12 +938,29 @@ class _Bucket:
             return accumulate(total, grads, weight), outputs
 
         def combined_update(  # type: ignore[no-untyped-def]
-            params, state, total, denominator, reference, client_control, server_control, *, step
+            params,
+            state,
+            total,
+            denominator,
+            reference,
+            client_control,
+            server_control,
+            values,
+            *,
+            step,
         ):
             if program.combine == "full":
                 total = divide(total, denominator)
             return apply_update(
-                program, params, total, state, step, reference, client_control, server_control
+                program,
+                params,
+                total,
+                state,
+                step,
+                reference,
+                client_control,
+                server_control,
+                values=values,
             )
 
         client_dim = 0 if self.stacked else None
@@ -953,6 +992,7 @@ class _Bucket:
                         (batch, client_dim),
                         (mask, client_dim),
                         *corrections,
+                        self._values(number),
                     ],
                 )
                 outputs.append(step_outputs)
@@ -981,6 +1021,7 @@ class _Bucket:
                     (total, client_dim),
                     self._denominators(first, count),
                     *corrections,
+                    self._values(number),
                 ],
             )
 
@@ -1016,22 +1057,47 @@ class _Bucket:
         program = self.program
 
         def update(  # type: ignore[no-untyped-def]
-            params, grads, state, reference, client_control, server_control, *, step
+            params, grads, state, reference, client_control, server_control, values, *, step
         ):
             return apply_update(
-                program, params, grads, state, step, reference, client_control, server_control
+                program,
+                params,
+                grads,
+                state,
+                step,
+                reference,
+                client_control,
+                server_control,
+                values=values,
             )
 
         def combine(total, grads, weight):  # type: ignore[no-untyped-def]
             return accumulate(total, grads, weight)
 
         def full_update(  # type: ignore[no-untyped-def]
-            params, total, state, denominator, reference, client_control, server_control, *, step
+            params,
+            total,
+            state,
+            denominator,
+            reference,
+            client_control,
+            server_control,
+            values,
+            *,
+            step,
         ):
             if program.combine == "full":
                 total = divide(total, denominator)
             return apply_update(
-                program, params, total, state, step, reference, client_control, server_control
+                program,
+                params,
+                total,
+                state,
+                step,
+                reference,
+                client_control,
+                server_control,
+                values=values,
             )
 
         step = 0
@@ -1041,15 +1107,29 @@ class _Bucket:
                 step += 1
                 if program.max_grad_norm is None:
                     # Unclipped, a step is elementwise -- every operand a
-                    # client's tensor, one shared by all, or a Python number --
-                    # so on the stacked tensors it is the vmapped arithmetic.
+                    # client's tensor, one shared by all, a Python number, or
+                    # a value per client, which _per_client shapes to its
+                    # rows -- so on the stacked tensors it is the vmapped
+                    # arithmetic.
                     params, state = apply_update(
-                        program, params, grads, state, number, *(value for value, _ in corrections)
+                        program,
+                        params,
+                        grads,
+                        state,
+                        number,
+                        *(value for value, _ in corrections),
+                        values=self.values.at(number),
                     )
                 else:
                     params, state = self._call(
                         partial(update, step=number),
-                        [(params, 0), (grads, 0), (state, 0), *corrections],
+                        [
+                            (params, 0),
+                            (grads, 0),
+                            (state, 0),
+                            *corrections,
+                            self._values(number),
+                        ],
                     )
                 outputs.append(step_outputs)
                 continue
@@ -1068,6 +1148,7 @@ class _Bucket:
                     (state, 0),
                     self._denominators(first, count),
                     *corrections,
+                    self._values(number),
                 ],
             )
         return self._finish(params, outputs, step)

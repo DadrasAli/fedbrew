@@ -417,8 +417,14 @@ back: <reason>` in amber, and `run.json` records the reason
 | Runtime | `experiment.seed` set, so every loader draws from its own generator; `use_amp: false`; CPU or CUDA; not the `centralized` strategy |
 
 **Buckets and chunks.** Clients whose updates have the same shape -- the same
-number of updates, each over the same number of batches -- are stepped
-together. Within a bucket a batch shorter than the others is padded with one
+number of updates, each over the same number of batches, and a step with the
+same terms: momentum, weight decay, FedProx's correction and clipping each
+present or not -- are stepped together. Their values need not match: the
+learning rate, momentum, weight decay, `mu` and clipping norm are each
+client's own tensors (`ProgramValues`), and each scalar form torch's
+optimizers use has a tensor form that rounds the same (`add(b, alpha=s)` is
+one fused multiply-add, as `addcmul(a, b, s)` is), so a client stepped beside
+clients with other values is the client stepped alone, bit for bit. Within a bucket a batch shorter than the others is padded with one
 of the client's own rows and masked, and the task's functions take the mean
 over the real rows. Consecutive clients join a chunk while its estimated
 memory fits `executor_chunk_bytes`: per client, its parameters times three
@@ -592,6 +598,7 @@ python tools/bench_compare_runs.py --help
 | `tests/test_batched_executor.py` | §9: the keys, the fallback and its record, client isolation, the refusals, the generator, and one chunk at a time. |
 | `tests/test_batch_orders.py` | §9: every planned order is its loader's own, for every task, update mode, shuffle, `drop_last` and `max_local_steps`, 520 clients at once included; the bulk seeds are `dataloader_seed`'s. |
 | `tests/test_batched_evaluator.py` | §9: ragged, shuffled and missing evaluation splits through both evaluators, the refusal's words, and the central pass's kept model and shard. |
+| `tests/test_program_values.py` | §9: a bucket shares its program's shape, not its values; a client stepped beside clients with other values is the client stepped alone, bit for bit, in every shape and both float widths, and a client alone is `torch.optim`'s SGD and AdamW step. |
 | `tests/test_stacked_fold.py` | A stack's rows fold to their mean, and one row exactly. |
 | `tests/test_stacked_results.py` | §9: the stacked path is each client's result exactly: the same metrics to the bit, the same refusals naming the same client, the model to `1e-12`; one bucket bit-identical to one result at a time. |
 
