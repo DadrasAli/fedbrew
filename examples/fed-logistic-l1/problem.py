@@ -271,6 +271,16 @@ def _l2sq_gradient(x: Tensor, lam: float) -> Tensor:
     return lam * x
 
 
+def _nonconvex(x: Tensor, lam: float) -> Tensor:
+    squared = x * x
+    return lam * (squared / (1.0 + squared)).sum()
+
+
+def _nonconvex_gradient(x: Tensor, lam: float) -> Tensor:
+    # 2 lam x / (1 + x^2)^2: bounded by lam 3 sqrt(3) / 8, and |r''| <= 2 lam.
+    return x / (1.0 + x * x).square() * (2.0 * lam)
+
+
 #: The penalties, each as (its value, its (sub)gradient, whether it is convex,
 #: and the bound on its second derivative, None where it has none).
 PENALTIES: dict[
@@ -278,13 +288,18 @@ PENALTIES: dict[
 ] = {
     "l1": (_l1, _l1_gradient, True, None),
     "l2sq": (_l2sq, _l2sq_gradient, True, 1.0),
+    "nonconvex": (_nonconvex, _nonconvex_gradient, False, 2.0),
 }
 
 
 #: The problems this example poses, as (loss, penalty) pairs: each has
 #: generator configs and an arm, and is held by the tests batched against
 #: sequential.
-PROBLEMS: tuple[tuple[str, str], ...] = (("logistic", "l1"), ("logistic", "l2sq"))
+PROBLEMS: tuple[tuple[str, str], ...] = (
+    ("logistic", "l1"),
+    ("logistic", "l2sq"),
+    ("logistic", "nonconvex"),
+)
 
 
 def convex(loss: str, penalty: str) -> bool:

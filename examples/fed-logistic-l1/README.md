@@ -56,6 +56,22 @@ settings, at the `λ` each corpus's `F*` was certified at:
 | `fed-logistic-l2sq-ijcnn1-32-lambda0.01` | 0.01 | 0.4154526395889211 |
 | `fed-logistic-l2sq-gisette-lambda0.001` | 0.001 | 0.4580582604022483 |
 
+### Logistic loss with a nonconvex penalty
+
+```
+F(x) = (1/n) Σ_i log(1 + exp(-b_i xᵀa_i)) + λ Σ_j x_j²/(1 + x_j²)      (loss: logistic, penalty: nonconvex)
+r'(u) = 2λu/(1 + u²)²        |r''(u)| ≤ 2λ
+```
+
+A smooth penalty that behaves like `λu²` near 0 and saturates at `λ` far from
+it, so it shrinks small coordinates and leaves large ones alone; it is
+nonconvex (`r''` turns negative past `|u| = 1/√3`), so `F` is. There is **no
+certified `F*`**: the manifest records no `x*`, `F*` or residual, and a run
+reports no `optimality_gap` or `distance_to_optimum`. `F` is smooth with
+`∇F` Lipschitz at `L + 2λ`. Settings: `fed-logistic-nonconvex-<dataset>-lambda<λ>`
+on synthetic-1000 (`λ = 0.001`), the three kappa datasets (0.01), a9a (0.001),
+ijcnn1-32 (0.01) and gisette (0.001).
+
 ## How it is federated
 
 Clients `c = 1..N` hold disjoint row sets `I_c`, all of the same size `m`, and
@@ -200,6 +216,10 @@ smooth and strongly convex. The shipped FedAvg arm, one full-split step per
 client a round at full participation, is gradient descent on `F` at step
 `1/(L + λ)` and converges to `x*`; with more local steps, client drift moves
 its fixed point, and the gap measures by how much.
+
+**The nonconvex-penalty problem: gradient arms reach a stationary point**,
+not a certified minimum; with no `F*` there is no gap to read, and `F(x)` and
+the distance to `x_true` are what a run reports.
 
 **The L1 problem: none**, for fed-lasso's reason. There is no proximal
 operator anywhere in fedbrew, so every arm runs subgradient descent on a
