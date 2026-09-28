@@ -86,8 +86,16 @@ _CONFIG_BASE_DIR = "configs"
 def run(
     common_path: str | Path = DEFAULT_CONFIG_PATH,
     args: argparse.Namespace | None = None,
+    setting: Any = None,
 ) -> ExperimentState:
-    """Load config, build components, run the loop, and save artifacts."""
+    """Load config, build components, run the loop, and save artifacts.
+
+    ``setting`` is this run's place in a group of settings run in one
+    process (``fedbrew/core/settings_group.py``): it builds
+    the components on the group's shared dataset, selects the executor the
+    group trains every setting's clients through, and is recorded in
+    run.json (``group``). Everything else is the run as it runs alone.
+    """
 
     config = load_config(common_path)
     if args is not None:
@@ -129,7 +137,7 @@ def run(
     _refuse_a_foreign_seed(config, output_dir)
     _refuse_to_replace_a_finished_run(config, output_dir)
     _carry_previous_attempt(config, run_metadata, output_dir)
-    components = build_components(config)
+    components = build_components(config) if setting is None else setting.build_components(config)
 
     # After build_components, so the client roster is a counted fact rather
     # than whatever the config guessed, and after _resolve_resume_latest, so
@@ -137,7 +145,11 @@ def run(
     roster = _client_roster_size(components)
     # Chosen after build_components, which it inspects, and announced in the
     # plan: a batched run that has to fall back says so before round 1.
-    executor, run_metadata["executor"] = select_executor(components)
+    if setting is None:
+        executor, run_metadata["executor"] = select_executor(components)
+    else:
+        executor, run_metadata["executor"] = setting.select_executor(components)
+        run_metadata["group"] = setting.record
     print_plan_header(
         config,
         deterministic=deterministic,

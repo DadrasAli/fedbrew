@@ -124,8 +124,22 @@ class ExperimentComponents:
         return self.clients
 
 
-def build_components(config: FullConfig) -> ExperimentComponents:
-    """Build all components required by the FL loop."""
+def build_dataset(config: FullConfig) -> FederatedDataset:
+    """The run's dataset, as ``build_components`` builds it."""
+
+    register_builtin_components()
+    return _build_dataset(config, _get_registered(datasets, config.data.name, "data backend"))
+
+
+def build_components(
+    config: FullConfig, dataset: FederatedDataset | None = None
+) -> ExperimentComponents:
+    """Build all components required by the FL loop.
+
+    ``dataset`` is one already built from an equal data configuration
+    (``build_dataset``), which a group of settings shares
+    (``fedbrew/core/settings_group.py``); otherwise the dataset is built here.
+    """
 
     register_builtin_components()
     task_factory = _get_registered(tasks, config.task.name, "task")
@@ -142,7 +156,8 @@ def build_components(config: FullConfig) -> ExperimentComponents:
         "client update_rule",
     )
 
-    dataset = _build_dataset(config, dataset_factory)
+    if dataset is None:
+        dataset = _build_dataset(config, dataset_factory)
     model_config = _model_config(config, dataset)
     task = _build_task(config, task_factory, model_config, dataset)
     _refuse_federated_buffers(task, model_config)

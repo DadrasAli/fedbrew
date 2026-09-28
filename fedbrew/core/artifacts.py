@@ -822,6 +822,8 @@ def save_run_json(
         "federated_model_state",
         "extensions",
         "executor",
+        # A setting of a group run in one process: which group, and where in it.
+        "group",
     ):
         value = metadata.get(key)
         if isinstance(value, Mapping) and value:

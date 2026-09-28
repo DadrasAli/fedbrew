@@ -76,7 +76,10 @@ clients together over a stack of their parameters and yields each result as a
 row of that stack, which the `StreamingAggregator` folds as before. Beside it
 runs `BatchedEvaluator` (`fedbrew/core/batched_evaluator.py`), which measures
 the due clients together and keeps one model for the central pass. Chapter 11
-§9.
+§9. Several runs whose configs differ only in numeric hyperparameters can run
+as one group in one process (`fedbrew/core/settings_group.py`), each its own
+`runner.run` writing its own directory, their clients trained together by the
+group's `GroupExecutor`: chapter 11 §10.
 
 **The seam has a stacked path.** An executor may also offer `fit_stacked`: the
 same results handed over a chunk at a time, one `StackedFitResults`
@@ -307,6 +310,7 @@ Four files, written every round. Chapter 09 covers them in full.
 | `fedbrew/core/loop.py` | the round loop; `run_fl_loop` at line 96 |
 | `fedbrew/core/execution.py` | the executor seam: `ClientExecutor`, `Aggregator`, `Evaluator`, `FitObserver` |
 | `fedbrew/core/stacked_results.py` | the seam's stacked path: `StackedFitResults`, `StackedResults` |
+| `fedbrew/core/settings_group.py` | a group of settings in one process: `run_group`, `SettingsGroup`, `GroupExecutor` |
 | `fedbrew/core/runner.py` | `run()`, the CLI, and the override application |
 | `fedbrew/core/factory.py` | config → built objects |
 | `fedbrew/core/registry.py` | the six registries; `register_builtin_components` is the whole built-in set |

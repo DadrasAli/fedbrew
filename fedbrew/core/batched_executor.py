@@ -45,7 +45,7 @@ work is done.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from typing import Any
@@ -130,21 +130,9 @@ class BatchedExecutor:
             clients[request.client_id] if isinstance(clients, Mapping) else clients
             for request in requests
         ]
-        done, total = 0, len(requests)
-        for start, stop, plans, fits, seconds in self._trained(members, requests, _train_chunk):
-            share = seconds / (stop - start)
-            for index in range(start, stop):
-                result_started = time.perf_counter()
-                result = members[index].batched_result(
-                    requests[index], plans[index], fits[index - start]
-                )
-                fits[index - start] = None  # type: ignore[call-overload]
-                done += 1
-                observer.fitted(result, share + time.perf_counter() - result_started, done, total)
-                yield result
-                # Held no longer than the consumer holds it: a result is a row
-                # of its chunk's stack and keeps the whole stack alive.
-                result = None  # type: ignore[assignment]
+        yield from client_results(
+            members, requests, observer, self._trained(members, requests, _train_chunk)
+        )
 
     def fit_stacked(
         self,
@@ -176,28 +164,9 @@ class BatchedExecutor:
     def _fit_stacked(
         self, members: list[Any], requests: list[FitRequest], observer: FitObserver
     ) -> Iterator[StackedFitResults]:
-        report = getattr(observer, "fitted_stack", None)
-        done, total = 0, len(requests)
-        trained = self._trained(members, requests, _train_chunk_stacked)
-        for start, stop, plans, chunk, seconds in trained:
-            built = time.perf_counter()
-            stacked = members[start].batched_stacked_results(
-                requests[start:stop], plans[start:stop], chunk, members[start:stop]
-            )
-            chunk = None
-            seconds += time.perf_counter() - built
-            if callable(report):
-                done += len(stacked)
-                report(stacked, seconds, done, total)
-            else:
-                # An observer that records one result at a time is handed
-                # each, with its share of the chunk's time.
-                for result in stacked.results():
-                    done += 1
-                    observer.fitted(result, seconds / len(stacked), done, total)
-            yield stacked
-            # Held no longer than the consumer holds it: it keeps the stacks alive.
-            stacked = None  # type: ignore[assignment]
+        yield from stacked_client_results(
+            members, requests, observer, self._trained(members, requests, _train_chunk_stacked)
+        )
 
     def _trained(
         self,
@@ -237,23 +206,108 @@ class BatchedExecutor:
     ) -> Iterator[tuple[int, int]]:
         """Consecutive runs of clients whose estimated memory fits ``chunk_bytes``."""
 
-        parameter_bytes = sum(p.numel() * p.element_size() for p in template.parameters())
-        row_bytes = sum(
-            tensor[:1].numel() * tensor.element_size()
-            for tensor in task.split_rows(plans[0].train_data)
+        return cut_chunks(client_costs(task, template, plans, train), self.chunk_bytes)
+
+
+#: What a trained chunk is handed over as: its bounds in the round's requests,
+#: the round's plans, the chunk's share for the rules (``chunk_fits`` or
+#: ``chunk_fit_stacked``), and the seconds it took.
+TrainedChunk = tuple[int, int, list[ClientBatchPlan], Any, float]
+
+
+def client_results(
+    members: list[Any],
+    requests: list[FitRequest],
+    observer: FitObserver,
+    trained: Iterable[TrainedChunk],
+) -> Iterator[FitResult]:
+    """Each client's result from its chunk's share (``chunk_fits``), in request order."""
+
+    done, total = 0, len(requests)
+    for start, stop, plans, fits, seconds in trained:
+        share = seconds / (stop - start)
+        for index in range(start, stop):
+            result_started = time.perf_counter()
+            result = members[index].batched_result(
+                requests[index], plans[index], fits[index - start]
+            )
+            fits[index - start] = None
+            done += 1
+            observer.fitted(result, share + time.perf_counter() - result_started, done, total)
+            yield result
+            # Held no longer than the consumer holds it: a result is a row
+            # of its chunk's stack and keeps the whole stack alive.
+            result = None  # type: ignore[assignment]
+
+
+def stacked_client_results(
+    members: list[Any],
+    requests: list[FitRequest],
+    observer: FitObserver,
+    trained: Iterable[TrainedChunk],
+) -> Iterator[StackedFitResults]:
+    """Each chunk's results as one stacked result, built by its rule (``chunk_fit_stacked``)."""
+
+    report = getattr(observer, "fitted_stack", None)
+    done, total = 0, len(requests)
+    for start, stop, plans, chunk, seconds in trained:
+        built = time.perf_counter()
+        stacked = members[start].batched_stacked_results(
+            requests[start:stop], plans[start:stop], chunk, members[start:stop]
         )
-        longest = (
-            train.lengths.amax(dim=1) if train.lengths.shape[1] else torch.zeros(len(plans))
-        ).tolist()
-        start, used = 0, 0
-        for index, plan in enumerate(plans):
-            slots = _WORKING_SLOTS + plan.program.optimizer.state_slots + int(plan.program.scaffold)
-            cost = parameter_bytes * slots + row_bytes * (plan.eval_rows + 2 * int(longest[index]))
-            if index > start and used + cost > self.chunk_bytes:
-                yield start, index
-                start, used = index, 0
-            used += cost
-        yield start, len(plans)
+        chunk = None
+        seconds += time.perf_counter() - built
+        if callable(report):
+            done += len(stacked)
+            report(stacked, seconds, done, total)
+        else:
+            # An observer that records one result at a time is handed
+            # each, with its share of the chunk's time.
+            for result in stacked.results():
+                done += 1
+                observer.fitted(result, seconds / len(stacked), done, total)
+        yield stacked
+        # Held no longer than the consumer holds it: it keeps the stacks alive.
+        stacked = None  # type: ignore[assignment]
+
+
+def client_costs(
+    task: Any, template: nn.Module, plans: Sequence[ClientBatchPlan], train: RoundOrders
+) -> list[int]:
+    """Each client's estimated memory while it is stepped, in bytes.
+
+    Its parameters times the model-sized tensors it holds -- parameters,
+    gradient, sum or update, its optimizer's slots and any persistent state --
+    plus its split's rows and two of its longest batch.
+    """
+
+    parameter_bytes = sum(p.numel() * p.element_size() for p in template.parameters())
+    row_bytes = sum(
+        tensor[:1].numel() * tensor.element_size()
+        for tensor in task.split_rows(plans[0].train_data)
+    )
+    longest = (
+        train.lengths.amax(dim=1) if train.lengths.shape[1] else torch.zeros(len(plans))
+    ).tolist()
+    costs = []
+    for index, plan in enumerate(plans):
+        slots = _WORKING_SLOTS + plan.program.optimizer.state_slots + int(plan.program.scaffold)
+        costs.append(
+            parameter_bytes * slots + row_bytes * (plan.eval_rows + 2 * int(longest[index]))
+        )
+    return costs
+
+
+def cut_chunks(costs: Sequence[int], budget: int) -> Iterator[tuple[int, int]]:
+    """Consecutive runs of ``costs`` whose sum fits ``budget``; at least one each."""
+
+    start, used = 0, 0
+    for index, cost in enumerate(costs):
+        if index > start and used + cost > budget:
+            yield start, index
+            start, used = index, 0
+        used += cost
+    yield start, len(costs)
 
 
 def _plans(
@@ -276,6 +330,19 @@ def _plans(
     return plans
 
 
+def trained_state_keys(task: Any, template: nn.Module) -> list[str]:
+    """The federated state's keys, which must be exactly the model's parameters."""
+
+    state_keys = list(task.get_federated_model_state(template))
+    names = [name for name, _ in template.named_parameters()]
+    if set(state_keys) != set(names):
+        raise ValueError(
+            "the batched executor trains parameters, and this model's federated state "
+            f"is not exactly its parameters: {sorted(set(state_keys) ^ set(names))}"
+        )
+    return state_keys
+
+
 def _train_buckets(
     task: Any,
     template: nn.Module,
@@ -291,13 +358,7 @@ def _train_buckets(
     the device.
     """
 
-    state_keys = list(task.get_federated_model_state(template))
-    names = [name for name, _ in template.named_parameters()]
-    if set(state_keys) != set(names):
-        raise ValueError(
-            "the batched executor trains parameters, and this model's federated state "
-            f"is not exactly its parameters: {sorted(set(state_keys) ^ set(names))}"
-        )
+    state_keys = trained_state_keys(task, template)
     buffers = dict(template.named_buffers())
     buckets: dict[tuple[Any, ...], list[int]] = {}
     for index, plan in enumerate(plans):
@@ -328,7 +389,20 @@ def _train_chunk(
     ``keep`` receives this chunk's.
     """
 
-    state_keys, trained = _train_buckets(task, template, plans, orders, kept, keep)
+    return chunk_fits(
+        task, template, plans, *_train_buckets(task, template, plans, orders, kept, keep)
+    )
+
+
+def chunk_fits(
+    task: Any,
+    template: nn.Module,
+    plans: Sequence[ClientBatchPlan],
+    state_keys: list[str],
+    trained: list[tuple[list[int], dict[str, Tensor], Any, Any]],
+) -> list[ClientBatchFit]:
+    """Each client's share of a trained chunk (``_train_buckets``), for its rule's result."""
+
     metadata = task.federated_model_state_metadata(template)
     trainable = trainable_parameter_count(template)
     # Every bucket's outputs cross to the host together, once for the chunk,
@@ -386,7 +460,19 @@ def _train_chunk_stacked(
     it crosses to the host in one copy for the chunk.
     """
 
-    state_keys, trained = _train_buckets(task, template, plans, orders, kept, keep)
+    return chunk_fit_stacked(
+        task, template, *_train_buckets(task, template, plans, orders, kept, keep)
+    )
+
+
+def chunk_fit_stacked(
+    task: Any,
+    template: nn.Module,
+    state_keys: list[str],
+    trained: list[tuple[list[int], dict[str, Tensor], Any, Any]],
+) -> ChunkFit:
+    """A trained chunk (``_train_buckets``) as its buckets' columns, for stacked results."""
+
     parts: list[Any] = []
     columns: list[Tensor] = []
     layout: list[tuple[int | None, int | None, list[str], bool]] = []
@@ -471,8 +557,13 @@ def _run_bucket(
     orders: tuple[RoundOrders, RoundOrders],
     kept: Mapping[tuple[int, ...], _Rows] | None,
     keep: dict[tuple[int, ...], _Rows] | None,
+    parts: Sequence[tuple[int, int]] | None = None,
 ) -> tuple[dict[str, Tensor], Any, Any]:
-    """One bucket's clients trained on their stacked rows, kept rows reused."""
+    """One bucket's clients trained on their stacked rows, kept rows reused.
+
+    ``parts`` are ranges of the bucket's rows each measured on its own in the
+    post-fit pass (``_Bucket``).
+    """
 
     sources = [plan.train_data for plan in plans]
     key = tuple(id(source) for source in sources)
@@ -481,7 +572,7 @@ def _run_bucket(
         rows = _Rows(task, sources)
     if keep is not None:
         keep[key] = rows
-    return _Bucket(task, template, buffers, plans, rows, orders).run()
+    return _Bucket(task, template, buffers, plans, rows, orders, parts).run()
 
 
 class _Rows:
@@ -776,6 +867,14 @@ class _Bucket:
 
     With one client nothing is stacked and nothing is vmapped: every function
     runs on that client's own tensors, which is the sequential arithmetic.
+
+    ``parts``, ranges of the rows, are the settings of a group whose clients
+    share the bucket (``fedbrew/core/settings_group.py``). Their post-fit pass
+    is measured part by part, each on its own rows as its bucket alone would
+    be: a task's evaluation may multiply the stacked parameters by a tensor
+    of its own -- fed-lasso's objective does, by its design matrix -- which
+    vmap makes one matrix product over every row, and a product's rounding
+    depends on how many rows it has.
     """
 
     def __init__(
@@ -786,6 +885,7 @@ class _Bucket:
         plans: list[ClientBatchPlan],
         rows: _Rows,
         orders: tuple[RoundOrders, RoundOrders],
+        parts: Sequence[tuple[int, int]] | None = None,
     ) -> None:
         self.task = task
         self.model = model
@@ -802,6 +902,8 @@ class _Bucket:
         slots = [plan.slot for plan in plans]
         train, evaluation = orders
         self.steps = _Steps(rows, train, slots, self.dtype)
+        self.evaluation = evaluation
+        self.parts = list(parts) if parts is not None and len(parts) > 1 else None
         self.eval_steps = _Steps(rows, evaluation, slots, self.dtype)
         self.eval_counts = evaluation.steps[torch.tensor(slots, dtype=torch.long)].tolist()
         self.weights = update_weights(self.steps.lengths, self.structure, self.program)
@@ -1033,7 +1135,12 @@ class _Bucket:
         """The trained stack, the step outputs, and the post-fit pass's."""
 
         training = (outputs, [step] * self.size)
-        evaluated = self._evaluate(params) if self.plans[0].evaluate else None
+        evaluated: Any = None
+        if self.plans[0].evaluate:
+            if self.parts is None:
+                evaluated = self._evaluate(params)
+            else:
+                evaluated = [self._evaluate_part(params, first, stop) for first, stop in self.parts]
         if not self.stacked:
             params = {name: value.unsqueeze(0) for name, value in params.items()}
         return params, training, evaluated
@@ -1178,6 +1285,25 @@ class _Bucket:
             )
             grads = torch.autograd.grad(losses.sum(), tuple(leaves.values()))
         return dict(zip(leaves, grads, strict=True)), outputs
+
+    def _evaluate_part(
+        self, params: dict[str, Tensor], first: int, stop: int
+    ) -> tuple[list[dict[str, Tensor]], list[int]]:
+        """The post-fit pass of rows ``first`` to ``stop``, as a bucket of those clients alone."""
+
+        plans = self.plans[first:stop]
+        stacked = len(plans) > 1
+        own = {
+            name: (value[first:stop] if stacked else value[first]).clone()
+            for name, value in params.items()
+        }
+        rows = _Rows(self.task, [plan.train_data for plan in plans])
+        steps = _Steps(rows, self.evaluation, [plan.slot for plan in plans], self.dtype)
+        counts = self.eval_counts[first:stop]
+        outputs = measure_splits(
+            self.task, self.model, self.buffers, own, 0 if stacked else None, steps, counts
+        )
+        return outputs, counts
 
     def _evaluate(self, params: dict[str, Tensor]) -> tuple[list[dict[str, Tensor]], list[int]]:
         """The post-fit pass: ``functional_eval`` over each client's eval batches."""

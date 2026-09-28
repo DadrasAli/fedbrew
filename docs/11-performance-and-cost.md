@@ -513,6 +513,66 @@ seeded run. `tests/test_batched_executor.py` pins each, and
 `tests/test_batched_executor_tolerance.py` that two batched runs are
 identical.
 
+## 10. Settings run as one group
+
+Runs whose configs differ only in numeric hyperparameters -- a learning-rate
+grid, say -- can run as the settings of one group, in one process
+(`fedbrew/core/settings_group.py`, `run_group`). Each setting is
+`runner.run` of its own config on its own thread, writing its own run
+directory as it would alone; `run.json` records the group
+(`reproducibility.group`, chapter 09 §3.3). What the settings share:
+
+- the process: the imports, and the first `torch.func` call, which imports
+  `torch._dynamo`, are paid once rather than once a run;
+- the dataset, built by the first setting and handed to the others when their
+  process-wide generators stand where the first's stood before it built it;
+  they are then moved to where the first's stood after, so each draws on as
+  it would have after building its own;
+- each round's batch orders, planned once when every setting's plans are
+  drawn alike (the same clients, seeds, loops and loader orders);
+- the batched executor: each round, every setting's clients are trained
+  together, the settings a second batch axis beside the clients. Each
+  setting plans its round as its executor alone would, into chunks of its
+  own (its units); every setting's first units, then every second, are
+  packed into combined chunks under the same `executor_chunk_bytes`, and a
+  bucket takes the rows of several settings when they are the same unit of
+  the same orders, their values each client's own (§9, `ProgramValues`).
+
+Exactly one setting runs at a time. A setting hands over when it waits for
+the others -- to plan their round, or to take their share of a trained chunk
+-- and when its run ends, always to the next live setting in group order,
+so the interleaving is the same every run; at every hand-over the
+process-wide generators (torch's, CUDA's, Python's, numpy's) are saved and
+the next setting's restored, so each draws what it draws alone and its
+checkpoints record what they record alone. A setting that ends -- completed,
+diverged, stalled, refused or raised -- leaves the group, what it had not
+taken is dropped, and the others go on. Its console lines are its own,
+prefixed with its place in the group.
+
+**Each setting is its run alone.** The step arithmetic is the same per row
+(§9), and what a setting reads back is cut out as its executor alone would
+hold it: a state stack shared by several settings is copied into each
+setting's own tensors, which it folds as its own stack; each setting's
+post-fit pass is measured on its own rows, since a task's evaluation may
+multiply the stacked parameters by a tensor of its own -- fed-lasso's
+objective does, by its design matrix -- which `vmap` makes one matrix product
+over every row, and such a product rounds by how many rows it has (on the
+CPU, a design of 40 × 20 against 16, 24 and 48 stacked iterates gave three
+different last bits for the same iterate; measured 2026-09-28). The batched
+training steps take each client's rows through products of its own. On the
+CPU, every setting of the groups in `tests/test_settings_group.py` -- the
+FedAvg, FedProx and FedAvgM arms of fed-lasso, and the MLP -- came out bit
+for bit its run alone; what the tests hold is:
+
+| What | Held to |
+| --- | --- |
+| a group of one | its config run alone, bit for bit: every non-timing CSV cell, every round's checkpoint, the generator state it records |
+| each setting of a group | its run alone, within §9's tolerance; the generator state in its checkpoints, exactly |
+| a setting that diverges or is refused | stops alone; the others bit-identical to the group without it |
+
+The evaluator is each setting's own: evaluation is not batched across
+settings. A group is not resumed as a group.
+
 ## For agents
 
 ### Paths
@@ -599,6 +659,7 @@ python tools/bench_compare_runs.py --help
 | `tests/test_batch_orders.py` | §9: every planned order is its loader's own, for every task, update mode, shuffle, `drop_last` and `max_local_steps`, 520 clients at once included; the bulk seeds are `dataloader_seed`'s. |
 | `tests/test_batched_evaluator.py` | §9: ragged, shuffled and missing evaluation splits through both evaluators, the refusal's words, and the central pass's kept model and shard. |
 | `tests/test_program_values.py` | §9: a bucket shares its program's shape, not its values; a client stepped beside clients with other values is the client stepped alone, bit for bit, in every shape and both float widths, and a client alone is `torch.optim`'s SGD and AdamW step. |
+| `tests/test_settings_group.py` | §10: a group of one is its run alone bit for bit; each setting matches its run alone within the tolerance, its checkpoints' generator state exactly, under the stacked and the per-client paths, server settings, a budget that splits rounds, and the MLP; a diverging or refused setting stops alone, the others bit-identical to the group without it; run.json's `group`; how units are packed. |
 | `tests/test_stacked_fold.py` | A stack's rows fold to their mean, and one row exactly. |
 | `tests/test_stacked_results.py` | §9: the stacked path is each client's result exactly: the same metrics to the bit, the same refusals naming the same client, the model to `1e-12`; one bucket bit-identical to one result at a time. |
 
