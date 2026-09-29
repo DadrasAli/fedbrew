@@ -798,11 +798,21 @@ def model_state_is_all_zeros(state: Mapping[str, Any]) -> bool:
 
 
 def squared_l2_norm_model_state(state: Mapping[str, Any]) -> float:
-    """Return the squared L2 norm across tensor state values."""
+    """Return the squared L2 norm across tensor state values, in float64.
+
+    The SCAFFOLD and FedLALR diagnostics (control_delta_norm,
+    client_control_norm, server_control_norm, mean_client_control_delta_norm,
+    momentum_norm, second_moment_norm) are its square roots, and nothing
+    trains on it. Squared in float32, as it was, one entry above about 1.8e19
+    made the norm inf while the state itself was finite: on
+    nonconvex-simplex/scaffold from round 68, with the float64 iterate's norm
+    at 3.1e19 (measured 2026-09-29). float64 squares stay finite up to about
+    1.3e154.
+    """
 
     total = 0.0
     for key, value in state.items():
-        tensor = as_cpu_tensor(key, value).float()
+        tensor = as_cpu_tensor(key, value).double()
         total += float(torch.sum(tensor * tensor).item())
     return total
 
