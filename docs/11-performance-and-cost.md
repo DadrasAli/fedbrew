@@ -302,6 +302,7 @@ run by path, are not part of the installed package, and each takes `--help`.
 | `tools/bench_resolution_ratio.py` | the real forward/backward cost ratio between input resolutions, which is below the pixel-count bound because small models at small resolutions are launch-bound rather than FLOP-bound |
 | `tools/generate_openimage_shaped_synthetic.py` | round cost at OpenImage's *shape* — 13,771 clients, ~94 examples each, 596 classes — with noise pixels, so a projected round time becomes a measured one. Not a dataset to train on; chapter 05 §2 |
 | `tools/strip_checkpoint_client_states.py` | reclaims disk by dropping per-client state from `best.pt`, which never needs it |
+| `tools/drift_diagnostic.py` | the average drift at a model, ρ̂ = ‖mean_c (w − w_c^(H))/(ηH)‖ (Wang et al., arXiv:2206.04723), over one full-participation round with no update: where a dataset sits on the δ\* axis, `(η(H − 1)/2)‖δ*‖` to first order. Not a timing tool; listed here because every script in `tools/` is |
 
 The peak-memory claim in §3 is the exception to the labelling rule above: it is
 not a dated measurement but a guarded one, re-measured by
