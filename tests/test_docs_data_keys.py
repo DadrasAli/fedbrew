@@ -270,7 +270,7 @@ class ProvenanceTableTest(unittest.TestCase):
         counts = self._configs_by_generator()
         for generator, expected in (
             ("synthetic_classification", 3),
-            ("femnist", 1),
+            ("femnist", 2),
             ("mnist", 4),
             ("oasst1_sft", 3),
             ("generic_sft", 1),

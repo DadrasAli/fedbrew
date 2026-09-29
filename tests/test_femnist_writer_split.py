@@ -25,6 +25,7 @@ were written rather than the sizes that were asked for.
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from collections import Counter
@@ -33,7 +34,11 @@ from pathlib import Path
 import pytest
 import torch
 
-from fedbrew.data.femnist import _split_writer_examples, generate_femnist_from_config
+from fedbrew.data.femnist import (
+    _split_writer_examples,
+    generate_femnist_from_config,
+    similarity_mix,
+)
 from fedbrew.data.manifest_dataset import ManifestFederatedDataset
 from tests.test_femnist_support import (
     _SPLITS,
@@ -181,6 +186,103 @@ class WriterPartitionTests(unittest.TestCase):
                             f"example {value} is on {seen.get(value)} and {client_id}",
                         )
                         seen[value] = client_id
+
+
+class SimilarityMixTest(unittest.TestCase):
+    """SCAFFOLD's similarity mix: sizes kept, a partition, s iid and the rest label-sorted."""
+
+    LABELS = torch.tensor([index % 7 for index in range(60)])
+    SIZES = (5, 13, 1, 20, 21)
+
+    def _dealt(self, similarity: float, seed: int = 4) -> list[torch.Tensor]:
+        return similarity_mix(
+            self.LABELS, self.SIZES, similarity, torch.Generator().manual_seed(seed)
+        )
+
+    @pytest.mark.fast
+    def test_it_is_a_partition_that_keeps_every_size(self) -> None:
+        for similarity in (0.0, 0.1, 0.5, 1.0):
+            with self.subTest(similarity=similarity):
+                dealt = self._dealt(similarity)
+                self.assertEqual([len(part) for part in dealt], list(self.SIZES))
+                self.assertEqual(sorted(torch.cat(dealt).tolist()), list(range(60)))
+
+    @pytest.mark.fast
+    def test_zero_deals_label_sorted_contiguous_chunks(self) -> None:
+        dealt = self._dealt(0.0)
+        labels = torch.cat([self.LABELS[part] for part in dealt]).tolist()
+        self.assertEqual(labels, sorted(labels))
+
+    @pytest.mark.fast
+    def test_the_sorted_part_follows_the_drawn_part_in_each_client(self) -> None:
+        dealt = self._dealt(0.5)
+        drawn = [int(0.5 * size + 0.5) for size in self.SIZES]
+        tails = torch.cat(
+            [self.LABELS[part[count:]] for part, count in zip(dealt, drawn, strict=True)]
+        )
+        self.assertEqual(tails.tolist(), sorted(tails.tolist()))
+
+    @pytest.mark.fast
+    def test_one_is_the_whole_pool_at_random(self) -> None:
+        a, b = self._dealt(1.0, seed=4), self._dealt(1.0, seed=5)
+        self.assertNotEqual(torch.cat(a).tolist(), torch.cat(b).tolist())
+        self.assertEqual(torch.cat(self._dealt(1.0, seed=4)).tolist(), torch.cat(a).tolist())
+
+    def test_the_generator_deals_every_split_and_records_the_dial(self) -> None:
+        source = _fake_femnist_source()
+        expected = Counter(int(record["image"].flatten()[0]) for record in source.records)
+        with tempfile.TemporaryDirectory() as directory:
+            natural = generate_femnist_from_config(
+                config=_generator_config(),
+                output_dir=Path(directory) / "natural",
+                seed=11,
+                client_splits=_SPLITS,
+                source_dataset=_fake_femnist_source(),
+            )
+            config = _generator_config()
+            config["partition"] = {
+                **config["partition"],
+                "strategy": "similarity_mix",
+                "similarity": 0.1,
+            }
+            mixed = generate_femnist_from_config(
+                config=config,
+                output_dir=Path(directory) / "mixed",
+                seed=11,
+                client_splits=_SPLITS,
+                source_dataset=source,
+            )
+            manifest = json.loads(Path(mixed.manifest_path).read_text())
+            self.assertEqual(
+                (manifest["partition_strategy"], manifest["similarity"]), ("similarity_mix", 0.1)
+            )
+            sizes = {}
+            for summary in (natural, mixed):
+                dataset = ManifestFederatedDataset(summary.manifest_path)
+                assigned: Counter[int] = Counter()
+                for client_id in dataset.list_clients():
+                    data = dataset.get_client_data(client_id)
+                    for split in ("train", "eval", "test"):
+                        values = data[split]["x"].flatten(1)[:, 0].tolist()
+                        sizes.setdefault(summary.manifest_path, {})[client_id, split] = len(values)
+                        assigned.update(int(value) for value in values)
+                self.assertEqual(assigned, expected)
+            self.assertEqual(sizes[natural.manifest_path], sizes[mixed.manifest_path])
+
+    @pytest.mark.fast
+    def test_a_similarity_outside_the_unit_interval_is_refused(self) -> None:
+        config = _generator_config()
+        for value in (-0.1, 1.5, "half"):
+            config["partition"] = {"strategy": "similarity_mix", "similarity": value}
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                with self.assertRaisesRegex(ValueError, "partition.similarity"):
+                    generate_femnist_from_config(
+                        config=config,
+                        output_dir=Path(directory),
+                        seed=1,
+                        client_splits=_SPLITS,
+                        source_dataset=_fake_femnist_source(),
+                    )
 
 
 if __name__ == "__main__":

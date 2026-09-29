@@ -143,6 +143,8 @@ _GENERATOR_SECTION_KEYS: dict[str, frozenset[str]] = {
             "max_size",
             "sigma",
             "labels_per_client",
+            # femnist's similarity_mix only (fedbrew/data/femnist.py).
+            "similarity",
         }
     ),
     "client_splits": frozenset({"train_ratio", "eval_ratio", "test_ratio"}),

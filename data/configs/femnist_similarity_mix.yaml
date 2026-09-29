@@ -1,0 +1,34 @@
+# FEMNIST with SCAFFOLD's similarity mix (Karimireddy et al., ICML 2020, section 7.1):
+# 500 writers keep their natural slice sizes, and each split's pooled images are
+# dealt -- a fraction `similarity` of each client's size drawn from the pool at
+# random, the rest sorted by label and dealt in contiguous chunks. 1 is iid,
+# 0 label-sorted shards, 0.1 SCAFFOLD's 10% cell. docs/05 section 3.5.
+#
+#   fedbrew generate --config data/configs/femnist_similarity_mix.yaml
+
+dataset:
+  name: femnist
+  output_dir: data/generated/femnist_similarity_0.1
+  raw_dir: data/raw/datasets/femnist
+  seed: 42
+
+femnist:
+  source: flwrlabs/femnist
+  revision: 5c617740df553a6d3e666035d29fb5d85e1c59a2
+  split: train
+  writer_column: writer_id
+  image_column: image
+  label_column: character
+  min_samples_per_client: 3
+
+client_splits:
+  train_ratio: 0.8
+  eval_ratio: 0.1
+  test_ratio: 0.1
+
+partition:
+  strategy: similarity_mix
+  # The writers are selected by dataset.seed, as num_clients selects them for
+  # the natural partition.
+  num_clients: 500
+  similarity: 0.1

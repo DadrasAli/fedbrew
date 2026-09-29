@@ -1,4 +1,11 @@
-"""Generate naturally writer-partitioned FEMNIST torch shards."""
+"""Generate writer-partitioned FEMNIST torch shards: natural, or SCAFFOLD's similarity mix.
+
+``partition.strategy: natural`` gives each selected writer its own images.
+``similarity_mix`` (Karimireddy et al., SCAFFOLD, §7.1) keeps each writer's
+natural slice sizes and deals the pooled images: a fraction ``similarity`` of
+each split's pool uniformly at random, the rest sorted by label in contiguous
+chunks (``similarity_mix``). 1 is iid, 0 is label-sorted shards.
+"""
 
 from __future__ import annotations
 
@@ -67,8 +74,20 @@ def generate_femnist_from_config(
     partition_config = _mapping(config["partition"])
     femnist_config = _mapping(config.get("femnist", {}))
     strategy = str(partition_config.get("strategy", "natural"))
-    if strategy != "natural":
-        raise ValueError("FEMNIST requires partition.strategy=natural")
+    if strategy not in {"natural", "similarity_mix"}:
+        raise ValueError(
+            "FEMNIST requires partition.strategy=natural or partition.strategy=similarity_mix"
+        )
+    similarity = None
+    if strategy == "similarity_mix":
+        similarity = partition_config.get("similarity")
+        if isinstance(similarity, bool) or not isinstance(similarity, int | float):
+            raise ValueError("partition.similarity must be a number in [0, 1]")
+        similarity = float(similarity)
+        if not 0.0 <= similarity <= 1.0:
+            raise ValueError("partition.similarity must be in [0, 1]")
+    elif "similarity" in partition_config:
+        raise ValueError("partition.similarity is similarity_mix's; natural takes none")
 
     requested_clients = _optional_positive_int(partition_config.get("num_clients"))
     # Three, not two: every writer now yields a train, an eval AND a test
@@ -139,37 +158,23 @@ def generate_femnist_from_config(
     seen_client_ids: set[str] = set()
     total_examples = 0
 
-    for position, writer_id in enumerate(selected_writer_ids):
-        source_indices = eligible_writer_indices[writer_id]
-        images, labels = _load_writer_tensors(
-            source_dataset,
-            source_indices,
-            image_column=image_column,
-            label_column=label_column,
-        )
-        train_indices, eval_indices, test_indices = _split_writer_examples(
-            num_examples=len(labels),
-            eval_ratio=eval_ratio,
-            test_ratio=test_ratio,
-            # Keyed on the writer, not its position in the selected list. With
-            # `seed + position` a writer's split depended on how many clients
-            # were requested, so the same seed produced different data for the
-            # same writer, and one position collided with the seed used to
-            # select writers. derive_seed is a hash, so (seed, writer) fixes
-            # the split and nothing else touches it.
-            seed=derive_seed(seed, "femnist_writer_split", writer_id),
-        )
+    def write_client(
+        writer_id: str,
+        train_x: Tensor,
+        train_y: Tensor,
+        eval_x: Tensor,
+        eval_y: Tensor,
+        client_test_x: Tensor,
+        client_test_y: Tensor,
+        labels: Tensor,
+    ) -> None:
+        """One client's shard, stats and record; ``labels``: its labels in source order."""
+
+        nonlocal total_examples
         client_id = _client_id(writer_id)
         if client_id in seen_client_ids:
             raise ValueError(f"FEMNIST client ID collision: {client_id}")
         seen_client_ids.add(client_id)
-
-        train_x = images[train_indices]
-        train_y = labels[train_indices]
-        eval_x = images[eval_indices]
-        eval_y = labels[eval_indices]
-        client_test_x = images[test_indices]
-        client_test_y = labels[test_indices]
         shard = f"shards/{client_id}.pt"
         save_split_client_shard(
             output_dir / shard,
@@ -227,8 +232,61 @@ def generate_femnist_from_config(
         )
         total_examples += len(labels)
 
+    held: list[tuple[str, tuple[Tensor, ...]]] = []
+    for position, writer_id in enumerate(selected_writer_ids):
+        source_indices = eligible_writer_indices[writer_id]
+        images, labels = _load_writer_tensors(
+            source_dataset,
+            source_indices,
+            image_column=image_column,
+            label_column=label_column,
+        )
+        train_indices, eval_indices, test_indices = _split_writer_examples(
+            num_examples=len(labels),
+            eval_ratio=eval_ratio,
+            test_ratio=test_ratio,
+            # Keyed on the writer, not its position in the selected list. With
+            # `seed + position` a writer's split depended on how many clients
+            # were requested, so the same seed produced different data for the
+            # same writer, and one position collided with the seed used to
+            # select writers. derive_seed is a hash, so (seed, writer) fixes
+            # the split and nothing else touches it.
+            seed=derive_seed(seed, "femnist_writer_split", writer_id),
+        )
+        slices = (
+            images[train_indices],
+            labels[train_indices],
+            images[eval_indices],
+            labels[eval_indices],
+            images[test_indices],
+            labels[test_indices],
+        )
+        if similarity is None:
+            write_client(writer_id, *slices, labels)
+        else:
+            # Dealt once every writer's slices are known.
+            held.append((writer_id, slices))
+
         if on_progress is not None:
             on_progress(f"preparing writer {position + 1:,}/{len(selected_writer_ids):,}")
+
+    if similarity is not None:
+        mixed = [[] for _ in held]
+        for split, (image_at, label_at) in enumerate(((0, 1), (2, 3), (4, 5))):
+            pool_x = torch.cat([slices[image_at] for _, slices in held])
+            pool_y = torch.cat([slices[label_at] for _, slices in held])
+            dealt = similarity_mix(
+                pool_y,
+                [len(slices[label_at]) for _, slices in held],
+                similarity,
+                torch.Generator().manual_seed(
+                    derive_seed(seed, "femnist_similarity_mix", str(split))
+                ),
+            )
+            for client, positions in enumerate(dealt):
+                mixed[client].extend((pool_x[positions], pool_y[positions]))
+        for (writer_id, _), slices in zip(held, mixed, strict=True):
+            write_client(writer_id, *slices, torch.cat([slices[1], slices[3], slices[5]]))
 
     test_x = torch.cat(global_test_x, dim=0)
     test_y = torch.cat(global_test_y, dim=0)
@@ -236,6 +294,7 @@ def generate_femnist_from_config(
 
     _write_partition_stats(
         output_dir=output_dir,
+        strategy=strategy,
         client_stats=client_stats,
         source_name=source_name,
         source_revision=source_revision,
@@ -251,8 +310,9 @@ def generate_femnist_from_config(
         "clients_file": "clients.jsonl",
         "global_test": "shards/global_test.pt",
         "shards_dir": "shards",
-        "partition_strategy": "natural",
+        "partition_strategy": strategy,
         "partition_key": writer_column,
+        **({} if similarity is None else {"similarity": similarity}),
         # `natural` has no strategy knobs, but the seed is still a partition
         # input here: it decides which writers are selected and where each
         # writer's own three slices fall (chapter 05 §3.6). The manifest named
@@ -450,6 +510,34 @@ def _split_writer_examples(
     )
 
 
+def similarity_mix(
+    labels: Tensor, sizes: Sequence[int], similarity: float, generator: torch.Generator
+) -> list[Tensor]:
+    """A pool dealt to clients of ``sizes``: SCAFFOLD's similarity mix (§7.1).
+
+    ``round(similarity * n_i)`` of client i's ``n_i`` positions are drawn from
+    the pool uniformly without replacement, dealt at random; the rest of the
+    pool is sorted by label (stable, over a random order) and dealt in
+    contiguous chunks of ``n_i - round(similarity * n_i)``, clients in order.
+    Returns each client's pool positions.
+    """
+
+    if sum(sizes) != len(labels):
+        raise ValueError("the clients' sizes must add up to the pool")
+    order = torch.randperm(len(labels), generator=generator)
+    drawn = [int(similarity * size + 0.5) for size in sizes]
+    random_part, rest = order[: sum(drawn)], order[sum(drawn) :]
+    rest = rest[torch.argsort(labels[rest], stable=True)]
+    dealt, first, second = [], 0, 0
+    for size, count in zip(sizes, drawn, strict=True):
+        dealt.append(
+            torch.cat([random_part[first : first + count], rest[second : second + size - count]])
+        )
+        first += count
+        second += size - count
+    return dealt
+
+
 def _client_id(writer_id: str) -> str:
     if _SAFE_CLIENT_ID.fullmatch(writer_id):
         return writer_id
@@ -459,6 +547,7 @@ def _client_id(writer_id: str) -> str:
 
 def _write_partition_stats(
     output_dir: Path,
+    strategy: str,
     client_stats: list[dict[str, object]],
     source_name: str,
     source_revision: str | None,
@@ -477,7 +566,7 @@ def _write_partition_stats(
 
     payload = {
         "dataset_name": "femnist",
-        "partition_strategy": "natural",
+        "partition_strategy": strategy,
         "partition_key": "writer_id",
         "source": source_name,
         "source_revision": source_revision,

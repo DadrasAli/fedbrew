@@ -61,7 +61,7 @@ is how much *behaviour* stands behind the prose:
 | Generator | Shipped config | Dedicated generator test | This chapter's basis |
 | --- | --- | --- | --- |
 | `synthetic_classification` | 3 | `test_synthetic_label_signal.py` | **run, output shown in chapter 03 and the README** |
-| `femnist` | 1 | `test_femnist_writer_split.py` | tests and a shipped config |
+| `femnist` | 2 | `test_femnist_writer_split.py` | tests and shipped configs |
 | `mnist` | 4 | — | shipped configs, one per partition strategy, exercised throughout the suite |
 | `oasst1_sft` | 3 | `test_oasst1_sft_generator.py` | tests and shipped configs |
 | `generic_sft` | 1 | `test_generic_sft_eligibility.py` | tests and a shipped config |
@@ -107,10 +107,11 @@ fails rather than silently generating 256-token windows.
 | | `raw_dir` | where the source data is cached |
 | | `seed` | **the partition seed** — §3.6 |
 | | `extensions` | generators defined outside the package, loaded before `name` is looked up: paths ending in `.py` or module names, as for `experiment.extensions` in chapter 04. The manifest records each with its SHA-256 |
-| `partition` | `strategy` | one of the five in §3; `femnist` accepts only `natural` |
+| `partition` | `strategy` | one of the five in §3; `femnist` accepts `natural` or its similarity mix, `similarity_mix` (§3.5) |
 | | `num_clients` | how many clients |
 | | `alpha` | `dirichlet` only |
 | | `labels_per_client` | `label_skew` only |
+| | `similarity` | `femnist`'s `similarity_mix` only: the iid fraction, in [0, 1] |
 | | `min_size`, `max_size`, `sigma` | `quantity_skew` only |
 | `client_splits` | `train_ratio` | fraction of each client's examples used for training |
 | | `eval_ratio` | fraction held out as that client's validation split |
@@ -197,8 +198,8 @@ No partitioner module and no dispatch entry: the corpus supplies the clients.
 FEMNIST is written by its own generator (`fedbrew/data/femnist.py`), which
 groups examples by the source `writer_id` and makes one client per writer —
 3,597 of them in the shipped configuration — and **refuses any other strategy**
-in `generate_femnist_from_config` (`fedbrew/data/femnist.py`), because there is
-nothing for a partitioner to cut.
+of §3 in `generate_femnist_from_config` (`fedbrew/data/femnist.py`), because there is
+nothing for a partitioner to cut. Its one alternative is below.
 
 The consequences are not the other four's:
 
@@ -212,11 +213,23 @@ The consequences are not the other four's:
   is also the limitation in §4.2: every writer in the test pool is a writer the
   model trained on.
 
+**`similarity_mix`**, FEMNIST only: SCAFFOLD's similarity mix (Karimireddy et
+al., ICML 2020, §7.1). Each selected writer keeps its natural slice sizes, and
+each split's pooled images are dealt: `round(s·n_i)` of client i's `n_i` drawn
+from the pool uniformly without replacement, the rest sorted by label and dealt
+in contiguous chunks, clients in id order (`similarity_mix`, with
+`partition.similarity: s`). `s = 1` is iid, `s = 0` label-sorted shards,
+`s = 0.1` SCAFFOLD's 10% cell. The global test shard is the same pool at every
+s. The manifest records `partition_strategy: similarity_mix` and `similarity`,
+and `data/configs/femnist_similarity_mix.yaml` is the 500-writer setting at
+`s = 0.1`.
+
 ### 3.6 Partitions are reproducible from `dataset.seed`
 
 All five take the seed and use it for every random choice, so regenerating with
 the same config gives byte-identical shards. For `natural` the seed decides
-which writers are selected and where each writer's own three slices fall, keyed
+which writers are selected and where each writer's own three slices fall (and,
+for `similarity_mix`, each split's dealing), keyed
 on the writer rather than on its position in the selection, so requesting a
 different client count does not change an unrelated writer's data. The
 partition seed is **separate from `experiment.seed`**: two runs at different
@@ -550,7 +563,7 @@ storage.
 | `fedbrew/data/partitioners/quantity_skew.py` | `partition_quantity_skew` |
 | `fedbrew/data/partitioners/label_skew.py` | `partition_label_skew` |
 | `fedbrew/data/partitioners/empty_clients.py` | `fill_empty_clients` — the postcondition the two label-skewing partitioners share |
-| `fedbrew/data/femnist.py` | the `natural` partition: one client per writer, the three-way per-writer split, and the refusal of any other strategy |
+| `fedbrew/data/femnist.py` | the `natural` partition: one client per writer, the three-way per-writer split, the `similarity_mix` alternative, and the refusal of any other strategy |
 | `fedbrew/data/official_test_partitioning.py` | `partition_test_indices_like_train` — deals the official test set out to match each client's training profile |
 | `fedbrew/data/manifest_dataset.py` | reading a manifest at run time, and the shard cache |
 | `fedbrew/data/cached_payload.py` | serving a memoised shard without handing it over — what §8 rests on, shared with the pooled centralized view |
@@ -630,7 +643,7 @@ python -m pytest tests/test_partition_disjointness.py \
 | `tests/test_causal_lm_window_overlap.py` | Overlapping causal-LM windows and a per-client eval split cannot both be configured, and the leak that combination produced is measured rather than asserted. |
 | `tests/test_partition_provenance.py` | Two datasets differing only in a partition parameter or the seed have different manifests, and only the knobs the configured strategy reads are recorded. |
 | `tests/test_manifest_input_claims.py` | `input_dtype` and `input_range` describe the shards the manifest names: the dtype exactly, the range as a bound, both checked by `validate_manifest`. |
-| `tests/test_femnist_writer_split.py` | FEMNIST's natural writer partition, and that its three per-writer slices are disjoint and exhaustive. |
+| `tests/test_femnist_writer_split.py` | FEMNIST's natural writer partition, and that its three per-writer slices are disjoint and exhaustive; the similarity mix keeps every size, is a partition, and deals label-sorted chunks. |
 | `tests/test_shard_cache.py` | The cache is bounded, and serves without handing over what it keeps. |
 | `tests/test_resident_clients.py` | §8: a client kept built is released when its shard is evicted, and an edit of its shard is refused on its next use. |
 | `tests/test_generator_atomic_write.py` | A killed generator leaves no half-written manifest. |
