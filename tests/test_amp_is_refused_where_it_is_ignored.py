@@ -30,6 +30,11 @@ raises, because that is the gate an ordinary `fedbrew run` passes through;
 `--validate-only` is where a reader looks before spending a GPU hour. The four
 existing AMP refusals are per algorithm and live in preflight for the same
 reason. See FINDINGS.csv P03-F07.
+
+Every config here is loaded from a copy whose ``data.path`` points into an
+empty temporary directory (`_load_without_data`), so what ``data/generated``
+holds -- which the loader and preflight both read when it is there -- cannot
+change a result: each test sees the checkout CI sees.
 """
 
 from __future__ import annotations
@@ -44,6 +49,7 @@ from typing import Any
 from unittest import mock
 
 import pytest
+import yaml
 
 from fedbrew.core import factory as factory_module
 from fedbrew.core.config import load_config
@@ -57,6 +63,23 @@ from fedbrew.core.validation import validate_full_config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LLM_CONFIG = "configs/dev/tiny_causal_lm.yaml"
+
+
+def _load_without_data(path: str | Path) -> Any:
+    """Load the config at `path` with its data in a directory that holds none.
+
+    A copy in a temporary directory, its ``data.path`` (when it has one)
+    pointing at a manifest that is not there, so neither the loader nor
+    preflight finds generated data whatever ``data/generated`` holds.
+    """
+
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    with tempfile.TemporaryDirectory() as directory:
+        if isinstance(raw.get("data"), dict) and raw["data"].get("path"):
+            raw["data"]["path"] = str(Path(directory) / "absent" / "manifest.json")
+        copy_path = Path(directory) / Path(path).name
+        copy_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+        return load_config(copy_path)
 
 
 def _amp_issues(config: object) -> list[tuple[str, str]]:
@@ -108,7 +131,7 @@ class TheSetIsTheOneHomeTest(unittest.TestCase):
 @pytest.mark.fast
 class TheFactoryRefusesTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.config = load_config(LLM_CONFIG)
+        self.config = _load_without_data(LLM_CONFIG)
 
     def test_the_shipped_setting_is_accepted(self) -> None:
         self.assertFalse(self.config.runtime.use_amp)
@@ -125,7 +148,7 @@ class TheFactoryRefusesTest(unittest.TestCase):
         self.assertIn("fp32", message)
 
     def test_a_classification_config_is_untouched(self) -> None:
-        config = load_config("configs/mnist/fedavg.yaml")
+        config = _load_without_data("configs/mnist/fedavg.yaml")
         self.assertEqual(config.task.name, "classification")
         for use_amp in (True, False):
             with self.subTest(use_amp=use_amp):
@@ -221,7 +244,7 @@ class TheFactoryActuallyCallsItTest(unittest.TestCase):
 
 class PreflightSaysItTooTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.config = load_config(LLM_CONFIG)
+        self.config = _load_without_data(LLM_CONFIG)
 
     @pytest.mark.fast
     def test_it_is_an_error_not_a_warning(self) -> None:
@@ -234,7 +257,7 @@ class PreflightSaysItTooTest(unittest.TestCase):
         self.assertEqual(_amp_issues(self.config), [])
 
     def test_a_classification_config_raises_none_either_way(self) -> None:
-        config = load_config("configs/mnist/fedavg.yaml")
+        config = _load_without_data("configs/mnist/fedavg.yaml")
         for use_amp in (True, False):
             with self.subTest(use_amp=use_amp):
                 candidate = copy.deepcopy(config)
@@ -261,7 +284,7 @@ class TheShippedConfigsTest(unittest.TestCase):
         checked = 0
         for path in sorted(glob.glob("configs/**/*.yaml", recursive=True)):
             try:
-                config = load_config(path)
+                config = _load_without_data(path)
             except Exception:
                 continue
             checked += 1
@@ -283,7 +306,7 @@ class TheShippedConfigsTest(unittest.TestCase):
 
 def _task_name(path: str) -> str | None:
     try:
-        return load_config(path).task.name
+        return _load_without_data(path).task.name
     except Exception:
         return None
 

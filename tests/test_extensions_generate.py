@@ -305,9 +305,24 @@ class RunAgainstItTest(GeneratorExtensionFixture):
         self.assertEqual(notes[0].severity, "info")
         self.assertIn(IDENTICAL_TO_TRAIN, notes[0].message)
 
-    @pytest.mark.fast
     def test_a_dataset_with_held_out_data_gets_no_such_note(self) -> None:
-        config = load_config("configs/dev/synthetic_manifest.yaml")
+        # Generated here, not read from data/generated: absent there, preflight
+        # stops at the missing manifest and this passed without looking.
+        generator = self.directory / "held_out.yaml"
+        generator.write_text(
+            textwrap.dedent(f"""
+                dataset:
+                  name: synthetic_classification
+                  output_dir: {self.directory / "held"}
+                  seed: 1
+                synthetic: {{num_samples: 40, input_dim: 2, num_classes: 2}}
+                partition: {{strategy: iid, num_clients: 2}}
+                splits: {{train_ratio: 0.8, test_ratio: 0.2}}
+                """),
+            encoding="utf-8",
+        )
+        config = load_config(self._run_config(generate_from_config(generator)))
+        self.assertEqual(config.data.name, "manifest_dataset")
         issues = run_checks(config)
         self.assertEqual(
             [issue for issue in issues if issue.code == "data.test_is_training_data"], []
