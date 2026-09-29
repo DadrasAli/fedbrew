@@ -92,7 +92,7 @@ def _config(
             "test": {"every": 1, "clients": "all"},
             "central_test": {"every": 1},
         },
-        "defaults": {"global_rounds": rounds, "local_iterations": 1},
+        "schedule": {"rounds": rounds, "local_iterations": 1},
     }
     if checkpoint:
         config["runtime"]["checkpointing"] = {

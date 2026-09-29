@@ -30,7 +30,7 @@ from fedbrew.core import runner
 def _config(directory: Path, rounds: int) -> Path:
     raw = yaml.safe_load(Path("configs/dev/smoke.yaml").read_text(encoding="utf-8"))
     raw["experiment"]["output_dir"] = str(directory / "run")
-    raw["defaults"]["global_rounds"] = rounds
+    raw["schedule"]["rounds"] = rounds
     raw["runtime"]["checkpointing"] = {"enabled": False}
     path = directory / "run.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")

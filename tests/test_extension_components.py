@@ -188,7 +188,7 @@ class ExtensionComponentFixture(unittest.TestCase):
             "model": {"name": "probe_model", "input_dim": 2},
             "numerics": {"use_amp": False, "deterministic": True},
             "runtime": {"device": "cpu"},
-            "defaults": {"global_rounds": 4, "local_iterations": 2},
+            "schedule": {"rounds": 4, "local_iterations": 2},
         }
         for dotted, value in overrides.items():
             section, _, key = dotted.partition("__")

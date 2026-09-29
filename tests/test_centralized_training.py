@@ -116,8 +116,8 @@ def _write_config(
               # be the thing that asks for it -- it is opt-in now.
               per_client_csv: true
 
-            defaults:
-              global_rounds: {global_rounds}
+            schedule:
+              rounds: {global_rounds}
               local_iterations: {local_iterations}
             """
         ).lstrip(),

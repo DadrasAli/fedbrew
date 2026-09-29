@@ -85,7 +85,7 @@ def _write(root: Path, name: str, manifest: Path, rule: str, cache_bytes: int | 
     config["client"].update(client)
     config["client"] = {key: value for key, value in config["client"].items() if value is not None}
     config["model"]["dropout"] = 0.3
-    config["defaults"]["global_rounds"] = ROUNDS
+    config["schedule"]["rounds"] = ROUNDS
     runtime = config["runtime"]
     runtime["device"] = "cpu"
     runtime["checkpointing"].update({"save_every_round": True, "keep_last": None})

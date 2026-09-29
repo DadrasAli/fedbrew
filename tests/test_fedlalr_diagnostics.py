@@ -162,7 +162,7 @@ def _smoke_fedlalr(directory: Path, **client_extra: object) -> dict:
         "keep_last": 0,
     }
     raw.setdefault("reporting", {})["per_client_csv"] = True
-    raw["defaults"]["global_rounds"] = 2
+    raw["schedule"]["rounds"] = 2
     return raw
 
 

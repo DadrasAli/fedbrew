@@ -153,7 +153,7 @@ def _runnable(path: Path, data: _Data, output: Path) -> Path:
     raw["experiment"]["extensions"] = [
         str(REPO / extension) for extension in raw["experiment"].get("extensions") or []
     ]
-    raw["defaults"]["global_rounds"] = 1
+    raw["schedule"]["rounds"] = 1
     runtime = raw["runtime"]
     runtime["device"] = "cpu"
     runtime.pop("data_staging", None)

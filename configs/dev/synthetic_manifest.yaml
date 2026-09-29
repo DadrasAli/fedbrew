@@ -70,6 +70,6 @@ reporting:
     - fit_loss
     - fit_accuracy
 
-defaults:
-  global_rounds: 3
+schedule:
+  rounds: 3
   local_iterations: 1

@@ -339,7 +339,7 @@ The shared SGD engine. `fedavg` and `centralized` additionally require
 | `frozen_batch_gradients` | one pass whose batch gradients are all computed at the iteration-start model, then combined into one update |
 | `full_gradient` | one step on the exact gradient of the task's training loss over the whole train split, computed batch by batch at the iteration-start model |
 
-`defaults.local_iterations` counts those iterations, so a round is
+`schedule.local_iterations` counts those iterations, so a round is
 `local_iterations` steps under `single_batch`, `frozen_batch_gradients` and
 `full_gradient`, and `local_iterations` × the client's batch count under
 `sequential_epoch` (chapter 04 §2.1).

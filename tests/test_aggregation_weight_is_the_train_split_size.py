@@ -43,7 +43,7 @@ def _config(directory: Path, local_iterations: int, client: dict[str, Any]) -> P
     raw = yaml.safe_load(Path("configs/dev/smoke.yaml").read_text(encoding="utf-8"))
     raw["experiment"]["output_dir"] = str(directory / "run")
     raw["data"]["samples_per_client"] = TRAIN_ROWS
-    raw["defaults"]["local_iterations"] = local_iterations
+    raw["schedule"]["local_iterations"] = local_iterations
     raw["client"]["batch_size"] = BATCH_SIZE
     raw["reporting"]["fit_metrics"] = ["fit_loss", "optimizer_steps"]
     raw["client"].update(client)

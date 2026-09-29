@@ -664,8 +664,8 @@ evaluation:
   train:
     every: 1
     clients: all
-defaults:
-  global_rounds: {rounds}
+schedule:
+  rounds: {rounds}
   local_iterations: 1
 """
 
@@ -903,8 +903,8 @@ evaluation:
   train:
     every: 1
     clients: all
-defaults:
-  global_rounds: {rounds}
+schedule:
+  rounds: {rounds}
   local_iterations: 1
 """
 

@@ -143,7 +143,7 @@ def _scaffold_config(directory: Path) -> Path:
         "save_every_round": False,
         "keep_last": 0,
     }
-    raw["defaults"]["global_rounds"] = 4
+    raw["schedule"]["rounds"] = 4
     path = directory / "scaffold.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     return path

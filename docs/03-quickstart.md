@@ -506,7 +506,7 @@ install. Read chapter 02 §1 first if you installed a torch build matched to
 your CUDA driver: that extra will replace it. Without network access, the
 synthetic workflow above is the fallback.
 
-It is not the same *size*: that config ships `global_rounds: 1000` over 1000
+It is not the same *size*: that config ships `schedule.rounds: 1000` over 1000
 clients at `participation_rate: 1`, and measured 8.3s/round on CPU
 (2026-09-02), so running it as shipped is a multi-hour job. Pass `--rounds 2`
 first, the way step 4 does, and read chapter 11 before removing the flag.

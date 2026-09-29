@@ -91,6 +91,6 @@ reporting:
     - communicated_parameters
     - communicated_bytes
 
-defaults:
-  global_rounds: 500
+schedule:
+  rounds: 500
   local_iterations: 20

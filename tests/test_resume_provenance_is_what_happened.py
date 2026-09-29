@@ -88,8 +88,8 @@ runtime:
   checkpointing: {{enabled: true, interval: 1, save_last: true, save_best: false}}
 evaluation:
   train: {{every: 1, clients: all}}
-defaults:
-  global_rounds: {rounds}
+schedule:
+  rounds: {rounds}
   local_iterations: 1
 """
 

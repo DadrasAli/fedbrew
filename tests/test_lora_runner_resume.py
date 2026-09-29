@@ -175,8 +175,8 @@ evaluation:
     every: never
   central_test:
     every: 1
-defaults:
-  global_rounds: {rounds}
+schedule:
+  rounds: {rounds}
   local_iterations: 1
 """,
         encoding="utf-8",

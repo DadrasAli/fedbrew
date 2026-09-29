@@ -228,7 +228,7 @@ class ASkippedRoundCountsWithoutEvaluatingTest(_TempRoot):
                 )
                 config["experiment"]["output_dir"] = str(self.root / "runs" / name)
                 config["data"]["path"] = str(manifest)
-                config["defaults"]["global_rounds"] = 3
+                config["schedule"]["rounds"] = 3
                 config.setdefault("evaluation", {})["fit"] = {"every": "final"}
                 path = self.root / f"{name}.yaml"
                 path.write_text(yaml.safe_dump(config), encoding="utf-8")

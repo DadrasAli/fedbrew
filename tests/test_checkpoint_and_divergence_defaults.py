@@ -75,8 +75,8 @@ BASE = textwrap.dedent("""
       num_classes: 2
     runtime:
       device: cpu
-    defaults:
-      global_rounds: 1
+    schedule:
+      rounds: 1
       local_iterations: 1
     """)
 

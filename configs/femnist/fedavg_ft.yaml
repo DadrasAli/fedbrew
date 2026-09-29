@@ -181,6 +181,6 @@ divergence:
   # long time and then improve, and a false stop would look like a result.
   patience: null
 
-defaults:
-  global_rounds: 500
+schedule:
+  rounds: 500
   local_iterations: 20

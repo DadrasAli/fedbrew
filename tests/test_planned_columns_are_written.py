@@ -135,7 +135,7 @@ def _write_rule(root: Path, name: str, rule: str, *, fit_metrics: list[str]) -> 
     raw.setdefault("reporting", {})["fit_metrics"] = list(fit_metrics)
     if "evaluation" in RULES[rule]:
         raw.setdefault("evaluation", {}).update(RULES[rule]["evaluation"])
-    raw["defaults"]["global_rounds"] = 1
+    raw["schedule"]["rounds"] = 1
     path = root / f"{name}.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     return path
@@ -310,7 +310,7 @@ class PrintEveryWritesEveryRoundTest(unittest.TestCase):
 
     def test_every_round_is_written_and_only_the_scheduled_ones_print(self) -> None:
         raw = yaml.safe_load(BASE_CONFIG.read_text(encoding="utf-8"))
-        raw["defaults"]["global_rounds"] = 7
+        raw["schedule"]["rounds"] = 7
         raw["runtime"]["checkpointing"]["enabled"] = False
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

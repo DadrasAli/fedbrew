@@ -96,10 +96,10 @@ def _config(client: dict[str, Any], server: dict[str, Any]) -> dict[str, Any]:
     config = classification_config(**client)
     config["client"]["batch_size"] = 3
     if iterations is not None:
-        config["defaults"]["local_iterations"] = iterations
+        config["schedule"]["local_iterations"] = iterations
     config["server"].update(server)
     config["server"] = {key: value for key, value in config["server"].items() if value is not None}
-    config["defaults"]["global_rounds"] = ROUNDS
+    config["schedule"]["rounds"] = ROUNDS
     return config
 
 

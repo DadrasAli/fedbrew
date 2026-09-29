@@ -140,6 +140,6 @@ divergence:
   patience: null
   min_delta: 0.0
 
-defaults:
-  global_rounds: 1000
+schedule:
+  rounds: 1000
   local_iterations: 1

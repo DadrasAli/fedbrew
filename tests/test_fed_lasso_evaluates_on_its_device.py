@@ -32,7 +32,7 @@ from tests.test_batched_executor_tolerance import example_config
 
 def _config_file(directory: Path, device: str) -> Path:
     config = example_config("fed-lasso")
-    config["defaults"]["global_rounds"] = 1
+    config["schedule"]["rounds"] = 1
     config["experiment"]["output_dir"] = str(directory / "run")
     config["runtime"]["device"] = device
     path = directory / "fed-lasso.yaml"

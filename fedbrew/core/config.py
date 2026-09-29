@@ -64,7 +64,7 @@ class ClientConfig:
 
     update_rule: str
     #: Iterations of the local loop per selected client per round, from
-    #: ``defaults.local_iterations``. What one iteration does is the rule's
+    #: ``schedule.local_iterations``. What one iteration does is the rule's
     #: ``update_mode`` (K = this value, B = the client's training batches):
     #:
     #: - ``single_batch``: one optimizer step on the next mini-batch; the
@@ -605,19 +605,19 @@ def load_config(common_path: str | Path) -> FullConfig:
     # First: a misspelled server or client block would otherwise be reported
     # as a missing one, which names the wrong problem.
     _refuse_unknown_root_keys(common)
-    defaults = common.get("defaults", {})
-    if not isinstance(defaults, dict):
-        raise RunRefused("defaults must be a mapping")
+    schedule = common.get("schedule", {})
+    if not isinstance(schedule, dict):
+        raise RunRefused("schedule must be a mapping")
 
     server = _load_component(common, common_config_path, "server", "server_config")
     client = _load_component(common, common_config_path, "client", "client_config")
 
-    # Rejection first: _resolve_schedule_defaults writes global_rounds and
+    # Rejection first: _resolve_schedule writes global_rounds and
     # local_iterations into these same dicts, so running it first would hand
     # _reject_restated_keys the loader's own values and refuse every config.
     _reject_restated_keys(common, server, client)
-    _refuse_unread_keys("defaults", defaults, DEFAULTS_KEYS)
-    _resolve_schedule_defaults(defaults, server, client)
+    _refuse_unread_keys("schedule", schedule, SCHEDULE_KEYS)
+    _resolve_schedule(schedule, server, client)
 
     # Imported here: registry pulls in the client/server packages, which import
     # this module for its config types.
@@ -1305,12 +1305,16 @@ _REMOVED_KEYS: dict[tuple[str, str], str] = {
     # config that wrote the old name from the loader having filled the field
     # in. docs/04-configuration.md listed both as required keys of their
     # blocks for that reason, and a config copied from it did not load.
-    ("server", "global_rounds"): "set defaults.global_rounds instead -- the "
+    ("server", "global_rounds"): "set schedule.rounds instead -- the "
     "round count is shared by the server and every client, and two spellings "
     "of one schedule is how they drift apart",
-    ("client", "local_iterations"): "set defaults.local_iterations instead -- "
+    ("client", "local_iterations"): "set schedule.local_iterations instead -- "
     "the iteration count is shared by every client, and two spellings of one "
     "schedule is how they drift apart",
+    # The schedule block's round count, under the name it had in the defaults
+    # block: a config moved to the new block key by key keeps the old name.
+    ("schedule", "global_rounds"): "renamed to schedule.rounds -- the block "
+    "already says whose schedule it is",
     # The renamed key, under both of its old spellings. It counted epochs in
     # name only: update_mode decides what one iteration of the local loop is,
     # and under single_batch that is one optimizer step, not a pass. A config
@@ -1340,12 +1344,8 @@ _REMOVED_KEYS: dict[tuple[str, str], str] = {
     ("client", "metrics"): "moved to reporting.fit_metrics -- one list, applied "
     "once by the server after every client and server metric is added, where "
     "server.metrics and client.metrics were two filters in series",
-    ("defaults", "local_epochs"): "renamed to defaults.local_iterations, which "
-    "counts iterations of the local loop -- what one iteration is depends on "
-    "update_mode, docs/04-configuration.md section 2.1. This config predates "
-    "the rename",
     ("client", "local_epochs"): "renamed to local_iterations and relocated: set "
-    "defaults.local_iterations instead. This config predates the rename",
+    "schedule.local_iterations instead. This config predates the rename",
 }
 
 
@@ -1360,22 +1360,29 @@ _REMOVED_BLOCKS: dict[str, str] = {
     "client_statistics": "moved to reporting: per_client_csv to "
     "reporting.per_client_csv, and std, variance, min, max and worst_percent to "
     "reporting.statistics",
+    # "defaults" read as fallbacks a config could leave out, where these are
+    # the only spelling of the run's schedule and both are required. A config
+    # from before the rename -- defaults.local_epochs among them -- is refused
+    # here, the block's whole contents with it.
+    "defaults": "renamed to schedule: defaults.global_rounds to schedule.rounds "
+    "and defaults.local_iterations to schedule.local_iterations",
 }
 
 #: Blocks a config must write that are read at load and never stored on
 #: ``FullConfig``. They are part of the surface a config author types and
 #: absent from the surface the dataclass describes, so anything deriving the
 #: documented blocks from ``FullConfig`` alone misses them -- which is how
-#: ``defaults`` came to be required by the loader and documented nowhere.
-_LOAD_TIME_BLOCKS: frozenset[str] = frozenset({"defaults"})
+#: ``defaults``, as the block was named then, came to be required by the
+#: loader and documented nowhere.
+_LOAD_TIME_BLOCKS: frozenset[str] = frozenset({"schedule"})
 
-#: Every key the ``defaults`` block accepts. The block is closed like every
+#: Every key the ``schedule`` block accepts. The block is closed like every
 #: other one, and has to be declared rather than derived for the same reason
 #: it is in _LOAD_TIME_BLOCKS: it is read at load and never stored, so the
 #: unknown-key check, which walks ``FullConfig``'s ``extra`` dicts, never saw
 #: it. ``defaults.bogus_key: 7`` loaded, and a stale or misspelled key beside
 #: the two real ones was dropped without a word. FINDINGS.csv POST-F16.
-DEFAULTS_KEYS: frozenset[str] = frozenset({"global_rounds", "local_iterations"})
+SCHEDULE_KEYS: frozenset[str] = frozenset({"rounds", "local_iterations"})
 
 #: The older spelling of the server and client blocks: a path to a YAML file
 #: holding the block, in place of the block itself (`_load_component`).
@@ -1434,7 +1441,7 @@ def _reject_restated_keys(
 
     runtime = common.get("runtime") or {}
     sections: dict[str, Mapping[str, Any]] = {
-        "defaults": common.get("defaults") or {},
+        "schedule": _mapping_or_empty(common.get("schedule")),
         "experiment": common.get("experiment") or {},
         "server": server,
         "client": client,
@@ -1489,8 +1496,8 @@ def _load_component(
     return load_yaml(_resolve_config_path(config_path, str(legacy_path)))
 
 
-def _resolve_schedule_defaults(
-    defaults: Mapping[str, Any],
+def _resolve_schedule(
+    schedule: Mapping[str, Any],
     server: dict[str, Any],
     client: dict[str, Any],
 ) -> None:
@@ -1498,21 +1505,22 @@ def _resolve_schedule_defaults(
 
     The spellings a config may not use -- ``server.global_rounds`` and
     ``client.local_iterations``, which name the resolved fields this writes,
-    and ``defaults.local_epochs`` and ``client.local_epochs`` from before the
-    rename -- are refused by ``_reject_restated_keys`` from ``_REMOVED_KEYS``,
+    ``client.local_epochs`` from before the rename, and the whole ``defaults``
+    block the schedule was written in before it was renamed -- are refused by
+    ``_reject_restated_keys`` from ``_REMOVED_KEYS`` and ``_REMOVED_BLOCKS``,
     which runs first. They used to be refused here instead, in a raise this function
     kept for itself, and the guard that checks the configuration chapter lists
     every removed key reads ``_REMOVED_KEYS`` alone -- so the chapter went on
     calling both required keys of their blocks and nothing failed.
     """
 
-    if "global_rounds" not in defaults:
-        raise RunRefused("defaults.global_rounds is required")
-    if "local_iterations" not in defaults:
-        raise RunRefused("defaults.local_iterations is required")
+    if "rounds" not in schedule:
+        raise RunRefused("schedule.rounds is required")
+    if "local_iterations" not in schedule:
+        raise RunRefused("schedule.local_iterations is required")
 
-    server["global_rounds"] = defaults["global_rounds"]
-    client["local_iterations"] = defaults["local_iterations"]
+    server["global_rounds"] = schedule["rounds"]
+    client["local_iterations"] = schedule["local_iterations"]
 
 
 def validate_config(config: FullConfig) -> None:

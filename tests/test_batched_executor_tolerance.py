@@ -90,7 +90,7 @@ def example_config(name: str, arm: str = "fedavg") -> dict[str, Any]:
 
     config = standalone_config_mapping(REPO_ROOT / "configs" / "examples" / name / f"{arm}.yaml")
     config["data"]["path"] = str(example_manifest(name))
-    config["defaults"]["global_rounds"] = ROUNDS
+    config["schedule"]["rounds"] = ROUNDS
     config["runtime"]["quiet"] = True
     config["runtime"]["checkpointing"].update(
         enabled=True, save_last=True, save_every_round=True, keep_last=None

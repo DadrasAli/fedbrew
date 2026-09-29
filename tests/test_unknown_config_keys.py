@@ -11,9 +11,10 @@ that said `lora_alph: 32` ran at 16.
 Three layers carry the defect and each is checked here: the run config, the
 model builders, and the generator YAML.
 
-The run config's `defaults` block escaped the first layer. It is read at load
-and never stored, and the check walks what is stored, so `defaults.bogus_key: 7`
-loaded and any key beside the two real ones was dropped. `DefaultsBlockTest`
+The run config's `schedule` block, then named `defaults`, escaped the first
+layer. It is read at load and never stored, and the check walks what is stored,
+so `defaults.bogus_key: 7` loaded and any key beside the two real ones was
+dropped. `ScheduleBlockTest`
 holds it to the same contract. FINDINGS.csv POST-F16.
 
 The root of the run config escaped too. `load_config` read the blocks it knew
@@ -43,7 +44,7 @@ import yaml
 from fedbrew.cli import dispatch
 from fedbrew.core import extensions, registry
 from fedbrew.core.config import (
-    DEFAULTS_KEYS,
+    SCHEDULE_KEYS,
     is_family_base,
     load_config,
     root_config_keys,
@@ -132,8 +133,8 @@ class RunConfigTest(unittest.TestCase):
 
 
 @pytest.mark.fast
-class DefaultsBlockTest(unittest.TestCase):
-    """`defaults` accepts its two keys and refuses everything else."""
+class ScheduleBlockTest(unittest.TestCase):
+    """`schedule` accepts its two keys and refuses everything else."""
 
     SMOKE = Path(__file__).resolve().parent.parent / "configs" / "dev" / "smoke.yaml"
 
@@ -147,25 +148,47 @@ class DefaultsBlockTest(unittest.TestCase):
             load_config(path)
 
     def test_the_two_keys_are_the_whole_block(self) -> None:
-        self.assertEqual(DEFAULTS_KEYS, {"global_rounds", "local_iterations"})
+        self.assertEqual(SCHEDULE_KEYS, {"rounds", "local_iterations"})
         self._load_with("")
 
     def test_an_unknown_key_is_refused_and_the_accepted_ones_named(self) -> None:
         """The probe that loaded: nothing read it, and nothing said so."""
 
         for line, key in (
-            ("  bogus_key: 7\n", "defaults.bogus_key"),
-            # Reads as a default for every client; nothing reads it here.
-            ("  learning_rate: 0.1\n", "defaults.learning_rate"),
+            ("  bogus_key: 7\n", "schedule.bogus_key"),
+            # Reads as a schedule for every client; nothing reads it here.
+            ("  learning_rate: 0.1\n", "schedule.learning_rate"),
             # A misspelling beside the real key, which alone would be required.
-            ("  local_iteration: 20\n", "defaults.local_iteration"),
+            ("  local_iteration: 20\n", "schedule.local_iteration"),
         ):
             with self.subTest(key=key):
                 with self.assertRaises(ValueError) as caught:
                     self._load_with(line)
                 message = str(caught.exception)
                 self.assertIn(key, message)
-                self.assertIn("global_rounds, local_iterations", message)
+                self.assertIn("local_iterations, rounds", message)
+
+    def test_the_block_and_the_key_from_before_the_rename_name_their_new_places(self) -> None:
+        text = self.SMOKE.read_text(encoding="utf-8")
+        block = "schedule:\n  rounds: 1\n"
+        self.assertEqual(text.count(block), 1)
+        for old, expected in (
+            (
+                "defaults:\n  global_rounds: 1\n",
+                ("defaults block has been removed", "schedule.rounds"),
+            ),
+            (
+                "schedule:\n  global_rounds: 1\n",
+                ("schedule.global_rounds has been removed", "schedule.rounds"),
+            ),
+        ):
+            with self.subTest(old=old.splitlines()[0]), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "smoke.yaml"
+                path.write_text(text.replace(block, old), encoding="utf-8")
+                with self.assertRaises(ValueError) as caught:
+                    load_config(path)
+                for part in expected:
+                    self.assertIn(part, str(caught.exception))
 
 
 #: The three root blocks the release audit misspelled, and what each typo cost:
@@ -218,7 +241,7 @@ class RootKeysTest(unittest.TestCase):
             root_config_keys(),
             {
                 "experiment",
-                "defaults",
+                "schedule",
                 "server",
                 "client",
                 "data",

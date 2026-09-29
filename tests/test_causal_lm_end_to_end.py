@@ -119,8 +119,8 @@ class CausalLMEndToEndTests(unittest.TestCase):
                         min: true
                         max: true
                         worst_percent: 10
-                    defaults:
-                      global_rounds: 1
+                    schedule:
+                      rounds: 1
                       local_iterations: 1
                     """).lstrip(),
                 encoding="utf-8",

@@ -166,8 +166,8 @@ divergence:
   patience: null
   min_delta: 0.0
 
-defaults:
-  global_rounds: 1000
+schedule:
+  rounds: 1000
 
   # One full local pass per round. SCAFFOLD's correction is applied per step,
   # so this is also what sets how many corrected steps a round takes: 51-76

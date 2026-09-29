@@ -370,7 +370,7 @@ class AResumeFromAnAsynchronousFlushIsTheRunTest(ResidentRuns):
 
     def _config(self) -> dict[str, Any]:
         config = classification_config(**FEDAVG, update_mode="single_batch")
-        config["defaults"]["global_rounds"] = 6
+        config["schedule"]["rounds"] = 6
         config["runtime"]["flush_every"] = 2
         config["runtime"]["checkpointing"].update(save_every_round=True)
         return _clean(config)
@@ -490,7 +490,7 @@ class OnCudaTest(ResidentRuns):
         for label, config, data in self._arms():
             with self.subTest(arm=label):
                 config = _clean(config)
-                config["defaults"]["global_rounds"] = 6
+                config["schedule"]["rounds"] = 6
                 config["runtime"]["device"] = "cuda"
                 config["runtime"]["checkpointing"].update(save_every_round=True)
                 with data():

@@ -110,7 +110,7 @@ class ReadmeQuickstartEndToEndTest(unittest.TestCase):
         self.assertTrue((REPO_ROOT / MANIFEST).is_file(), "no manifest written")
 
         # Line 3 -- run, by short name. No --rounds override: the config's own
-        # defaults.global_rounds is what the README line actually runs.
+        # schedule.rounds is what the README line actually runs.
         #
         # The run's own artifacts are cleared first, through the function the
         # package uses for exactly that, so what is asserted below is what this

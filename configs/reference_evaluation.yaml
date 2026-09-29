@@ -197,6 +197,6 @@ divergence:
   # Relative improvement needed to reset the patience counter.
   min_delta: 0.0
 
-defaults:
-  global_rounds: 12
+schedule:
+  rounds: 12
   local_iterations: 1

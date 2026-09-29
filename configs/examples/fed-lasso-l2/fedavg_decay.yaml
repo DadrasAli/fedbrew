@@ -28,7 +28,7 @@ client:
   update_mode: sequential_epoch
   frozen_gradient_weighting: examples
   # `cosine` anneals from learning_rate to min_learning_rate over
-  # server.global_rounds. On the L1 arm it is the textbook fix for a
+  # schedule.rounds. On the L1 arm it is the textbook fix for a
   # subgradient method's O(eta*lam) floor and the one shipped thing that
   # helps. There is no such floor here, so it has much less to remove --
   # which is the control's point, and the README states the two gaps side

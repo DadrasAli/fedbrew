@@ -30,10 +30,10 @@ from fedbrew.core import registry
 from fedbrew.core.config import (
     _KNOWN_EXTRA_KEYS,
     _REMOVED_KEYS,
-    DEFAULTS_KEYS,
     EVALUATION_MODEL_SCOPES,
     FROZEN_GRADIENT_WEIGHTINGS,
     MATMUL_PRECISIONS,
+    SCHEDULE_KEYS,
     SUPPORTED_AGGREGATION_WEIGHTING,
     UPDATE_MODES,
     ClientStatisticsConfig,
@@ -374,8 +374,8 @@ class EnumTest(unittest.TestCase):
                     )
 
 
-class DefaultsTableTest(unittest.TestCase):
-    """§2.1's key table is exactly the keys the defaults block accepts.
+class ScheduleTableTest(unittest.TestCase):
+    """§2.1's key table is exactly the keys the schedule block accepts.
 
     Nothing checked it. The block is read at load and never stored, so the
     field- and extra-based checks above cannot see it, and when its schedule
@@ -383,13 +383,13 @@ class DefaultsTableTest(unittest.TestCase):
     """
 
     def test_the_table_lists_exactly_the_accepted_keys(self) -> None:
-        table = table_after(_chapter_text(), "### 2.1 `defaults`")
+        table = table_after(_chapter_text(), "### 2.1 `schedule`")
         listed = {
             row.strip("| ").split("|")[0].strip().strip("`")
             for row in table.splitlines()[2:]
             if row.strip().startswith("|")
         }
-        self.assertEqual(listed, set(DEFAULTS_KEYS))
+        self.assertEqual(listed, set(SCHEDULE_KEYS))
 
 
 class WhatOneIterationIsTest(unittest.TestCase):

@@ -105,6 +105,6 @@ runtime:
       num_workers: 0
       pin_memory: true
 
-defaults:
-  global_rounds: 100
+schedule:
+  rounds: 100
   local_iterations: 2

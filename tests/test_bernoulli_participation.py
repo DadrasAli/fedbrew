@@ -190,7 +190,7 @@ def _write_config(root: Path, *, seed: int = 42, rounds: int = 3, **participatio
                 "keep_last": None,
             },
         },
-        "defaults": {"global_rounds": rounds, "local_iterations": 1},
+        "schedule": {"rounds": rounds, "local_iterations": 1},
     }
     path = root / "config.yaml"
     path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")

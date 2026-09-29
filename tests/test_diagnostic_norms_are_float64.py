@@ -77,7 +77,7 @@ class TheScaffoldArmThatOverflowedTest(unittest.TestCase):
             config["experiment"]["extensions"] = [
                 str(REPO / path) for path in config["experiment"]["extensions"]
             ]
-            config["defaults"]["global_rounds"] = 70
+            config["schedule"]["rounds"] = 70
             (root / "run.yaml").write_text(yaml.safe_dump(config))
             runner.run(root / "run.yaml", runner.parse_args(["--quiet"]))
 

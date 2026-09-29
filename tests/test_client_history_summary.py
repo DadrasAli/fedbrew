@@ -244,8 +244,8 @@ def _write_config(directory: Path) -> Path:
               test:
                 every: 1
                 clients: all
-            defaults:
-              global_rounds: 3
+            schedule:
+              rounds: 3
               local_iterations: 1
             """
         ).lstrip(),

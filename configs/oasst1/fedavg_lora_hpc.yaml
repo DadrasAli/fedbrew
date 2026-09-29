@@ -15,7 +15,7 @@
 #   numerics difference, not a throughput one, so even with the optimizer
 #   matched this arm's losses would not be like-for-like.
 #
-#   defaults.global_rounds is 1 and participation_rate is 0.5 over four
+#   schedule.rounds is 1 and participation_rate is 0.5 over four
 #   clients, against 200 rounds at 0.25 over twenty.
 #
 # The rest is the cluster: $FL_OUTPUT_ROOT/$FL_DATA_ROOT rather than in-tree
@@ -142,6 +142,6 @@ reporting:
     max: true
     worst_percent: 10
 
-defaults:
-  global_rounds: 1
+schedule:
+  rounds: 1
   local_iterations: 1

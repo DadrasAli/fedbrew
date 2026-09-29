@@ -69,7 +69,7 @@ cheapest way to check a new config, and worth running before any long job.
 | Block | Required | What it decides |
 | --- | --- | --- |
 | `experiment` | yes | identity, seed, output location |
-| `defaults` | yes | the round and local-iteration counts, shared by server and clients — §2.1 |
+| `schedule` | yes | the round and local-iteration counts, shared by server and clients — §2.1 |
 | `server` | yes | strategy and participation |
 | `client` | yes | update rule and local optimisation |
 | `data` | yes | which dataset, and where |
@@ -100,15 +100,15 @@ There is no `task` block and no `task` key. The task is the one the model was
 registered with (`models.register(..., task=)`, read through `MODEL_TASKS`);
 writing a top-level `task:` or `experiment.task` is refused at load. §10.
 
-### 2.1 `defaults`
+### 2.1 `schedule`
 
 Two keys, both required, and the only supported place to set either. The
 block is closed like every other: any other key is refused at load, naming
-the two it accepts (`DEFAULTS_KEYS`, `fedbrew/core/config.py`).
+the two it accepts (`SCHEDULE_KEYS`, `fedbrew/core/config.py`).
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `global_rounds` | int | **required** | Number of federated rounds. Written into `server.global_rounds` at load. |
+| `rounds` | int | **required** | Number of federated rounds. Written into `server.global_rounds` at load. |
 | `local_iterations` | int | **required** | Iterations of the local loop per selected client per round; what one iteration is depends on `update_mode`, below. Written into `client.local_iterations` at load. |
 
 The block exists because both numbers are read by more than one component —
@@ -116,7 +116,13 @@ the round count by the server and by every schedule that counts rounds, the
 iteration count by every client — and a value with two spellings drifts. The
 resolved config carries them as `server.global_rounds` and
 `client.local_iterations`; a config that writes either of those names is refused
-and told to come here (`_resolve_schedule_defaults`, `fedbrew/core/config.py`).
+and told to come here (`_resolve_schedule`, `fedbrew/core/config.py`).
+
+The block was called `defaults` until it was renamed, because "defaults" read
+as fallbacks a config could leave out, where these are the run's schedule and
+both are required. A config that still writes a `defaults` block is refused,
+naming `schedule.rounds` and `schedule.local_iterations` (§10); the resolved
+config, and so `run.json` and a resume's comparison with it, did not change.
 
 **What one iteration is.** `local_iterations` counts iterations of the local
 loop; the rule's `update_mode` (§5) decides what one iteration does. With
@@ -163,8 +169,8 @@ clients of one run differ from each other too.
 
 The key was called `local_epochs` until it was renamed, because "epochs" was
 wrong under `single_batch` and "updates" is wrong under `sequential_epoch`. A
-config that still writes `defaults.local_epochs` or `client.local_epochs` is
-refused (§10), and so is a checkpoint whose client states carry
+config that still writes `client.local_epochs`, or `local_epochs` in the
+`defaults` block, is refused (§10), and so is a checkpoint whose client states carry
 `local_epochs` (chapter 09 §5).
 
 
@@ -769,24 +775,25 @@ and ignored — `_REMOVED_KEYS` (`fedbrew/core/config.py`).
 | `runtime.performance.dataloader.seed` | loader seeding is derived per client, round and phase from `experiment.seed`; a fixed seed here would give every client the same shuffle |
 | `runtime.data_staging.mode` | `copy_tree` was the only supported value; anything else printed a skip line and left staging off |
 | `runtime.data_staging.fallback_local_root` | an unset or unexpanded `local_root` already means "stage nothing" |
-| `server.global_rounds` | **relocated**, not deleted: set `defaults.global_rounds` — §2.1 |
-| `client.local_iterations` | **relocated**, not deleted: set `defaults.local_iterations` — §2.1 |
-| `defaults.local_epochs` | **renamed**: set `defaults.local_iterations` — §2.1. A config that writes it predates the rename |
-| `client.local_epochs` | **renamed and relocated**: set `defaults.local_iterations` — §2.1. A config that writes it predates the rename |
+| `server.global_rounds` | **relocated**, not deleted: set `schedule.rounds` — §2.1 |
+| `client.local_iterations` | **relocated**, not deleted: set `schedule.local_iterations` — §2.1 |
+| `schedule.global_rounds` | **renamed**: set `schedule.rounds` — §2.1. The key's name in the `defaults` block |
+| `client.local_epochs` | **renamed and relocated**: set `schedule.local_iterations` — §2.1. A config that writes it predates the rename |
 | `runtime.deterministic`, `runtime.deterministic_warn_only`, `runtime.use_amp` | **relocated**: set them in `numerics` — §7.5 |
 | `runtime.performance.matmul_precision`, `runtime.performance.cudnn_benchmark`, `runtime.performance.precision` | **relocated**: set them in `numerics` — §7.5 |
 | `server.metrics`, `client.metrics` | **merged**: set `reporting.fit_metrics`, one list the server applies once after every client and server metric is added — §9 |
 | `experiment.task` | the task is recorded by the model's registration (`models.register(..., task=)`) and read from `model.name`; a model cannot be registered without it, so there is nothing left to override |
 | the top-level `task` block | the task is inferred from `model.name` through the model's registration |
 | the top-level `client_statistics` block | **relocated**: `per_client_csv` to `reporting.per_client_csv`, the rest to `reporting.statistics` — §9 |
+| the top-level `defaults` block | **renamed**: `schedule`, with `global_rounds` as `schedule.rounds` and `local_iterations` as `schedule.local_iterations` — §2.1. `defaults.local_epochs`, from before that key's rename, is refused with the block |
 
 `server.global_rounds` and `client.local_iterations` are relocations rather
 than deletions: the value is still read, and only the spelling a config may use
 moved. Their fields therefore still exist on the resolved config, which is why
 they have to be declared in `_REMOVED_KEYS` — a check asking "is this still a
 field?" cannot tell a config that wrote the old name from the loader having
-filled the field in, and for a while neither could. `defaults.local_epochs` and
-`client.local_epochs` are the renamed key's old spellings. They are declared
+filled the field in, and for a while neither could. `client.local_epochs`
+and `schedule.global_rounds` are renamed keys' old spellings. They are declared
 too, so the refusal names the key that replaced them rather than calling them
 unknown.
 
@@ -803,9 +810,9 @@ key; a misspelled flag is refused by the parser before the config is read.
 | `--validate-only` | run preflight and exit without training |
 | `--output-dir` | `experiment.output_dir` |
 | `--seed` | `experiment.seed` |
-| `--rounds` | `server.global_rounds` — the resolved field, i.e. it overrides `defaults.global_rounds` |
+| `--rounds` | `server.global_rounds` — the resolved field, i.e. it overrides `schedule.rounds` |
 | `--participation-rate` | `server.participation_rate` |
-| `--local-iterations` | `client.local_iterations` — the resolved field, i.e. it overrides `defaults.local_iterations` |
+| `--local-iterations` | `client.local_iterations` — the resolved field, i.e. it overrides `schedule.local_iterations` |
 | `--lr` | `client.learning_rate` |
 | `--batch-size` | `client.batch_size` |
 | `--device` | `runtime.device` |

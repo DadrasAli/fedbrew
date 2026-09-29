@@ -74,8 +74,8 @@ BASE = textwrap.dedent("""
       val: {every: never}
       test: {every: never}
       central_test: {every: never}
-    defaults:
-      global_rounds: 1
+    schedule:
+      rounds: 1
       local_iterations: 1
     """)
 

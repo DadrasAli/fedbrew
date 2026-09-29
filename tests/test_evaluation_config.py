@@ -129,33 +129,48 @@ class EvaluationConfigTests(unittest.TestCase):
         """A pre-rename config names the key that replaced its own.
 
         Refused rather than read under the new name, and refused even beside a
-        `defaults.local_iterations`, where it would otherwise be one more
-        value nothing reads.
+        `schedule.local_iterations`, where it would otherwise be one more
+        value nothing reads. A config old enough to write `defaults.local_epochs`
+        writes it in the block that was renamed to `schedule` since, and is
+        refused for the block, with the key's new place named.
         """
 
         smoke = _SMOKE_CONFIG.read_text(encoding="utf-8")
+        schedule = "schedule:\n  rounds: 1\n  local_iterations: 1\n"
+        self.assertEqual(smoke.count(schedule), 1)
         cases = {
-            "old defaults key alone": smoke.replace(
-                "  local_iterations: 1\n", "  local_epochs: 1\n"
+            "old defaults key alone": (
+                smoke.replace(schedule, "defaults:\n  global_rounds: 1\n  local_epochs: 1\n"),
+                ("defaults block has been removed", "schedule.local_iterations"),
             ),
-            "old defaults key beside the new one": smoke.replace(
-                "  local_iterations: 1\n", "  local_iterations: 1\n  local_epochs: 5\n"
+            "old client key": (
+                smoke.replace(
+                    "  update_rule: local_sgd\n",
+                    "  update_rule: local_sgd\n  local_epochs: 5\n",
+                ),
+                (
+                    "local_epochs has been removed",
+                    "schedule.local_iterations",
+                    "predates the rename",
+                ),
             ),
-            "old client key": smoke.replace(
-                "  update_rule: local_sgd\n",
-                "  update_rule: local_sgd\n  local_epochs: 5\n",
+            "old client key beside the new one": (
+                smoke.replace(
+                    "  update_rule: local_sgd\n",
+                    "  update_rule: local_sgd\n  local_epochs: 5\n  local_iterations: 1\n",
+                ),
+                ("local_epochs has been removed", "schedule.local_iterations"),
             ),
         }
-        for label, text in cases.items():
+        for label, (text, expected) in cases.items():
             with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
                 config_path = Path(directory) / "pre_rename.yaml"
                 config_path.write_text(text, encoding="utf-8")
                 with self.assertRaises(ValueError) as caught:
                     load_config(config_path)
                 message = str(caught.exception)
-                self.assertIn("local_epochs has been removed", message)
-                self.assertIn("defaults.local_iterations", message)
-                self.assertIn("predates the rename", message)
+                for part in expected:
+                    self.assertIn(part, message)
 
 
 if __name__ == "__main__":

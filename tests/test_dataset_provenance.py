@@ -221,7 +221,7 @@ class ItReachesRunJsonTest(unittest.TestCase):
                     },
                     "numerics": {"use_amp": False, "deterministic": False},
                     "runtime": {"device": "cpu"},
-                    "defaults": {"global_rounds": 1, "local_iterations": 1},
+                    "schedule": {"rounds": 1, "local_iterations": 1},
                 }
             ),
             encoding="utf-8",

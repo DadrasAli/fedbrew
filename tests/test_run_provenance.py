@@ -150,8 +150,8 @@ def _write_config(directory: Path) -> Path:
                 every: 1
                 clients: all
 
-            defaults:
-              global_rounds: 1
+            schedule:
+              rounds: 1
               local_iterations: 1
             """
         ).lstrip(),
