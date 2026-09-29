@@ -104,8 +104,11 @@ evaluation:
   val:
     every: 5
     clients: all
+  # No causal-LM generator writes a client test split: the held-out measure
+  # is central_test, on the corpus's pooled test shard. A split the data
+  # does not carry is refused at load when a config asks for it.
   test:
-    every: 10
+    every: never
     clients: all
   central_test:
     every: 10

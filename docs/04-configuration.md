@@ -508,9 +508,9 @@ when staging is worth it.
 | --- | --- | --- | --- |
 | `train.every` | int \| `final` \| `never` | `10` | |
 | `train.clients` | scope | `"participating"` | |
-| `val.every` | int \| `final` \| `never` | `5` | |
+| `val.every` | int \| `final` \| `never` | `5` | `never` when the data has no val split: *Splits the data does not carry* below. |
 | `val.clients` | scope | `"all"` | |
-| `test.every` | int \| `final` \| `never` | `10` | |
+| `test.every` | int \| `final` \| `never` | `10` | `never` when the data has no client test split: *Splits the data does not carry* below. |
 | `test.clients` | scope | `"all"` | `participating` is **rejected** for test. |
 | `central_test.every` | int \| `final` \| `never` | `10` | |
 | `fit.every` | int \| `final` \| `never` | `1` | The pass each training client makes over its own train split after its update: the `fit_` metrics. See below. |
@@ -527,6 +527,28 @@ when staging is worth it.
 An interval pins round 1 as well as its own multiples, so a 500-round run at
 `every: 10` both starts from a measured baseline and ends on a measured round.
 `0` and negatives are rejected with a message naming `final` and `never`.
+
+**Splits the data does not carry.** A generated dataset need not have a val or
+a client test split: the `synthetic_classification` generator writes no val
+split, and no causal-LM generator writes a client test split (their held-out
+data is the pooled `central_test` shard). When the config loads, the val and
+test schedules are resolved against the manifest's client records
+(`fedbrew/core/evaluated_splits.py`), before anything trains:
+
+- a split the data does not carry and the config does not name is not
+  evaluated (`every: never`), `run.json` records it in
+  `config.evaluation.splits_without_data`, and the plan header prints
+  `not evaluated (no val data)`;
+- a config that asks for such a split (`every` other than `never`) is refused
+  at load, which is also `--validate-only`'s first check, naming the split and
+  the dataset.
+
+A split counts as absent only when every client's count of it is known to be
+0: `num_eval_examples` for val and `num_test_examples` for test, or, when a
+record states only the total and the other two counts, the remainder. A split
+whose count is unknown for any client is left as configured, and so is every
+split of the in-memory synthetic backend (which carries all three) and of an
+extension backend. `tests/test_evaluated_splits_follow_the_data.py`.
 
 **`fit.every` schedules the post-fit pass.** After its local update each
 training client measures the model it just trained on its own train split,

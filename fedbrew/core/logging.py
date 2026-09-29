@@ -419,6 +419,9 @@ def _algorithm_rows(config: FullConfig) -> list[Row]:
 def _metrics_rows(config: FullConfig, *, verbose: bool) -> list[Row]:
     rows: list[Row] = []
     for split in ("train", "val", "test"):
+        if split in config.evaluation.splits_without_data:
+            rows.append(Row(f"evaluation.{split}", f"not evaluated (no {split} data)", tone=DIM))
+            continue
         split_config = getattr(config.evaluation, split)
         schedule = _schedule_text(split_config.every, f"evaluation.{split}")
         if schedule is None:

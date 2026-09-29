@@ -240,6 +240,10 @@ class EvaluationConfig:
     #: Which model the client passes measure. "global" keeps every existing
     #: config evaluating exactly what it evaluated before this field existed.
     model_scope: str = "global"
+    #: The client splits the run's data carries no rows of, each set to
+    #: ``every: never`` when the config did not name it: resolved at load by
+    #: fedbrew/core/evaluated_splits.py, never written in a config.
+    splits_without_data: tuple[str, ...] = ()
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -474,6 +478,12 @@ def load_config(common_path: str | Path) -> FullConfig:
         client_statistics=_build_client_statistics_config(common.get("client_statistics", {})),
         divergence=_build_divergence_config(common.get("divergence", {})),
     )
+    # Before validate_config, so the checks that read a split's schedule
+    # (save_best on val, a divergence metric) see the one the run will keep.
+    from fedbrew.core.evaluated_splits import resolve_evaluated_splits
+
+    evaluation = common.get("evaluation", {})
+    resolve_evaluated_splits(config, evaluation if isinstance(evaluation, Mapping) else {})
     validate_config(config)
     return config
 

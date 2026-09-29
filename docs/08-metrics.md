@@ -918,7 +918,7 @@ Every key that adds, removes or renames a column.
 | `client_statistics.max` | `true` | Adds `{split}_{metric}_max`. |
 | `client_statistics.worst_percent` | `10.0` | Adds `{split}_{metric}_worst{P}`; `null` or `0` removes it. Changing `P` **renames** the column. |
 | `evaluation.model_scope` | `"global"` | `personal` replaces every split name with its `personal_` form; `both` emits both sets. |
-| `evaluation.{train,val,test}.every` | `10`, `5`, `10` | Which rounds have values in that split's columns. The columns exist for the whole run either way. |
+| `evaluation.{train,val,test}.every` | `10`, `5`, `10`; `never` for a split the data does not carry | Which rounds have values in that split's columns. The columns exist for the whole run either way, except for a split the data does not carry, which has none (chapter 04 §8). |
 | `evaluation.central_test.every` | `10` | Same, for `central_test_loss` and `central_test_accuracy`. |
 | `evaluation.{train,val,test}.clients` | `participating`, `all`, `all` | Which clients enter the aggregate — changes the numbers, not the column set. |
 | `divergence.metric` | `"fit_loss"` | Requires that metric to be present every round. `validate_config` refuses a name a non-empty `server.metrics` would filter out (`config.py`, `_validate_divergence_metric_is_reachable`). |
