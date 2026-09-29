@@ -805,6 +805,14 @@ into `null` and `Infinity` into the largest double, and Go, `serde_json` and
 `checkpointing.best_metric` names a round-level column.
 `fedbrew/core/checkpointing.py`.
 
+**The default comes from the task.** A config that names none selects on
+`val_accuracy_sample_weighted_avg` when its task declares `accuracy`
+(`TaskAdapter.METRICS`, chapter 12 §6), and on `val_loss_sample_weighted_avg`
+when it does not, `personal_`-prefixed under `model_scope: personal` —
+`default_selection_metric` (`fedbrew/core/config.py`). The fixed default named
+a column no example problem writes. `save_best` defaults to on exactly when
+the run evaluates the validation split. Chapter 04 §7.3.
+
 **Direction is derived from the name, never configured** (lines 24-40). The
 name is split on `_` and the words checked against two sets:
 
@@ -837,6 +845,19 @@ contains.
 | `divergence.blowup_absolute` | `null` | absolute ceiling; the backstop for a run already pathological at round 1 |
 | `divergence.patience` | `null` | rounds without improvement **against the best so far** before the run is called stalled |
 | `divergence.min_delta` | `0.0` | relative improvement required to reset the patience counter |
+
+**Which side is better comes from the task.** `divergence_direction`
+(`fedbrew/core/config.py`) reads it off the task's declared metrics
+(`declared_direction`, `fedbrew/core/metrics.py`): `fit_accuracy` and
+`val_accuracy_sample_weighted_avg` are better higher, `fit_loss` and every
+`optimality_gap` lower. A name the task does not declare — a rule's own
+column, a server diagnostic — is watched as lower-is-better, the monitor's one
+assumption before tasks declared their metrics. On a metric that is better
+higher, patience counts a fall as the failure to improve (`divergence_monitor`,
+`fedbrew/core/divergence.py`), and the two blow-up ceilings are **refused at
+load**: a rise there is learning, and `blowup_factor`'s default of `10.0` would
+stop the run for it. Set both to `null` to watch such a metric. Every shipped
+config watches `fit_loss`.
 
 The default metric is `fit_loss` because it is produced every round and is free.
 `train_loss_sample_weighted_avg` only exists on `evaluation.train`'s schedule

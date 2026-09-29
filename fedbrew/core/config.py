@@ -1540,9 +1540,10 @@ def validate_config(config: FullConfig) -> None:
     _validate_evaluation_model_scope(config)
     _validate_reporting(config.reporting)
     _validate_divergence(config.divergence)
-    _validate_checkpoint_selection(config.runtime.extra.get("checkpointing"))
+    _validate_checkpoint_selection(resolved_checkpointing(config))
     _validate_checkpoint_metric_is_emitted(config)
     _validate_divergence_metric_is_reachable(config)
+    _refuse_a_ceiling_on_a_max_metric(config)
     _validate_unhonoured_client_options(config)
     _refuse_frozen_off_examples(config)
     _validate_unknown_keys(config)
@@ -1854,12 +1855,8 @@ def _validate_evaluation(config: FullConfig) -> None:
                 "resample:<N>."
             )
 
-    checkpointing = config.runtime.extra.get("checkpointing")
-    selects_best = (
-        isinstance(checkpointing, Mapping)
-        and bool(checkpointing.get("enabled", True))
-        and bool(checkpointing.get("save_best", True))
-    )
+    checkpointing = resolved_checkpointing(config)
+    selects_best = bool(checkpointing.get("enabled", True)) and bool(checkpointing["save_best"])
     if (
         selects_best
         and parse_evaluation_schedule(config.evaluation.val.every, "evaluation.val") is None
@@ -1899,15 +1896,11 @@ def _validate_checkpoint_model_scope(config: FullConfig) -> None:
     """
 
     scope = config.evaluation.model_scope
-    checkpointing = config.runtime.extra.get("checkpointing")
-    if not isinstance(checkpointing, Mapping):
-        return
-    if not bool(checkpointing.get("save_best", True)):
+    checkpointing = resolved_checkpointing(config)
+    if not bool(checkpointing["save_best"]):
         return
 
-    from fedbrew.core.checkpointing import DEFAULT_SELECTION_METRIC
-
-    best_metric = str(checkpointing.get("best_metric", DEFAULT_SELECTION_METRIC))
+    best_metric = str(checkpointing["best_metric"])
     wants_personal = best_metric.startswith(PERSONAL_SPLIT_PREFIX)
     emits_personal = scope in {"personal", "both"}
     emits_global = scope in {"global", "both"}
@@ -1941,15 +1934,11 @@ def _validate_checkpoint_metric_is_emitted(config: FullConfig) -> None:
     the val_ prefix both of those have already checked.
     """
 
-    checkpointing = config.runtime.extra.get("checkpointing")
-    if not isinstance(checkpointing, Mapping):
-        return
-    if not bool(checkpointing.get("save_best", True)):
+    checkpointing = resolved_checkpointing(config)
+    if not bool(checkpointing["save_best"]):
         return
 
-    from fedbrew.core.checkpointing import DEFAULT_SELECTION_METRIC
-
-    best_metric = str(checkpointing.get("best_metric", DEFAULT_SELECTION_METRIC))
+    best_metric = str(checkpointing["best_metric"])
     scope = config.evaluation.model_scope
     splits = []
     if scope in {"global", "both"}:
@@ -2001,7 +1990,7 @@ def checkpoint_selection_problem(config: FullConfig) -> str | None:
     """
 
     checks = (
-        lambda: _validate_checkpoint_selection(config.runtime.extra.get("checkpointing")),
+        lambda: _validate_checkpoint_selection(resolved_checkpointing(config)),
         lambda: _validate_checkpoint_model_scope(config),
         lambda: _validate_checkpoint_metric_is_emitted(config),
     )
@@ -2146,6 +2135,114 @@ def _validate_reporting(reporting: ReportingConfig) -> None:
         raise RunRefused("reporting.statistics.worst_percent must be between 0 and 100")
 
 
+def task_metric_directions(config: FullConfig) -> dict[str, str]:
+    """What the run's task declares it reports, each with the side that is better.
+
+    ``TaskAdapter.METRICS`` read off the task registry (chapter 12 section 6):
+    ``{"loss": "min", "accuracy": "max"}`` for classification,
+    ``{"loss": "min", "optimality_gap": "min", ...}`` for a quadratic. A task
+    that declares nothing is taken to be classification-shaped, as every
+    consumer did before tasks declared their metrics.
+    """
+
+    from fedbrew.core.registry import register_builtin_components, tasks
+
+    try:
+        register_builtin_components()
+        declared = tasks.metrics(config.task.name)
+    except Exception:  # noqa: BLE001 - as _validate_registered_names: a
+        # registration that raises (an absent optional extra) is a build-time
+        # problem, reported there, not a reason to refuse here.
+        declared = None
+    return dict(declared) if declared else {"loss": "min", "accuracy": "max"}
+
+
+def default_selection_metric(config: FullConfig) -> str:
+    """The column best.pt is selected on when the config names none.
+
+    The sample-weighted validation accuracy when the task reports accuracy,
+    and the sample-weighted validation loss when it does not -- a quadratic
+    has no accuracy, and the fixed default named a column those runs never
+    write. Under ``model_scope: personal`` the only validation pass is the
+    personalized one, so the name carries its prefix.
+    """
+
+    metric = "accuracy" if "accuracy" in task_metric_directions(config) else "loss"
+    prefix = PERSONAL_SPLIT_PREFIX if config.evaluation.model_scope == "personal" else ""
+    return f"{prefix}val_{metric}_sample_weighted_avg"
+
+
+def resolved_checkpointing(config: FullConfig) -> dict[str, Any]:
+    """``runtime.checkpointing`` with the defaults that depend on the run filled in.
+
+    Every other key takes the same default whether or not the block is written
+    (``checkpoint_config_with_defaults``); these two depend on the run.
+    ``best_metric`` defaults to ``default_selection_metric``, and ``save_best``
+    to whether the run evaluates the validation split at all -- selection
+    needs a validation column, and a stated ``save_best: true`` without one
+    is refused (``_validate_evaluation``). The config itself is not changed:
+    run.json records what the file stated.
+    """
+
+    stated = config.runtime.extra.get("checkpointing")
+    block = dict(stated) if isinstance(stated, Mapping) else {}
+    block.setdefault("best_metric", default_selection_metric(config))
+    if "save_best" not in block:
+        try:
+            evaluated = (
+                parse_evaluation_schedule(config.evaluation.val.every, "evaluation.val") is not None
+            )
+        except ValueError:
+            # Reported by _validate_evaluation; the per-key default meanwhile.
+            evaluated = True
+        block["save_best"] = evaluated
+    return block
+
+
+def divergence_direction(config: FullConfig) -> str:
+    """Whether ``divergence.metric`` is better lower ("min") or higher ("max").
+
+    From the task's declared metrics (``declared_direction``); a name they do
+    not cover -- a rule's own column, a server diagnostic -- or declare as
+    ``"none"``, read against a target, is watched as lower-is-better, the
+    monitor's one assumption before tasks declared their metrics.
+    """
+
+    from fedbrew.core.metrics import declared_direction
+
+    direction = declared_direction(config.divergence.metric, task_metric_directions(config))
+    return direction if direction in {"min", "max"} else "min"
+
+
+def _refuse_a_ceiling_on_a_max_metric(config: FullConfig) -> None:
+    """Refuse a blow-up ceiling on a metric that is better higher.
+
+    ``blowup_factor`` and ``blowup_absolute`` stop a run whose watched metric
+    rose past a ceiling. That is a blow-up only for a metric that is better
+    lower; on ``fit_accuracy`` it would call improvement a divergence and stop
+    the run for learning. Patience and ``non_finite`` watch either direction.
+    """
+
+    divergence = config.divergence
+    if divergence is None or not divergence.active or divergence_direction(config) != "max":
+        return
+    stated = [
+        name
+        for name in ("blowup_factor", "blowup_absolute")
+        if getattr(divergence, name) is not None
+    ]
+    if stated:
+        raise RunRefused(
+            f"divergence.{' and divergence.'.join(stated)} "
+            f"{'stop' if len(stated) > 1 else 'stops'} a run whose metric rises past a "
+            f"ceiling, and divergence.metric={divergence.metric!r} is better higher "
+            f"(the {config.task.name} task declares it so): a rise there is learning, "
+            f"not a blow-up. Set {' and '.join(f'{name}: null' for name in stated)}, "
+            "or watch a metric that is better lower; patience and non_finite watch "
+            "either direction."
+        )
+
+
 def _validate_divergence(divergence: DivergenceConfig) -> None:
     if not isinstance(divergence.non_finite, bool):
         raise RunRefused("divergence.non_finite must be a boolean")
@@ -2218,10 +2315,7 @@ def _validate_checkpoint_selection(checkpointing: object) -> None:
     if not bool(checkpointing.get("save_best", True)):
         return
 
-    from fedbrew.core.checkpointing import (
-        DEFAULT_SELECTION_METRIC,
-        validate_selection_metric,
-    )
+    from fedbrew.core.checkpointing import DEFAULT_SELECTION_METRIC, validate_selection_metric
 
     validate_selection_metric(str(checkpointing.get("best_metric", DEFAULT_SELECTION_METRIC)))
 

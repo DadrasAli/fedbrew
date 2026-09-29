@@ -180,6 +180,42 @@ RULE_FIT_METRICS: Mapping[str, frozenset[str]] = {
 POST_FIT_RULE_METRICS = frozenset({"fit_total_loss"})
 
 
+#: The split a round-record name starts with. ``fit_`` is the post-fit pass,
+#: the other four the evaluation passes; ``personal_`` goes in front of a
+#: personalized pass's split and is taken off first.
+_SPLIT_PREFIXES = ("central_test_", "fit_", "train_", "val_", "test_")
+#: Aggregates of one metric across clients that keep its direction: an
+#: average, an extreme or the worst-percent mean of accuracies is still better
+#: higher. ``_std``, ``_variance`` and ``_num_clients`` are not.
+_SAME_DIRECTION_AGGREGATE = re.compile(r"_(?:sample_weighted_avg|avg|min|max|worst[0-9p]+)$")
+
+
+def declared_direction(name: str, directions: Mapping[str, str]) -> str | None:
+    """ "min" or "max" for a round-record column, from the task's declared metrics.
+
+    ``directions`` is the task's ``METRICS``. The column is a split prefix,
+    one declared metric and, for an evaluation aggregate, a suffix that keeps
+    the metric's direction: ``fit_accuracy``, ``val_loss_sample_weighted_avg``,
+    ``test_accuracy_worst10`` and ``central_test_optimality_gap`` all have
+    one. None for anything else -- a rule's own column such as
+    ``fit_proximal_loss``, a server diagnostic, a spread.
+    """
+
+    rest = name.removeprefix("personal_")
+    for prefix in _SPLIT_PREFIXES:
+        if rest.startswith(prefix):
+            rest = rest[len(prefix) :]
+            break
+    else:
+        return None
+    if rest in directions:
+        return directions[rest]
+    base = _SAME_DIRECTION_AGGREGATE.sub("", rest)
+    if base != rest and base in directions:
+        return directions[base]
+    return None
+
+
 def filter_metrics(
     metrics: dict[str, float],
     requested: list[str],

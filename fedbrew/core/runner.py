@@ -24,9 +24,11 @@ from fedbrew.core.batched_evaluator import evaluator_for
 from fedbrew.core.batched_executor import select_executor
 from fedbrew.core.config import (
     FullConfig,
+    divergence_direction,
     evaluates_round,
     load_config,
     parse_evaluation_schedule,
+    resolved_checkpointing,
     validate_config,
 )
 from fedbrew.core.console import (
@@ -243,11 +245,15 @@ def _run_loop(
         global_rounds=config.server.global_rounds or 0,
         output_dir=output_dir,
         resume_from=config.runtime.extra.get("resume_from"),
-        checkpointing=config.runtime.extra.get("checkpointing"),
+        # The stated block with the two defaults that depend on the run
+        # filled in (config.resolved_checkpointing); every other key takes
+        # checkpoint_config_with_defaults' default, block or no block.
+        checkpointing=resolved_checkpointing(config),
         evaluation=config.evaluation,
         reporting=config.reporting,
         evaluation_seed=config.experiment.seed,
         divergence=config.divergence,
+        divergence_direction=divergence_direction(config),
         flush_every=config.runtime.extra.get("flush_every", 1),
         on_round_end=_round_progress_reporter(config, progress),
         on_round_flush=_run_json_writer(config, run_metadata, output_dir, run_started),

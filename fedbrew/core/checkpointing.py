@@ -16,11 +16,15 @@ from fedbrew.core.refusal import RunRefused
 
 _CHECKPOINT_NAME_PATTERN = re.compile(r"round_(\d+)\.pt$")
 
-#: The default metric best.pt is selected on. It is a validation metric, and
-#: validate_selection_metric below refuses anything that is not, because
-#: selecting the reported checkpoint by its test score is model selection on
-#: the test set: the reported number is then optimistically biased, and the
-#: bias grows with the number of rounds you select over.
+#: The metric best.pt is selected on when nothing else names one. A run's
+#: default comes from its task (``config.default_selection_metric``: this for
+#: a task that reports accuracy, the validation loss for one that does not);
+#: this is the fallback for a caller that passes no resolved block. It is a
+#: validation metric, and validate_selection_metric below refuses anything
+#: that is not, because selecting the reported checkpoint by its test score
+#: is model selection on the test set: the reported number is then
+#: optimistically biased, and the bias grows with the number of rounds you
+#: select over.
 DEFAULT_SELECTION_METRIC = "val_accuracy_sample_weighted_avg"
 
 #: Direction is a property of the metric, not a free choice -- loss goes down,
@@ -79,21 +83,18 @@ def checkpoint_config_with_defaults(
 ) -> dict[str, Any]:
     """Return a normalized checkpoint policy.
 
-    A missing config keeps the historical behavior: save every numbered round
-    checkpoint and do not create latest/best aliases.
+    Each key takes the same default whether or not the block is written: a
+    missing block is an empty one. It used to keep an older behaviour of its
+    own -- every round checkpointed, no latest.pt or best.pt, no pruning --
+    the opposite of the per-key defaults, so a reader who knew those got the
+    other policy, and filled a disk quota (docs/04 section 7.3). A run passes
+    the block through ``config.resolved_checkpointing`` first, which fills
+    ``best_metric`` from the task and ``save_best`` from whether validation
+    is evaluated; the defaults below are for a caller that did not.
     """
 
     if checkpoint_config is None:
-        return {
-            "enabled": True,
-            "interval": 1,
-            "save_last": False,
-            "save_best": False,
-            "best_metric": DEFAULT_SELECTION_METRIC,
-            "best_mode": selection_mode_for_metric(DEFAULT_SELECTION_METRIC),
-            "keep_last": None,
-            "save_every_round": True,
-        }
+        checkpoint_config = {}
 
     best_metric = str(checkpoint_config.get("best_metric", DEFAULT_SELECTION_METRIC))
     return {

@@ -501,24 +501,34 @@ on every call. Naming one now fails with its reason: `batch_size`, `shuffle`,
 
 ### 7.3 `runtime.checkpointing`
 
-The defaults depend on whether the **block** is present, and the two sets are
-opposites — `checkpoint_config_with_defaults` (`fedbrew/core/checkpointing.py`).
+Each key takes the same default whether or not the block is written: an
+absent block is an empty one — `checkpoint_config_with_defaults`
+(`fedbrew/core/checkpointing.py`). Two defaults depend on the run, and
+`resolved_checkpointing` (`fedbrew/core/config.py`) fills them in before the
+loop reads the block.
 
-| Key | Default when the block is present | Default when the whole block is absent |
-| --- | --- | --- |
-| `enabled` | `true` | `true` |
-| `interval` | `1` | `1` |
-| `save_last` | **`true`** | **`false`** |
-| `save_best` | **`true`** | **`false`** |
-| `save_every_round` | **`false`** | **`true`** |
-| `keep_last` | **`3`** | **`null` — never prune** |
-| `best_metric` | `val_accuracy_sample_weighted_avg` | same |
+| Key | Default |
+| --- | --- |
+| `enabled` | `true` |
+| `interval` | `1` |
+| `save_last` | `true` |
+| `save_best` | `true` when the run evaluates the validation split, `false` when `evaluation.val.every` is `never` |
+| `save_every_round` | `false` |
+| `keep_last` | `3` |
+| `best_metric` | `val_accuracy_sample_weighted_avg` when the task reports accuracy, else `val_loss_sample_weighted_avg`; `personal_`-prefixed under `model_scope: personal` |
 
-So a config with no `checkpointing` block writes a numbered checkpoint **every
-round**, never writes `latest.pt` or `best.pt`, and **never prunes** — the
-reverse of every per-key default. A reader who knows the documented defaults
-gets the opposite behaviour on such a config. All shipped configs now carry the
-block.
+An absent block used to take a policy of its own — a numbered checkpoint every
+round, no `latest.pt` or `best.pt`, no pruning — the reverse of every per-key
+default, so a reader who knew those got the opposite behaviour and a disk
+quota filled quietly. The fixed `best_metric` default named a column a task
+without accuracy (every example problem) never writes. Both default from the
+run now: `best_metric` from the task's declared metrics (chapter 12 §6), and
+`save_best` from whether there is a validation column to select on at all, so
+a minimal config on data without a validation split loads; a stated
+`save_best: true` without one is still refused. Every shipped config states
+the block, and names `best_metric` wherever `save_best` is on, so none of them
+changed. `run.json` records the block as the file stated it; the plan header's
+`checkpoint selects on` row marks a default metric "(the task's default)".
 
 `best_mode` is **derived from `best_metric`'s name, never configured**, and
 `best_metric` must be a `val_` or `personal_val_` metric. Chapter 08 §11.
@@ -821,7 +831,7 @@ Collected, because a reader of a config cannot see any of them.
 | `runtime.performance.dataloader.persistent_workers` / `prefetch_factor` | torch's defaults, **and unreachable at `num_workers: 0`** | no effect as shipped |
 | `runtime.data_staging.local_root` | `null` | staging silently does nothing |
 | `server.server_optimizer` | required only for `fedopt` | never exercised by a shipped arm |
-| `runtime.checkpointing.*` with the block absent | the **opposite** of the per-key defaults | §7.3 |
+| `runtime.checkpointing.best_metric`, `save_best` | from the task and the validation schedule | §7.3 |
 
 Two more were implicit and are now written into every shipped config rather
 than documented: `numerics.matmul_precision` and
@@ -878,8 +888,9 @@ python -m pytest tests/test_unknown_config_keys.py \
    load; either something reads the key or the key should not be written.
 3. **A removed key gets an entry in `_REMOVED_KEYS`, not a silent deletion.**
    The reason is shown to whoever still has it in a config.
-4. **The absent-block checkpoint defaults are the opposite of the per-key
-   ones.** Any change to one set must state what happens to the other.
+4. **An absent checkpointing block is an empty one.** There is one set of
+   defaults; `best_metric` and `save_best` are the two that depend on the
+   run, and `resolved_checkpointing` is where they are filled in.
 5. **The `numerics` block must be stated in full in every shipped config,
    resolved.** Written in the config or in the family base it extends (§2.2),
    all six keys. Guarded; a new config omitting one fails.
@@ -915,9 +926,10 @@ python -m pytest tests/test_unknown_config_keys.py \
 
 ### Known failure modes
 
-- **Copying a config that omits `checkpointing`.** The absent-block defaults
-  are the opposite of the per-key ones: every round checkpointed, no `best.pt`,
-  no pruning. This fills a disk quota quietly.
+- **Copying a config that omits `checkpointing` from before the defaults were
+  unified.** Its run now keeps `latest.pt`, prunes to the last three numbered
+  checkpoints and, if validation is evaluated, writes `best.pt`, where it used
+  to keep every round and neither file.
 - **Assuming an unknown key is ignored.** It is a load error. That is the
   point — but it means a config from an older revision may not load, and the
   error names the reason.

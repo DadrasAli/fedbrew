@@ -29,6 +29,8 @@ from fedbrew.core.config import (
     ClientStatisticsConfig,
     FullConfig,
     client_metric_names,
+    resolved_checkpointing,
+    task_metric_directions,
     worst_percent_label,
 )
 from fedbrew.core.console import (
@@ -438,6 +440,12 @@ def _metrics_rows(config: FullConfig, *, verbose: bool) -> list[Row]:
     checkpointing = config.runtime.extra.get("checkpointing")
     if isinstance(checkpointing, Mapping) and checkpointing.get("best_metric"):
         rows.append(Row("checkpoint selects on", str(checkpointing["best_metric"])))
+    else:
+        resolved = resolved_checkpointing(config)
+        if resolved["save_best"] and bool(resolved.get("enabled", True)):
+            rows.append(
+                Row("checkpoint selects on", f"{resolved['best_metric']} (the task's default)")
+            )
     rows.append(Row("divergence watches", config.divergence.metric))
 
     planned = _planned_metric_names(config)
@@ -1278,14 +1286,7 @@ def _progress_metric_names(config: FullConfig | None) -> list[str]:
 def _task_metrics(config: FullConfig) -> dict[str, str]:
     """What the run's task reports (``TaskAdapter.METRICS``); loss and accuracy if undeclared."""
 
-    from fedbrew.core.registry import register_builtin_components, tasks
-
-    register_builtin_components()
-    try:
-        declared = tasks.metrics(config.task.name)
-    except KeyError:
-        declared = None
-    return dict(declared) if declared else {"loss": "min", "accuracy": "max"}
+    return task_metric_directions(config)
 
 
 def _fit_metric_names(config: FullConfig) -> list[str]:

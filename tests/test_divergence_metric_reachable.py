@@ -196,7 +196,7 @@ class ItStaysQuietWhenTheMetricSurvivesTest(unittest.TestCase):
 
         config = _config(
             fit_metrics=["fit_accuracy"],
-            divergence_metric="val_accuracy_sample_weighted_avg",
+            divergence_metric="val_loss_sample_weighted_avg",
         )
         self.assertFalse(_refuses(config))
 

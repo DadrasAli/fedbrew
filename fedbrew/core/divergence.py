@@ -18,6 +18,13 @@ Three detectors, deliberately reported as two different statuses:
     The run is still finite but has stopped improving. That is a weaker and
     different claim -- reporting a plateau as divergence would misstate a
     sweep -- so it gets its own status and is off unless asked for.
+
+Which side of the metric is better comes from the task's declared metrics
+(``config.divergence_direction``). ``DivergenceMonitor`` watches a metric that
+is better lower, as every shipped config's ``fit_loss`` is;
+``_HigherIsBetterMonitor`` reverses what patience counts as an improvement for
+one that is better higher. The two blow-up ceilings are refused on such a
+metric at load, where a rise is learning.
 """
 
 from __future__ import annotations
@@ -313,6 +320,66 @@ class DivergenceMonitor:
                 f"(round {self._best_round}) in {self._since_best} evaluations"
             ),
         )
+
+
+class _HigherIsBetterMonitor(DivergenceMonitor):
+    """The monitor for a metric that is better higher, such as ``fit_accuracy``.
+
+    Only patience has a direction: ``non_finite`` has none, and config load
+    refuses both blow-up ceilings on such a metric, so a finite value goes to
+    patience alone. An improvement is a rise of at least ``min_delta`` of the
+    best value's magnitude, the mirror of ``_check_patience``'s rule.
+    """
+
+    def _evaluate(self, round_id: int, value: float) -> DivergenceVerdict | None:
+        if not math.isfinite(value):
+            # The non_finite verdict, or the round ignored: the base class
+            # returns before any directional check for a non-finite value.
+            return super()._evaluate(round_id, value)
+        return self._check_patience_for_a_rise(round_id, value)
+
+    def _track_best(self, round_id: int, value: float) -> None:
+        if self._best_value is None or self._best_round is None:
+            improved = True
+        else:
+            required = self._best_value + abs(self._best_value) * float(self._config.min_delta)
+            improved = value >= required
+        if improved:
+            self._best_value = value
+            self._best_round = round_id
+            self._since_best = 0
+        else:
+            self._since_best += 1
+
+    def _check_patience_for_a_rise(self, round_id: int, value: float) -> DivergenceVerdict | None:
+        patience = self._config.patience
+        if patience is None:
+            return None
+        self._track_best(round_id, value)
+        if self._since_best == 0 or self._since_best < patience:
+            return None
+        return DivergenceVerdict(
+            status=STATUS_STALLED,
+            detector="patience",
+            round_id=round_id,
+            metric=self._config.metric,
+            value=value,
+            threshold=self._best_value,
+            reason=(
+                f"{self._config.metric} has not improved on {self._best_value:.6g} "
+                f"(round {self._best_round}) in {self._since_best} evaluations"
+            ),
+        )
+
+
+def divergence_monitor(config: DivergenceConfig, direction: str = "min") -> DivergenceMonitor:
+    """The monitor for ``config``'s metric, which is better lower ("min") or higher ("max")."""
+
+    if direction == "max":
+        return _HigherIsBetterMonitor(config)
+    if direction != "min":
+        raise ValueError(f"divergence direction must be 'min' or 'max', got {direction!r}")
+    return DivergenceMonitor(config)
 
 
 def _metric_value(metrics: dict[str, float] | None, name: str) -> float | None:

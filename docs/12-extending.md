@@ -538,8 +538,11 @@ target. The plan header builds its column list from it without building the
 task -- `fit_<name>` and `central_test_<name>` for each, and the client splits'
 aggregates of the ones among `loss` and `accuracy`, which are all the client
 evaluation path keeps -- and `tests/test_planned_columns_every_task.py` holds
-that list to what each shipped config writes. A task registered without it is
-planned as reporting loss and accuracy, as a classification task does.
+that list to what each shipped config writes. The same declaration picks the
+default checkpoint-selection metric (validation accuracy if declared, else
+validation loss) and the side the divergence monitor treats as better
+(chapter 08 §11 and §12). A task registered without it is planned as
+reporting loss and accuracy, as a classification task does.
 
 Implement `evaluate_model(model, data)` as well unless you want no central test
 set. It is not abstract — `eval_step` is per batch and required, this scores a

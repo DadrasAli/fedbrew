@@ -42,6 +42,7 @@ from fedbrew.core.divergence import (
     STATUS_DIVERGED,
     DivergenceMonitor,
     DivergenceVerdict,
+    divergence_monitor,
 )
 from fedbrew.core.execution import (
     Aggregator,
@@ -146,6 +147,9 @@ def run_fl_loop(
     reporting: ReportingConfig | None = None,
     evaluation_seed: int | None = None,
     divergence: DivergenceConfig | None = None,
+    # Which side of divergence.metric is better, from the task's declared
+    # metrics (config.divergence_direction); "min" is every shipped config's.
+    divergence_direction: str = "min",
     # Write the CSV rows, run.json and latest.pt every flush_every rounds
     # (runtime.flush_every), each fsynced then; 1 writes every round. Between
     # flushes the rows wait in memory and the numbered and best checkpoints
@@ -167,7 +171,7 @@ def run_fl_loop(
     evaluation = evaluation or EvaluationConfig()
     reporting = reporting or ReportingConfig()
     statistics = reporting.statistics
-    monitor = DivergenceMonitor(divergence or DivergenceConfig())
+    monitor = divergence_monitor(divergence or DivergenceConfig(), divergence_direction)
     # Every split declares its own schedule and its own client set, so the
     # three passes are priced independently: train is a cheap diagnostic over
     # this round's trainers, val is what selection reads, test is the reported
