@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import gc
 import unittest
+from unittest import mock
 
 from fedbrew.core import loop
 from fedbrew.core.protocol import FitRequest, FitResult
@@ -72,10 +73,19 @@ class LongLivedObjectsTest(unittest.TestCase):
 
     def test_what_the_process_froze_itself_is_left_to_it(self) -> None:
         gc.freeze()
-        before = gc.get_freeze_count()
-        seen = _run()
-        self.assertTrue(all(count == before for _, count in seen))
-        self.assertEqual(gc.get_freeze_count(), before)
+        with (
+            mock.patch.object(gc, "freeze", wraps=gc.freeze) as freeze,
+            mock.patch.object(gc, "unfreeze", wraps=gc.unfreeze) as unfreeze,
+        ):
+            _run()
+        # The run neither froze more nor released what the process froze.
+        # The count of frozen objects cannot say so: an object frozen here
+        # that another thread lets go of while the run goes on (an earlier
+        # test's idle executor, tqdm's monitor) leaves the count, so it fell
+        # mid-run once in a serial run of the whole suite.
+        freeze.assert_not_called()
+        unfreeze.assert_not_called()
+        self.assertGreater(gc.get_freeze_count(), self.start)
 
     def test_nothing_is_frozen_with_the_collector_off(self) -> None:
         gc.disable()
