@@ -465,6 +465,13 @@ class PL1DTask(TaskAdapter):
     used to read them off the task directly, and one still does.
     """
 
+    #: What compute_metrics reports, and which side of each is better (TaskAdapter.METRICS).
+    METRICS = {
+        "loss": "min",
+        "optimality_gap": "min",
+        "distance_to_optimum": "min",
+    }
+
     #: The batched executor's form of a stacked step's gradients: one backward
     #: through the per-client losses' sum, which is faster for this problem's
     #: few, tiny parameters than vmap(grad) -- 4.86 against 5.90 ms a round
@@ -806,7 +813,9 @@ def register() -> None:
         generate_pl_1d_from_config,
         sections={"problem": {"shift_scale"}},
     )
-    registry.tasks.register(TASK_NAME, lambda **kwargs: PL1DTask(**kwargs))
+    registry.tasks.register(
+        TASK_NAME, lambda **kwargs: PL1DTask(**kwargs), metrics=PL1DTask.METRICS
+    )
     registry.models.register(MODEL_NAME, build_pl_scalar, task=TASK_NAME)
 
 

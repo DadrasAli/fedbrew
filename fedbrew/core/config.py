@@ -290,6 +290,7 @@ def worst_percent_label(worst_percent: float) -> str:
 def client_metric_names(
     split: str,
     statistics: ClientStatisticsConfig,
+    bases: Iterable[str] = CLIENT_METRIC_BASES,
 ) -> set[str]:
     """Every aggregate name one evaluated split emits under this configuration.
 
@@ -305,6 +306,10 @@ def client_metric_names(
     record. Selecting on it is refused a step earlier, by
     ``validate_selection_metric``, which wants a direction word the name does
     not carry. P07-F06.
+
+    ``bases`` are the metrics the client evaluation reports: loss and accuracy
+    by default, which is every metric it can report; the plan header passes
+    the ones the run's task declares (a quadratic has no accuracy).
     """
 
     suffixes = ["sample_weighted_avg", "avg"]
@@ -318,7 +323,7 @@ def client_metric_names(
         suffixes.append("max")
     if statistics.worst_percent:
         suffixes.append(f"worst{worst_percent_label(statistics.worst_percent)}")
-    names = {f"{split}_{metric}_{suffix}" for metric in CLIENT_METRIC_BASES for suffix in suffixes}
+    names = {f"{split}_{metric}_{suffix}" for metric in bases for suffix in suffixes}
     names.add(f"{split}_num_clients")
     return names
 

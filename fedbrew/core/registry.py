@@ -255,6 +255,70 @@ class ModelRegistry(Registry[ModelFactory]):
         MODEL_TASKS[name] = task
 
 
+class TaskRegistry(Registry[TaskFactory]):
+    """The task registry, which also records the metrics each task reports."""
+
+    def __init__(self, label: str) -> None:
+        super().__init__(label)
+        self._metrics: dict[str, Mapping[str, str] | Callable[[], Mapping[str, str] | None]] = {}
+
+    def register(  # type: ignore[override]
+        self,
+        name: str,
+        obj: TaskFactory,
+        *,
+        metrics: Mapping[str, str] | Callable[[], Mapping[str, str] | None] | None = None,
+        origin: str | None = None,
+        config_keys: Iterable[str] = (),
+    ) -> None:
+        """Register a task factory together with the metrics its task reports.
+
+        Args:
+            name: The ``task.name`` a model registers under.
+            obj: The factory.
+            metrics: The task class's ``METRICS`` -- each name its
+                ``compute_metrics`` reports, with ``"min"``, ``"max"`` or ``"none"`` for
+                the side that is better -- or a function returning it, for a
+                built-in whose class is imported only when it is built. None
+                for a task that declares nothing: the plan header then takes
+                it to report loss and accuracy.
+            origin, config_keys: As for ``Registry.register``.
+        """
+
+        if metrics is not None and not callable(metrics):
+            _check_task_metrics(name, metrics)
+        super().register(name, obj, origin=origin, config_keys=config_keys)
+        if metrics is not None:
+            self._metrics[name] = metrics
+
+    def metrics(self, name: str) -> Mapping[str, str] | None:
+        """The metrics a registered task declared, or None if it declared none."""
+
+        if name not in self._items:
+            raise KeyError(f"Object is not registered: {name}")
+        declared = self._metrics.get(name)
+        if callable(declared):
+            declared = declared()
+            if declared is not None:
+                _check_task_metrics(name, declared)
+        return None if declared is None else dict(declared)
+
+
+def _check_task_metrics(name: str, metrics: Mapping[str, str]) -> None:
+    from fedbrew.tasks.base import METRIC_DIRECTIONS
+
+    if not isinstance(metrics, Mapping) or not metrics:
+        raise ValueError(f"tasks: {name!r} declares metrics that are not a non-empty mapping")
+    for metric, direction in metrics.items():
+        if not isinstance(metric, str) or not metric.strip():
+            raise ValueError(f"tasks: {name!r} declares a metric name {metric!r}")
+        if direction not in METRIC_DIRECTIONS:
+            raise ValueError(
+                f"tasks: {name!r} declares {metric!r} as {direction!r}; a direction is "
+                f"{', '.join(sorted(METRIC_DIRECTIONS))}"
+            )
+
+
 def task_for_model(model_name: str) -> str:
     """Return the task adapter a model requires."""
 
@@ -425,7 +489,7 @@ class GeneratorRegistry(Registry[GeneratorSpec]):
 
 server_strategies: Registry[ServerFactory] = Registry("server_strategies", config_section="server")
 client_updates: Registry[ClientFactory] = Registry("client_updates", config_section="client")
-tasks: Registry[TaskFactory] = Registry("tasks")
+tasks: TaskRegistry = TaskRegistry("tasks")
 datasets: Registry[DatasetFactory] = Registry("datasets", config_section="data")
 models: ModelRegistry = ModelRegistry("models")
 generators: GeneratorRegistry = GeneratorRegistry("generators")
@@ -468,8 +532,10 @@ def register_builtin_components() -> None:
     _register_once(models, "tiny_gpt2", _build_tiny_gpt2, task="causal_lm")
     _register_once(models, "hf_causal_lm", _build_hf_causal_lm, task="causal_lm")
     _register_once(models, "hf_causal_lm_lora", _build_hf_causal_lm_lora, task="causal_lm")
-    _register_once(tasks, "classification", _build_torch_classification_task)
-    _register_once(tasks, "causal_lm", _build_torch_causal_lm_task)
+    _register_once(
+        tasks, "classification", _build_torch_classification_task, metrics=_classification_metrics
+    )
+    _register_once(tasks, "causal_lm", _build_torch_causal_lm_task, metrics=_causal_lm_metrics)
     # Generators by name, resolved on first use: registering them imports no
     # torchvision, no transformers and no generator module.
     _register_once(
@@ -709,6 +775,20 @@ def _build_torch_causal_lm_task(*args: Any, **kwargs: Any) -> TaskAdapter:
         from fedbrew.tasks.causal_lm.torch_causal_lm import TorchCausalLMTask
 
     return TorchCausalLMTask(*args, **kwargs)
+
+
+def _classification_metrics() -> Mapping[str, str] | None:
+    with _suppress_torch_numpy_warning():
+        from fedbrew.tasks.classification.torch_classification import TorchClassificationTask
+
+    return TorchClassificationTask.METRICS
+
+
+def _causal_lm_metrics() -> Mapping[str, str] | None:
+    with _suppress_torch_numpy_warning():
+        from fedbrew.tasks.causal_lm.torch_causal_lm import TorchCausalLMTask
+
+    return TorchCausalLMTask.METRICS
 
 
 def _build_delta_sgd_client(*args: Any, **kwargs: Any) -> ClientUpdate:

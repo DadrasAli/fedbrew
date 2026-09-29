@@ -653,6 +653,16 @@ class DriftQuadTask(TaskAdapter):
     ``_scaler`` are here.
     """
 
+    #: What compute_metrics reports, and which side of each is better (TaskAdapter.METRICS).
+    #: distance_to_client_optimum is the drift meter: near zero is a local iterate that has drifted
+    #: to its own minimiser, so neither side is better.
+    METRICS = {
+        "loss": "min",
+        "optimality_gap": "min",
+        "distance_to_optimum": "min",
+        "distance_to_client_optimum": "none",
+    }
+
     #: The batched executor's form of a stacked step's gradients: one backward
     #: through the per-client losses' sum, which is faster for this problem's
     #: few, tiny parameters than vmap(grad) -- 8.54 against 10.66 ms a round
@@ -1019,7 +1029,9 @@ def register() -> None:
         generate_drift_quad_from_config,
         sections={"problem": {"dim", "condition_number", "dissimilarity"}},
     )
-    registry.tasks.register(TASK_NAME, lambda **kwargs: DriftQuadTask(**kwargs))
+    registry.tasks.register(
+        TASK_NAME, lambda **kwargs: DriftQuadTask(**kwargs), metrics=DriftQuadTask.METRICS
+    )
     registry.models.register(MODEL_NAME, build_quad_vector, task=TASK_NAME)
 
 

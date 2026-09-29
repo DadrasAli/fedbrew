@@ -108,6 +108,8 @@ NOT_REFUSALS = frozenset(
         ("fedbrew/core/registry.py", "_config_key_set"),
         ("fedbrew/core/registry.py", "_frozen_key_set"),
         ("fedbrew/core/registry.py", "registering_from"),
+        # A task's declared metrics (TaskAdapter.METRICS), checked at registration.
+        ("fedbrew/core/registry.py", "_check_task_metrics"),
         # Also the duplicate-name refusal, which is both: two configured
         # extensions claiming one name is input, while a built-in or one extension
         # registering a name twice is a bug. The message names both origins, so
@@ -546,7 +548,7 @@ class EveryRefusingModuleRaisesARefusalTest(unittest.TestCase):
                     if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
                     and node.name == function_name
                 ]
-                # One or more: registry.py defines `register` on three classes.
+                # One or more: registry.py defines `register` on four classes.
                 self.assertNotEqual(functions, [])
                 self.assertTrue(
                     any(

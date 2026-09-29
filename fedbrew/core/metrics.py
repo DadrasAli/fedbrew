@@ -174,6 +174,47 @@ CLIENT_UNFILTERED_FIT_METRICS: Mapping[str, frozenset[str]] = {
 }
 
 
+_VOLUME = frozenset({"communicated_parameters", "communicated_bytes"})
+
+#: Everything an update rule's fit result carries beside the task's own
+#: ``fit_<metric>`` names, as it reaches the server with no metrics list in
+#: force: the rule's algorithm columns (docs/08 §4.2). The FedAvg family's
+#: are CLIENT_UNFILTERED_FIT_METRICS, exempt from ``client.metrics``; the
+#: other four rules' go through ``client.metrics`` with the task's. The server
+#: diagnostics are SERVER_DIAGNOSTIC_METRICS. The plan header's fit columns
+#: are built from this, and tests/test_planned_columns_are_written.py runs
+#: every rule on every task to hold it to what is written. An update rule
+#: not listed here (an extension) is planned with the task's metrics alone.
+RULE_FIT_METRICS: Mapping[str, frozenset[str]] = {
+    **CLIENT_UNFILTERED_FIT_METRICS,
+    "fedprox": _VOLUME | {"fit_proximal_loss", "fit_total_loss"},
+    "scaffold": _VOLUME | {"control_delta_norm", "client_control_norm", "local_steps"},
+    "delta_sgd": _BASE_CLIENT_FIT_METRICS
+    | {
+        "client_eta_0",
+        "client_step_size_mean",
+        "client_step_size_min",
+        "client_step_size_max",
+        "client_step_size_final",
+        "step_size_clamp_fraction",
+        "undefined_curvature_fraction",
+    },
+    "fedlalr": _VOLUME
+    | {
+        "client_alpha",
+        "local_steps",
+        "optimizer_steps",
+        "effective_learning_rate_coordinate_mean",
+        "effective_learning_rate_coordinate_min",
+        "effective_learning_rate_coordinate_max",
+    },
+}
+
+#: The rule columns that exist only on a round with a post-fit pass, because
+#: they are built from the task's fit_loss: fedprox's fit_total_loss.
+POST_FIT_RULE_METRICS = frozenset({"fit_total_loss"})
+
+
 def client_fit_extras(update_rule: str) -> frozenset[str]:
     """What this rule's fit result carries past the client's own filter."""
 

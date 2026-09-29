@@ -58,10 +58,12 @@ from fedbrew.core.divergence import DivergenceVerdict
 from fedbrew.core.metrics import (
     FIXED_METRIC_GLOSSES,
     METRIC_SUFFIX_GLOSSES,
+    POST_FIT_RULE_METRICS,
+    RULE_FIT_METRICS,
     SPLIT_GLOSSES,
+    client_fit_extras,
     metric_gloss,
     server_diagnostic_metrics,
-    surviving_client_fit_extras,
 )
 from fedbrew.core.paths import resolve_output_dir
 from fedbrew.core.state import MetricRecord
@@ -169,19 +171,6 @@ def _checkpoint_selection_metric(config: FullConfig | None) -> str | None:
         return None
     metric = checkpointing.get("best_metric")
     return str(metric) if metric else None
-
-
-_FIT_METRIC_DEFAULTS = {
-    "local_sgd": ("fit_loss", "fit_accuracy"),
-    "fedprox": ("fit_loss", "fit_accuracy", "fit_proximal_loss", "fit_total_loss"),
-    "scaffold": (
-        "fit_loss",
-        "fit_accuracy",
-        "control_delta_norm",
-        "client_control_norm",
-        "local_steps",
-    ),
-}
 
 
 def print_plan_header(
@@ -625,23 +614,27 @@ def _output_dir_note(config: FullConfig, resume_from: str | Path | None) -> str 
 def _planned_metric_names(config: FullConfig) -> list[str]:
     """Every column round_metrics.csv will carry, as far as it is knowable.
 
-    Assembled from the sources that already answer this for preflight rather
-    than from a second list: `client_metric_names` for the evaluation
-    aggregates, and the two dictionaries in fedbrew.core.metrics naming what a
-    `client.metrics`/`server.metrics` list is unable to filter out. A column
-    listed here that the run does not write, or written and not listed, would
-    make the header worse than no header.
+    Built from what the run's task declares it reports (``TaskAdapter.METRICS``,
+    read off the task registry) and the rule's own columns
+    (``RULE_FIT_METRICS``): the fit columns through the two metric lists as
+    the client and the server apply them, `client_metric_names` over the
+    task's loss and accuracy for the evaluation aggregates, one
+    ``central_test_<metric>`` per declared metric, and the server's
+    diagnostics. A column listed here that the run does not write, or written
+    and not listed, would make the header worse than no header;
+    tests/test_planned_columns_are_written.py runs every task to hold it.
     """
 
+    task_metrics = _task_metrics(config)
+    bases = [name for name in CLIENT_METRIC_BASES if name in task_metrics]
     names = list(_fit_metric_names(config))
-    names.extend(surviving_client_fit_extras(config.client.update_rule, config.server.metrics))
     for split in ("train", "val", "test"):
         if not _split_is_evaluated(config, split):
             continue
         for metric_split in _model_scope_splits(config.evaluation.model_scope, split):
-            names.extend(sorted(client_metric_names(metric_split, config.client_statistics)))
+            names.extend(sorted(client_metric_names(metric_split, config.client_statistics, bases)))
     if _central_is_evaluated(config):
-        names.extend(("central_test_loss", "central_test_accuracy"))
+        names.extend(f"central_test_{name}" for name in task_metrics)
     names.extend(
         sorted(server_diagnostic_metrics(config.server.strategy, config.client.metrics or ()))
     )
@@ -1299,27 +1292,65 @@ def _progress_metric_names(config: FullConfig | None) -> list[str]:
     if config is None:
         return _ordered_metric_names(names)
 
-    names.extend(
-        name for name in _fit_metric_names(config) if name not in {"fit_loss", "fit_accuracy"}
-    )
+    task_fit = {f"fit_{name}" for name in _task_metrics(config)}
+    names.extend(name for name in _fit_metric_names(config) if name not in task_fit)
     if config.server.strategy == "scaffold":
         names.extend(("server_control_norm", "mean_client_control_delta_norm"))
-    return _ordered_metric_names(_deduplicate(names))
+    # The curated names above are a classification run's; keep the ones this
+    # run writes.
+    planned = set(_planned_metric_names(config))
+    return _ordered_metric_names([name for name in _deduplicate(names) if name in planned])
+
+
+def _task_metrics(config: FullConfig) -> dict[str, str]:
+    """What the run's task reports (``TaskAdapter.METRICS``); loss and accuracy if undeclared."""
+
+    from fedbrew.core.registry import register_builtin_components, tasks
+
+    register_builtin_components()
+    try:
+        declared = tasks.metrics(config.task.name)
+    except KeyError:
+        declared = None
+    return dict(declared) if declared else {"loss": "min", "accuracy": "max"}
 
 
 def _fit_metric_names(config: FullConfig) -> list[str]:
-    server_metrics = list(config.server.metrics)
-    client_metrics = list(config.client.metrics)
-    if not client_metrics and config.task.name == "classification":
-        client_metrics = list(_FIT_METRIC_DEFAULTS.get(config.client.update_rule, ()))
-    elif not client_metrics:
-        client_metrics = list(server_metrics)
+    """The fit columns a round carries: the task's and the rule's, through both metric lists.
 
-    if not server_metrics:
-        return client_metrics
-    if not client_metrics:
-        return server_metrics
-    return [name for name in server_metrics if name in client_metrics]
+    What a client emits -- ``fit_<metric>`` for each metric the task declares,
+    on a round with a post-fit pass (``evaluation.fit.every``), and the rule's
+    own columns (``RULE_FIT_METRICS``) -- goes through ``client.metrics``,
+    which the FedAvg family's extras are exempt from, and then through
+    ``server.metrics``, which exempts nothing. Each filter keeps the listed
+    names that exist, and an empty list keeps everything (``filter_metrics``).
+    """
+
+    from fedbrew.core.config import parse_evaluation_schedule
+
+    rule = config.client.update_rule
+    try:
+        fit_pass = (
+            parse_evaluation_schedule(config.evaluation.fit.every, "evaluation.fit") is not None
+        )
+    except ValueError:
+        fit_pass = True
+    task = [f"fit_{name}" for name in _task_metrics(config)] if fit_pass else []
+    extras = RULE_FIT_METRICS.get(rule, frozenset())
+    if not fit_pass:
+        extras = extras - POST_FIT_RULE_METRICS
+    exempt = client_fit_extras(rule)
+    client_side = _kept([*task, *sorted(extras - exempt)], config.client.metrics)
+    return _kept([*client_side, *sorted(exempt)], config.server.metrics)
+
+
+def _kept(names: list[str], requested: list[str]) -> list[str]:
+    """``filter_metrics`` over names: the requested ones that exist, or all of them."""
+
+    if not requested:
+        return list(names)
+    present = set(names)
+    return [name for name in requested if name in present]
 
 
 # --------------------------------------------------------------------------

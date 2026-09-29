@@ -44,7 +44,7 @@ it is called:
 def register() -> None:
     from fedbrew.core import registry
 
-    registry.tasks.register("my_task", MyTask)
+    registry.tasks.register("my_task", MyTask, metrics=MyTask.METRICS)
 ```
 
 Four rules, and the loader (`fedbrew/core/extensions.py`) enforces them:
@@ -237,7 +237,9 @@ def register() -> None:
         generate_drift_quad_from_config,
         sections={"problem": {"dim", "condition_number", "dissimilarity"}},
     )
-    registry.tasks.register(TASK_NAME, lambda **kwargs: DriftQuadTask(**kwargs))
+    registry.tasks.register(
+        TASK_NAME, lambda **kwargs: DriftQuadTask(**kwargs), metrics=DriftQuadTask.METRICS
+    )
     registry.models.register(MODEL_NAME, build_quad_vector, task=TASK_NAME)
 ```
 
@@ -514,6 +516,16 @@ failure both refusals exist to prevent.
 Register it in `tasks`, and register every model that needs it with `task=`
 naming it. Chapter 06 §3. Its constructor is handed `EXTENSION_TASK_KEYS`
 (§1.4) when it comes from an extension.
+
+Declare what `compute_metrics` reports as the class's `METRICS` and pass it to
+`registry.tasks.register(..., metrics=MyTask.METRICS)`: each name with the side
+that is better, `"min"`, `"max"`, or `"none"` for a diagnostic read against a
+target. The plan header builds its column list from it without building the
+task -- `fit_<name>` and `central_test_<name>` for each, and the client splits'
+aggregates of the ones among `loss` and `accuracy`, which are all the client
+evaluation path keeps -- and `tests/test_planned_columns_every_task.py` holds
+that list to what each shipped config writes. A task registered without it is
+planned as reporting loss and accuracy, as a classification task does.
 
 Implement `evaluate_model(model, data)` as well unless you want no central test
 set. It is not abstract — `eval_step` is per batch and required, this scores a

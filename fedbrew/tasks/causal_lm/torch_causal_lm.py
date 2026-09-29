@@ -29,6 +29,9 @@ class TorchCausalLMTask(TaskAdapter):
     Accuracy is token-level next-token accuracy over non-padding targets.
     """
 
+    #: Token cross-entropy in nats and next-token accuracy (``compute_metrics``).
+    METRICS = {"loss": "min", "accuracy": "max"}
+
     def __init__(
         self,
         model_config: Mapping[str, Any] | None = None,

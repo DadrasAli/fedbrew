@@ -24,6 +24,9 @@ from fedbrew.tasks.base import (
 class TorchClassificationTask(TaskAdapter):
     """Task-specific PyTorch helpers for classification."""
 
+    #: Cross-entropy and the argmax's hit rate (``compute_metrics``).
+    METRICS = {"loss": "min", "accuracy": "max"}
+
     #: The batched executor's form of a stacked step's gradients: vmap(grad).
     #: One backward through the per-client losses' sum was slower on the CPU
     #: -- 141 against 101 ms of local steps a round for the MNIST MLP at 1000

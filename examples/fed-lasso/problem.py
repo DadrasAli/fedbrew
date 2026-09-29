@@ -905,6 +905,18 @@ class FedLassoTask(TaskAdapter):
     rebuilds the spec from the dials recorded there.
     """
 
+    #: What compute_metrics reports, and which side of each is better (TaskAdapter.METRICS).
+    #: support_size and exact_zeros are read against the true support, not as smaller or larger.
+    METRICS = {
+        "loss": "min",
+        "optimality_gap": "min",
+        "distance_to_optimum": "min",
+        "distance_to_truth": "min",
+        "support_size": "none",
+        "support_f1": "max",
+        "exact_zeros": "none",
+    }
+
     #: The batched executor's form of a stacked step's gradients: one backward
     #: through the per-client losses' sum, which is faster for this problem's
     #: few, tiny parameters than vmap(grad) -- 5.98 against 7.82 ms a round
@@ -1354,7 +1366,9 @@ def register() -> None:
             "problem": {"dim", "sparsity", "penalty_strength", "penalty", "noise", "heterogeneity"}
         },
     )
-    registry.tasks.register(TASK_NAME, lambda **kwargs: FedLassoTask(**kwargs))
+    registry.tasks.register(
+        TASK_NAME, lambda **kwargs: FedLassoTask(**kwargs), metrics=FedLassoTask.METRICS
+    )
     registry.models.register(MODEL_NAME, build_lasso_vector, task=TASK_NAME)
 
 

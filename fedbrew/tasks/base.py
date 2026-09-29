@@ -6,7 +6,7 @@ import json
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, ClassVar, Protocol, runtime_checkable
 
 import torch
 from torch import Tensor, nn
@@ -248,8 +248,24 @@ def batch_example_count(batch: Any) -> float:
     return 1.0
 
 
+#: Which side of a task metric is better: smaller, larger, or neither -- a
+#: diagnostic read against a target (a support size against the true one) or
+#: describing where the iterate is rather than how good it is.
+METRIC_DIRECTIONS = frozenset({"min", "max", "none"})
+
+
 class TaskAdapter(ABC):
     """Task-specific bridge used by generic FL orchestration code."""
+
+    #: What ``compute_metrics`` reports, each name with the direction that is
+    #: better: ``"min"``, ``"max"``, or ``"none"`` for neither. Registered with the task
+    #: (``registry.tasks.register(..., metrics=...)``), and read there, without
+    #: building the task, by the plan header: a run writes ``fit_<name>`` and
+    #: ``central_test_<name>`` for each, and the client splits' aggregates of the
+    #: ones among ``loss`` and ``accuracy`` (the client evaluation path keeps
+    #: those two). None for a task that declares nothing, which the header then
+    #: takes to report loss and accuracy.
+    METRICS: ClassVar[Mapping[str, str] | None] = None
 
     @abstractmethod
     def build_model(self, config: Mapping[str, Any]) -> Any:

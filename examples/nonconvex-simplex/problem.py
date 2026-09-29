@@ -623,6 +623,20 @@ def build_simplex_point(config: Mapping[str, Any] | None = None) -> SimplexPoint
 class NonconvexSimplexTask(TaskAdapter):
     """Bridge between the constrained non-convex problem and the FL loop."""
 
+    #: What compute_metrics reports, and which side of each is better (TaskAdapter.METRICS).
+    #: simplex_sum, iterate_norm and mass_on_clique describe where the iterate is, not how good it
+    #: is.
+    METRICS = {
+        "loss": "min",
+        "optimality_gap": "min",
+        "feasible_gap": "min",
+        "distance_to_optimum": "min",
+        "constraint_violation": "min",
+        "simplex_sum": "none",
+        "iterate_norm": "none",
+        "mass_on_clique": "none",
+    }
+
     #: The batched executor's form of a stacked step's gradients: one backward
     #: through the per-client losses' sum, which is faster for this problem's
     #: few, tiny parameters than vmap(grad) -- 3.84 against 4.53 ms a round
@@ -983,7 +997,11 @@ def register() -> None:
         generate_nonconvex_simplex_from_config,
         sections={"problem": {"clique_size", "star_leaves", "heterogeneity"}},
     )
-    registry.tasks.register(TASK_NAME, lambda **kwargs: NonconvexSimplexTask(**kwargs))
+    registry.tasks.register(
+        TASK_NAME,
+        lambda **kwargs: NonconvexSimplexTask(**kwargs),
+        metrics=NonconvexSimplexTask.METRICS,
+    )
     registry.models.register(MODEL_NAME, build_simplex_point, task=TASK_NAME)
 
 

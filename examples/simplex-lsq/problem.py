@@ -639,6 +639,20 @@ class SimplexLSQTask(TaskAdapter):
     manifest's ``reference``, written by the generator.
     """
 
+    #: What compute_metrics reports, and which side of each is better (TaskAdapter.METRICS).
+    #: simplex_sum and min_coordinate are read against the simplex (1 and 0), not as smaller or
+    #: larger.
+    METRICS = {
+        "loss": "min",
+        "optimality_gap": "min",
+        "feasible_gap": "min",
+        "distance_to_optimum": "min",
+        "constraint_violation": "min",
+        "simplex_sum": "none",
+        "min_coordinate": "none",
+        "negative_mass": "min",
+    }
+
     #: The batched executor's form of a stacked step's gradients: one backward
     #: through the per-client losses' sum, which is faster for this problem's
     #: few, tiny parameters than vmap(grad) -- 5.21 against 6.81 ms a round
@@ -1000,7 +1014,9 @@ def register() -> None:
         generate_simplex_lsq_from_config,
         sections={"problem": {"dim", "infeasibility", "heterogeneity"}},
     )
-    registry.tasks.register(TASK_NAME, lambda **kwargs: SimplexLSQTask(**kwargs))
+    registry.tasks.register(
+        TASK_NAME, lambda **kwargs: SimplexLSQTask(**kwargs), metrics=SimplexLSQTask.METRICS
+    )
     registry.models.register(MODEL_NAME, build_simplex_vector, task=TASK_NAME)
 
 
