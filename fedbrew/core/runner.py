@@ -194,7 +194,7 @@ def run(
     # Per-client detail is opt-in: it is one row per client per round, which
     # dwarfs every other artifact, and round_metrics.csv already carries the
     # aggregates (macro/std/min/bottom10) that the round-level analysis uses.
-    if config.client_statistics.per_client_csv:
+    if config.reporting.per_client_csv:
         save_client_metrics_csv(state.client_metrics_history, output_dir)
         save_client_update_metrics_csv(state.client_update_metrics_history, output_dir)
 
@@ -245,7 +245,7 @@ def _run_loop(
         resume_from=config.runtime.extra.get("resume_from"),
         checkpointing=config.runtime.extra.get("checkpointing"),
         evaluation=config.evaluation,
-        client_statistics=config.client_statistics,
+        reporting=config.reporting,
         evaluation_seed=config.experiment.seed,
         divergence=config.divergence,
         flush_every=config.runtime.extra.get("flush_every", 1),
@@ -474,7 +474,7 @@ def config_differences(
     """
 
     current = _as_written(asdict(config))
-    before = _with_numerics_moved(_as_written(recorded))
+    before = _with_reporting_moved(_with_numerics_moved(_as_written(recorded)))
     skipped = set(_NOT_CONFIGURATION)
     staging = config.runtime.extra.get("data_staging")
     if isinstance(staging, Mapping) and staging.get("enabled"):
@@ -526,6 +526,41 @@ def _with_numerics_moved(recorded: Mapping[str, Any]) -> dict[str, Any]:
     runtime["extra"] = extra
     before["runtime"] = runtime
     before["numerics"] = numerics
+    return before
+
+
+def _with_reporting_moved(recorded: Mapping[str, Any]) -> dict[str, Any]:
+    """A run.json config from before the reporting block, with its keys where they are now.
+
+    Such a record holds ``client_statistics`` whole, and the two fit filters
+    as ``server.metrics`` and ``client.metrics``. The statistics and
+    ``per_client_csv`` move as they are. ``server.metrics`` becomes
+    ``reporting.fit_metrics``: it was the second filter, the one that decided
+    which fit columns reached the round record, and every shipped config's
+    merged list is it. ``client.metrics`` has no counterpart and is dropped,
+    as the client's own copy always was (``TorchSGDClient.load_state``).
+    """
+
+    before = dict(recorded)
+    if "reporting" in before:
+        return before
+    reporting: dict[str, Any] = {}
+    statistics = before.pop("client_statistics", None)
+    if isinstance(statistics, Mapping):
+        statistics = dict(statistics)
+        if "per_client_csv" in statistics:
+            reporting["per_client_csv"] = statistics.pop("per_client_csv")
+        reporting["statistics"] = statistics
+    for block in ("server", "client"):
+        section = before.get(block)
+        if isinstance(section, Mapping) and "metrics" in section:
+            section = dict(section)
+            listed = section.pop("metrics")
+            if block == "server":
+                reporting["fit_metrics"] = listed
+            before[block] = section
+    if reporting:
+        before["reporting"] = reporting
     return before
 
 
@@ -694,7 +729,7 @@ def _artifact_file_names(config: FullConfig) -> list[str]:
     """Names of the artifacts this run writes, per its statistics config."""
 
     names = ["round_metrics.csv"]
-    if config.client_statistics.per_client_csv:
+    if config.reporting.per_client_csv:
         names.extend(["client_metrics.csv", "client_update_metrics.csv"])
     names.append("run.json")
     return names

@@ -108,12 +108,12 @@ class ShippedConfigTest(unittest.TestCase):
             with self.subTest(path=path):
                 config = load_config(path)
                 for name in COST_METRICS:
-                    self.assertIn(name, config.client.metrics)
+                    self.assertIn(name, config.reporting.fit_metrics)
 
     def test_the_client_still_reports_them_through_the_shipped_list(self) -> None:
-        """filter_metrics is what dropped them for delta_sgd."""
+        """filter_metrics is what dropped them for delta_sgd; a run's client has no list."""
 
-        metrics = list(load_config("configs/femnist/scaffold.yaml").client.metrics)
+        metrics = list(load_config("configs/femnist/scaffold.yaml").reporting.fit_metrics)
         result = TorchScaffoldClient(**_kwargs(metrics)).fit(_request())
         for name in COST_METRICS:
             self.assertIn(name, result.metrics)

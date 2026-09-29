@@ -12,9 +12,6 @@ experiment:
 server:
   strategy: fedavg
   participation_rate: 1
-  metrics:
-    - fit_loss
-    - fit_accuracy
 
 client:
   update_rule: local_sgd
@@ -25,9 +22,6 @@ client:
   nesterov: false
   learning_rate_schedule: constant
   min_learning_rate: 0.0
-  metrics:
-    - fit_loss
-    - fit_accuracy
 
 data:
   path: data/generated/synthetic_classification/manifest.json
@@ -70,6 +64,11 @@ runtime:
     save_best: false
     save_every_round: true
     keep_last: null
+
+reporting:
+  fit_metrics:
+    - fit_loss
+    - fit_accuracy
 
 defaults:
   global_rounds: 3

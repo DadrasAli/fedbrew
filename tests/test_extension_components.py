@@ -176,14 +176,12 @@ class ExtensionComponentFixture(unittest.TestCase):
             "server": {
                 "strategy": "probe_server",
                 "participation_rate": 1.0,
-                "metrics": [],
                 "probe_gain": 2.5,
             },
             "client": {
                 "update_rule": "probe_client",
                 "batch_size": 4,
                 "learning_rate": 0.1,
-                "metrics": [],
                 "probe_step": 7,
             },
             "data": {"name": "probe_data", "num_clients": 2, "probe_rows": 5},

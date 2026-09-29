@@ -343,7 +343,7 @@ evaluated on its schedule and written to `round_metrics.csv`.
 
 Each round prints the same curated set the plan header glossed, not the full
 column set — the trailing line says how many more went to the CSV. The set is
-derived from your `client_statistics` settings, so `client spread` carries
+derived from your `reporting.statistics` settings, so `client spread` carries
 `accuracy_worst10` at the default `worst_percent: 10` and `accuracy_worst2p5`
 if you set 2.5.
 
@@ -398,7 +398,7 @@ the same file rather than creating its own. Chapter 09 owns its schema.
 
 **Two metric files, not four.** `client_metrics.csv` and
 `client_update_metrics.csv` are both gated on
-`client_statistics.per_client_csv`, which is `false` by default. Chapter 08 §9.
+`reporting.per_client_csv`, which is `false` by default. Chapter 08 §9.
 
 ### `round_metrics.csv`
 
@@ -549,7 +549,7 @@ fedbrew run --config configs/dev/synthetic_label_skew.yaml --rounds 2
 2. **`python -m fedbrew.cli.dispatch` is equivalent to `fedbrew`.** The console
    script is a thin entry point; do not add behaviour to one and not the other.
 3. **A default run writes two metric files**, not four. Both per-client CSVs
-   are gated on `client_statistics.per_client_csv`.
+   are gated on `reporting.per_client_csv`.
 4. **Step 4 must stay short.** It is `--rounds 2` on 97 examples; do not make
    the quickstart depend on a config that takes minutes.
 5. **The output shown here is real.** Regenerate it by running the commands,
@@ -573,7 +573,7 @@ fedbrew run --config configs/dev/synthetic_label_skew.yaml --rounds 2
 - **Expecting the two rounds to learn.** Chance on three classes is ~33%; the
   run reaches ~23%. Two rounds on 97 examples is a pipeline check.
 - **Looking for `client_metrics.csv`.** Off by default. Set
-  `client_statistics.per_client_csv: true`.
+  `reporting.per_client_csv: true`.
 - **Re-running step 4 into the same `output_dir`.** The run refuses a config
   whose seed differs from the one already recorded there, rather than mixing
   two experiments in one directory. Once that run has finished, it also refuses

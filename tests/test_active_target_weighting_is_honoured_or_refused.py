@@ -51,7 +51,6 @@ SENTINEL = 7777
 def _raw(rule: str, directory: Path, **model: Any) -> dict[str, Any]:
     raw = yaml.safe_load(Path("configs/dev/tiny_causal_lm.yaml").read_text(encoding="utf-8"))
     raw["experiment"]["output_dir"] = str(directory / f"out_{rule}")
-    metrics = raw["client"]["metrics"]
     # local_adamw keeps the shipped client block.
     if rule == "fedprox":
         raw["client"] = {
@@ -59,7 +58,6 @@ def _raw(rule: str, directory: Path, **model: Any) -> dict[str, Any]:
             "batch_size": 4,
             "learning_rate": 0.0005,
             "proximal_mu": 0.01,
-            "metrics": metrics,
         }
     elif rule == "scaffold":
         raw["server"]["strategy"] = "scaffold"
@@ -67,7 +65,6 @@ def _raw(rule: str, directory: Path, **model: Any) -> dict[str, Any]:
             "update_rule": "scaffold",
             "batch_size": 4,
             "learning_rate": 0.0005,
-            "metrics": metrics,
         }
     raw["model"].update(model)
     return raw

@@ -628,7 +628,6 @@ experiment:
 server:
   strategy: fedavg
   participation_rate: 1
-  metrics: [fit_loss]
 client:
   update_rule: fedavg
   batch_size: 4
@@ -641,7 +640,6 @@ client:
   weight_decay: 0.0
   nesterov: false
   max_grad_norm: {max_grad_norm}
-  metrics: [fit_loss]
 data:
   num_clients: 4
   samples_per_client: 16
@@ -863,6 +861,8 @@ CONFIG = """
 experiment:
   seed: 42
   output_dir: {out}
+reporting:
+  fit_metrics: [fit_loss]
 server:
   strategy: fedadam
   participation_rate: 1
@@ -870,7 +870,6 @@ server:
   beta1: 0.9
   beta2: 0.99
   tau: 0.001
-  metrics: [fit_loss]
 client:
   update_rule: local_sgd
   batch_size: 4
@@ -880,7 +879,6 @@ client:
   momentum: 0.0
   weight_decay: 0.0
   nesterov: false
-  metrics: [fit_loss]
 data:
   num_clients: 4
   samples_per_client: 16

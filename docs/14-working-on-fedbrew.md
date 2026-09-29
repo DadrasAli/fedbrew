@@ -303,7 +303,7 @@ fix is to rename the literal.
 
 **What was wrong with it.** It fixes the symptom and leaves the mechanism. The
 list had a second defect a rename does not touch: it promised `_std` and `_min`
-*unconditionally*, so a config with those `client_statistics` toggles off got a
+*unconditionally*, so a config with those statistics toggles off got a
 legend describing two columns its CSV would not contain, and a config with
 `worst_percent: 2.5` got a legend naming `worst10`. One hand-kept list, two
 independent ways to be wrong, only one of them visible.

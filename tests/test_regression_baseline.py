@@ -126,10 +126,10 @@ def _config(
 ) -> dict[str, Any]:
     config: dict[str, Any] = {
         "experiment": {"seed": 1337, "output_dir": str(output_dir)},
+        "reporting": {"fit_metrics": ["fit_loss", "fit_accuracy"]},
         "server": {
             "strategy": "fedavg",
             "participation_rate": PARTICIPATION_RATE,
-            "metrics": ["fit_loss", "fit_accuracy"],
         },
         "client": {
             "update_rule": "local_sgd",
@@ -140,7 +140,6 @@ def _config(
             "nesterov": False,
             "learning_rate_schedule": "constant",
             "min_learning_rate": 0.0,
-            "metrics": ["fit_loss", "fit_accuracy"],
         },
         "data": {
             "num_clients": NUM_CLIENTS,

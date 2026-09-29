@@ -16,9 +16,6 @@ server:
   strategy: centralized
   # Meaningless with a single pooled client; kept so runs stay comparable.
   participation_rate: 1
-  metrics:
-    - fit_loss
-    - fit_accuracy
 
 client:
   update_rule: centralized
@@ -41,12 +38,6 @@ client:
   momentum: 0.0
   weight_decay: 0.0
   nesterov: false
-
-  metrics:
-    - fit_loss
-    - fit_accuracy
-    - optimizer_steps
-    - client_learning_rate
 
 data:
   path: data/generated/mnist_one_label/manifest.json
@@ -109,13 +100,17 @@ evaluation:
   central_test:
     every: 10
 
-client_statistics:
+reporting:
+  fit_metrics:
+    - fit_loss
+    - fit_accuracy
   per_client_csv: false
-  std: true
-  variance: false
-  min: true
-  max: true
-  worst_percent: 10
+  statistics:
+    std: true
+    variance: false
+    min: true
+    max: true
+    worst_percent: 10
 
 # Stop an arm that is no longer learning and record why. A stopped run exits
 # SUCCESSFULLY with status "diverged"/"stalled" in run.json and

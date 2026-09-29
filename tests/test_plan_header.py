@@ -41,13 +41,13 @@ from fedbrew.core import logging as terminal_logging
 from fedbrew.core.config import (
     CentralTestConfig,
     ClientConfig,
-    ClientStatisticsConfig,
     DataConfig,
     EvaluationConfig,
     ExperimentConfig,
     FullConfig,
     ModelConfig,
     NumericsConfig,
+    ReportingConfig,
     RuntimeConfig,
     ServerConfig,
     SplitEvaluationConfig,
@@ -85,13 +85,11 @@ def _config(
             global_rounds=200,
             participation_rate=participation_rate,
             participation_probability=participation_probability,
-            metrics=[],
         ),
         client=ClientConfig(
             update_rule=update_rule,
             local_iterations=2,
             batch_size=32,
-            metrics=[],
             learning_rate=0.05,
         ),
         task=TaskConfig(name="classification"),
@@ -99,7 +97,7 @@ def _config(
         model=ModelConfig(name="mlp"),
         runtime=RuntimeConfig(device="cpu", extra=dict(runtime_extra or {})),
         numerics=NumericsConfig(**(numerics or {})),
-        client_statistics=ClientStatisticsConfig(),
+        reporting=ReportingConfig(),
         evaluation=EvaluationConfig(
             train=SplitEvaluationConfig(every=10, clients="participating"),
             val=SplitEvaluationConfig(every=5, clients="all"),
@@ -366,7 +364,7 @@ class TheMetricsBlockTest(unittest.TestCase):
 
         for split in ("train", "val", "test"):
             self.assertTrue(
-                client_metric_names(split, config.client_statistics) <= planned,
+                client_metric_names(split, config.reporting.statistics) <= planned,
                 f"the {split} aggregates are missing from the planned columns",
             )
         self.assertIn("central_test_loss", planned)

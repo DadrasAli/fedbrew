@@ -18,16 +18,9 @@ experiment:
 server:
   # Every client, every round. Nothing here is about client sampling.
   participation_rate: 1.0
-  # Empty, deliberately: filter_metrics keeps everything when the list is
-  # empty, and a non-empty list would drop the fit_ columns of the seven
-  # metrics beyond `loss` that it does not name. Their central_test_ columns,
-  # which run.py reads, are never filtered: the central pass does not go
-  # through this list.
-  metrics: []
 
 client:
   batch_size: 1
-  metrics: []
 
 data:
   path: data/generated/examples/nonconvex-simplex/manifest.json
@@ -98,13 +91,20 @@ evaluation:
   central_test:
     every: 1
 
-client_statistics:
+reporting:
+  # Empty, deliberately: filter_metrics keeps everything when the list is
+  # empty, and a non-empty list would drop the fit_ columns of the seven
+  # metrics beyond `loss` that it does not name. Their central_test_ columns,
+  # which run.py reads, are never filtered: the central pass does not go
+  # through this list.
+  fit_metrics: []
   per_client_csv: true
-  std: true
-  variance: false
-  min: true
-  max: true
-  worst_percent: 10
+  statistics:
+    std: true
+    variance: false
+    min: true
+    max: true
+    worst_percent: 10
 
 divergence:
   # Left at the shape every other example uses, and **it will not fire**. The

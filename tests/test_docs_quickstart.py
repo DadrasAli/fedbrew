@@ -147,7 +147,7 @@ class ArtifactClaimTest(unittest.TestCase):
         from test_docs_metric_names import _minimal_config
 
         config = _minimal_config()
-        config.client_statistics.per_client_csv = False
+        config.reporting.per_client_csv = False
         self.assertEqual(
             _artifact_file_names(config),
             ["round_metrics.csv", "run.json"],

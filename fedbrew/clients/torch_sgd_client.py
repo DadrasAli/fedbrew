@@ -132,7 +132,9 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
                 changes only floating-point summation order -- metrics stay
                 example-weighted -- so results differ in the last bits only.
             device: Torch device string the model and batches live on.
-            metrics: Update metric names to record. Copied, not aliased.
+            metrics: Update metric names to record; empty records all.
+                Copied, not aliased. A run gives none: its one list,
+                ``reporting.fit_metrics``, is applied by the server.
             base_seed: Run seed. None leaves the process RNG untouched, which
                 makes the client's batch order non-reproducible.
             train_shuffle: Shuffle the train split each epoch.

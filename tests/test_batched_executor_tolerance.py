@@ -95,7 +95,7 @@ def example_config(name: str, arm: str = "fedavg") -> dict[str, Any]:
     config["runtime"]["checkpointing"].update(
         enabled=True, save_last=True, save_every_round=True, keep_last=None
     )
-    config["client_statistics"] = {**config.get("client_statistics", {}), "per_client_csv": True}
+    config.setdefault("reporting", {})["per_client_csv"] = True
     return config
 
 
@@ -477,7 +477,7 @@ def classification_config(**client: Any) -> dict[str, Any]:
     config["model"]["dropout"] = 0.0
     config["data"].update(num_clients=8, samples_per_client=20)
     config["client"].update(batch_size=3, **client)
-    config["client_statistics"] = {"per_client_csv": True}
+    config.setdefault("reporting", {})["per_client_csv"] = True
     return config
 
 

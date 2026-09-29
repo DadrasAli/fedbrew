@@ -21,12 +21,6 @@ server:
   # not. A rate below 1.0 would add drift-quad's sampling floor on top of
   # this problem's own.
   participation_rate: 1.0
-  # Empty, deliberately: filter_metrics keeps everything when the list is
-  # empty, and a non-empty list would drop the fit_ columns of the six
-  # metrics beyond `loss` that it does not name. Their central_test_ columns,
-  # which run.py reads, are never filtered: the central pass does not go
-  # through this list.
-  metrics: []
 
 client:
   # m = 16 rows per client, so at batch_size 4 there are four batches per
@@ -35,7 +29,6 @@ client:
   # rank-4 projector scaled by m/batch_size = 4, so the stability bound is
   # 2/4 = 0.5, not the full-batch 2/1.
   batch_size: 4
-  metrics: []
 
 data:
   path: data/generated/examples/fed-lasso/manifest.json
@@ -114,13 +107,20 @@ evaluation:
   central_test:
     every: 1
 
-client_statistics:
+reporting:
+  # Empty, deliberately: filter_metrics keeps everything when the list is
+  # empty, and a non-empty list would drop the fit_ columns of the six
+  # metrics beyond `loss` that it does not name. Their central_test_ columns,
+  # which run.py reads, are never filtered: the central pass does not go
+  # through this list.
+  fit_metrics: []
   per_client_csv: true
-  std: true
-  variance: false
-  min: true
-  max: true
-  worst_percent: 10
+  statistics:
+    std: true
+    variance: false
+    min: true
+    max: true
+    worst_percent: 10
 
 divergence:
   metric: fit_loss

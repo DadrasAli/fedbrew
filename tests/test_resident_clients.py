@@ -97,7 +97,7 @@ def _write(root: Path, name: str, manifest: Path, rule: str, cache_bytes: int | 
         "test": {"every": 1, "clients": "all"},
         "central_test": {"every": 1},
     }
-    config["client_statistics"] = {"per_client_csv": True}
+    config.setdefault("reporting", {})["per_client_csv"] = True
     path = root / f"{name}.yaml"
     path.write_text(yaml.safe_dump(config), encoding="utf-8")
     return path

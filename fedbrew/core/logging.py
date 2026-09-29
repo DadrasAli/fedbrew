@@ -60,10 +60,9 @@ from fedbrew.core.metrics import (
     METRIC_SUFFIX_GLOSSES,
     POST_FIT_RULE_METRICS,
     RULE_FIT_METRICS,
+    SERVER_DIAGNOSTIC_METRICS,
     SPLIT_GLOSSES,
-    client_fit_extras,
     metric_gloss,
-    server_diagnostic_metrics,
 )
 from fedbrew.core.paths import resolve_output_dir
 from fedbrew.core.state import MetricRecord
@@ -151,7 +150,7 @@ def _client_val_metric_names(config: FullConfig | None) -> tuple[str, ...]:
     the fit metrics would have shown everything except the thing it measured.
     """
 
-    statistics = ClientStatisticsConfig() if config is None else config.client_statistics
+    statistics = ClientStatisticsConfig() if config is None else config.reporting.statistics
     curated = list(_CURATED_CLIENT_VAL_METRICS)
     selected = _checkpoint_selection_metric(config)
     # The column model selection reads is the reason this round happened. It is
@@ -451,44 +450,8 @@ def _metrics_rows(config: FullConfig, *, verbose: bool) -> list[Row]:
             else f"{len(names)} of {len(planned)} listed; --verbose lists them all",
         )
     )
-    asked_and_dropped = _client_metrics_the_server_filter_removes(config)
-    if asked_and_dropped:
-        # Where a config's request and the run's output disagree without either
-        # list being wrong. client.metrics naming a metric reads as asking for
-        # that column; the client does emit it, and then the server filters the
-        # whole aggregated dict against server.metrics, which does not list it.
-        # Nothing raises, and the column is simply absent from a CSV whose
-        # config appears to have asked for it.
-        rows.append(
-            Row(
-                "not written",
-                f"{', '.join(asked_and_dropped)} -- named in client.metrics "
-                "and emitted, then removed by server.metrics. Add them there "
-                "to keep them.",
-                tone=AMBER,
-            )
-        )
     rows.extend(Row(name, _metric_definition(name, config), tone=None) for name in names)
     return rows
-
-
-def _client_metrics_the_server_filter_removes(config: FullConfig) -> list[str]:
-    """What this config asks for under client.metrics and round_metrics.csv will not carry.
-
-    Every rule, not only the ones with exempt extras. The server filters the
-    whole aggregated dict against a non-empty server.metrics, so any name that
-    client.metrics lists and server.metrics does not is emitted and then
-    dropped. This used to consult only the extras the FedAvg family exempts
-    from its own filter, so the four rules that filter everything -- fedprox,
-    scaffold, delta_sgd, fedlalr -- printed no row while their shipped configs
-    asked for communicated_bytes and got no column.
-
-    Defined as the complement of the planned column list rather than as a
-    second rule, so this row and the column list above it cannot disagree.
-    """
-
-    planned = set(_planned_metric_names(config))
-    return sorted(set(config.client.metrics or ()) - planned)
 
 
 #: Client knobs worth a line in the header: each one changes what the local
@@ -628,11 +591,10 @@ def _planned_metric_names(config: FullConfig) -> list[str]:
 
     Built from what the run's task declares it reports (``TaskAdapter.METRICS``,
     read off the task registry) and the rule's own columns
-    (``RULE_FIT_METRICS``): the fit columns through the two metric lists as
-    the client and the server apply them, `client_metric_names` over the
-    task's loss and accuracy for the evaluation aggregates, one
-    ``central_test_<metric>`` per declared metric, and the server's
-    diagnostics. A column listed here that the run does not write, or written
+    (``RULE_FIT_METRICS``) and the strategy's diagnostics, through
+    ``reporting.fit_metrics``; `client_metric_names` over the task's loss and
+    accuracy for the evaluation aggregates; and one ``central_test_<metric>``
+    per declared metric. A column listed here that the run does not write, or written
     and not listed, would make the header worse than no header;
     tests/test_planned_columns_are_written.py runs every task to hold it.
     """
@@ -644,12 +606,11 @@ def _planned_metric_names(config: FullConfig) -> list[str]:
         if not _split_is_evaluated(config, split):
             continue
         for metric_split in _model_scope_splits(config.evaluation.model_scope, split):
-            names.extend(sorted(client_metric_names(metric_split, config.client_statistics, bases)))
+            names.extend(
+                sorted(client_metric_names(metric_split, config.reporting.statistics, bases))
+            )
     if _central_is_evaluated(config):
         names.extend(f"central_test_{name}" for name in task_metrics)
-    names.extend(
-        sorted(server_diagnostic_metrics(config.server.strategy, config.client.metrics or ()))
-    )
     return _ordered_metric_names(_deduplicate(names))
 
 
@@ -1299,7 +1260,7 @@ def _progress_metric_names(config: FullConfig | None) -> list[str]:
         names.extend(_client_val_metric_names(config))
     if evaluated("test"):
         names.extend(
-            _client_test_metric_names(None if config is None else config.client_statistics)
+            _client_test_metric_names(None if config is None else config.reporting.statistics)
         )
     if config is None:
         return _ordered_metric_names(names)
@@ -1328,13 +1289,13 @@ def _task_metrics(config: FullConfig) -> dict[str, str]:
 
 
 def _fit_metric_names(config: FullConfig) -> list[str]:
-    """The fit columns a round carries: the task's and the rule's, through both metric lists.
+    """The fit columns a round carries: the task's, the rule's and the strategy's, filtered once.
 
     What a client emits -- ``fit_<metric>`` for each metric the task declares,
     on a round with a post-fit pass (``evaluation.fit.every``), and the rule's
-    own columns (``RULE_FIT_METRICS``) -- goes through ``client.metrics``,
-    which the FedAvg family's extras are exempt from, and then through
-    ``server.metrics``, which exempts nothing. Each filter keeps the listed
+    own columns (``RULE_FIT_METRICS``) -- and what the strategy adds
+    (``SERVER_DIAGNOSTIC_METRICS``) go through ``reporting.fit_metrics``,
+    which the server applies once to the whole round. It keeps the listed
     names that exist, and an empty list keeps everything (``filter_metrics``).
     """
 
@@ -1351,9 +1312,8 @@ def _fit_metric_names(config: FullConfig) -> list[str]:
     extras = RULE_FIT_METRICS.get(rule, frozenset())
     if not fit_pass:
         extras = extras - POST_FIT_RULE_METRICS
-    exempt = client_fit_extras(rule)
-    client_side = _kept([*task, *sorted(extras - exempt)], config.client.metrics)
-    return _kept([*client_side, *sorted(exempt)], config.server.metrics)
+    diagnostics = SERVER_DIAGNOSTIC_METRICS.get(config.server.strategy, frozenset())
+    return _kept([*task, *sorted(extras), *sorted(diagnostics)], config.reporting.fit_metrics)
 
 
 def _kept(names: list[str], requested: list[str]) -> list[str]:

@@ -197,10 +197,10 @@ class ItReachesRunJsonTest(unittest.TestCase):
             yaml.safe_dump(
                 {
                     "experiment": {"seed": 42, "output_dir": str(root / "run")},
+                    "reporting": {"fit_metrics": ["fit_loss"]},
                     "server": {
                         "strategy": "fedavg",
                         "participation_rate": 1,
-                        "metrics": ["fit_loss"],
                     },
                     "client": {
                         "update_rule": "local_sgd",
@@ -211,7 +211,6 @@ class ItReachesRunJsonTest(unittest.TestCase):
                         "momentum": 0.0,
                         "weight_decay": 0.0,
                         "nesterov": False,
-                        "metrics": ["fit_loss"],
                     },
                     "data": {"path": str(manifest_path)},
                     "model": {

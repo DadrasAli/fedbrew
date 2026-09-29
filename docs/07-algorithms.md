@@ -238,9 +238,10 @@ c <- c + (1/N) * sum_c (c_i_new - c_i_old)
 ```
 
 where `N` is the total client count, not the participating count. Emits
-`server_control_norm` and `mean_client_control_delta_norm` — and those two are
-added **after** `filter_metrics`, so they appear regardless of
-`server.metrics`, as every server's diagnostics do. Chapter 08 §7.2.
+`server_control_norm` and `mean_client_control_delta_norm` — added **before**
+the server's one `filter_metrics` pass, so `reporting.fit_metrics` keeps or
+drops them like any fit column, as every server's diagnostics. Chapter 08
+§7.2.
 
 The control deltas are summed beside the model, not through
 `WeightedStateAccumulator`, so they are checked on their own: each client's
@@ -728,7 +729,7 @@ fedbrew run --config configs/femnist/scaffold.yaml --validate-only
 | `tests/test_amp_composes_with_wrapped_optimizers.py` | §4.4: scaffold and fedprox accept `numerics.use_amp: true` in all three layers, the three rules that step through `_GradientOnlyOptimizer` still refuse it, and the chapter quotes the numbers behind both. |
 | `tests/test_scaffold_fedprox_step_correctness.py` | What the gradient correction and the proximal term actually compute, against a closed-form prediction and a pinned trajectory. |
 | `tests/test_client_communication_cost.py` | Every rule's `communicated_bytes` equals every model-shaped state in the payload it returns, and section 5's multipliers are measured. |
-| `tests/test_communication_cost_metrics.py` | A client's cost metrics survive `client.metrics` into the CSV. |
+| `tests/test_communication_cost_metrics.py` | No run gives a client a metrics list, so a client's cost metrics reach the CSV. |
 | `tests/test_fedlalr.py` | Synchronised optimizer state and the per-client rates. |
 | `tests/test_delta_sgd.py` | The step-size schedule and its clamp. |
 | `tests/test_fedavg_ft.py` | Fine-tuning, and the global-then-personal ordering. |
@@ -747,10 +748,10 @@ fedbrew run --config configs/femnist/scaffold.yaml --validate-only
   names the missing half.
 - **Comparing SCAFFOLD to FedAvg at equal round counts.** SCAFFOLD has moved
   twice the bytes. Compare on `communicated_bytes`.
-- **Expecting `server.metrics` to control a server's own diagnostics.** Both
-  servers that emit them — SCAFFOLD and FedLALR — add them after the filter,
-  so they always appear. `server.metrics` selects among the aggregated
-  *client* metrics only.
+- **A non-empty `reporting.fit_metrics` that leaves out a server's own
+  diagnostics.** Both servers that emit them — SCAFFOLD and FedLALR — add them
+  before the one filter, so a list that does not name them drops them, as it
+  drops any fit column. The shipped SCAFFOLD and FedLALR arms name them.
 - **Setting `numerics.use_amp: true` with `delta_sgd` or `fedlalr`.** Refused,
   per rule, at config load: both step through a wrapper with no `param_groups`
   for `GradScaler` to read. `scaffold` and `fedprox` used to be on this list

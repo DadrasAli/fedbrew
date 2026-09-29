@@ -59,16 +59,14 @@ def _scheduled(every: Any, name: str) -> bool:
 def _signature(config: FullConfig) -> tuple[Any, ...]:
     """Everything `_planned_metric_names` reads from a config."""
 
-    statistics = asdict(config.client_statistics)
-    statistics.pop("per_client_csv", None)
+    statistics = asdict(config.reporting.statistics)
     statistics.pop("extra", None)
     evaluation = config.evaluation
     return (
         config.task.name,
         config.client.update_rule,
         config.server.strategy,
-        tuple(config.server.metrics),
-        tuple(config.client.metrics),
+        tuple(config.reporting.fit_metrics),
         tuple(_scheduled(getattr(evaluation, s).every, s) for s in ("train", "val", "test")),
         _scheduled(evaluation.central_test.every, "central_test"),
         _scheduled(evaluation.fit.every, "fit"),

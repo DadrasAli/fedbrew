@@ -49,7 +49,6 @@ class ServerConfig:
 
     strategy: str
     global_rounds: int
-    metrics: list[str]
     #: A fixed number of clients per round, ``ceil(rate x clients)``. Exactly one
     #: of this and ``participation_probability`` is set.
     participation_rate: float | None = None
@@ -90,7 +89,6 @@ class ClientConfig:
     #: docs/04-configuration.md section 2.1.
     local_iterations: int
     batch_size: int
-    metrics: list[str]
     learning_rate: float | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -291,7 +289,7 @@ class EvaluationConfig:
 
 @dataclass
 class ClientStatisticsConfig:
-    """Statistics computed across clients from one evaluation pass.
+    """Statistics computed across clients from one evaluation pass: ``reporting.statistics``.
 
     Each toggle is independent -- none of them implies or requires another.
     They are free: the expensive part is producing the per-client numbers, and
@@ -301,10 +299,6 @@ class ClientStatisticsConfig:
     All of them apply to loss as well as accuracy, and to all three splits.
     """
 
-    #: Write client_metrics.csv: one row per client per round. Off by default;
-    #: at clients "all" that is 1.8M rows for a 500-round FEMNIST run, and the
-    #: statistics below already summarise it.
-    per_client_csv: bool = False
     std: bool = True
     variance: bool = False
     min: bool = True
@@ -323,6 +317,31 @@ class ClientStatisticsConfig:
 CLIENT_METRIC_BASES = ("loss", "accuracy")
 
 
+@dataclass
+class ReportingConfig:
+    """Which columns a run writes, in one block.
+
+    Replaces ``server.metrics`` and ``client.metrics``, two fit-metric filters
+    applied in series with different exemptions, and ``client_statistics``,
+    which set the evaluation aggregates' suffixes and gated the fit-side
+    per-client CSV too (docs/04 section 9). When a split is evaluated stays
+    ``evaluation``'s.
+    """
+
+    #: The fit columns a round keeps: one filter, applied once by the server
+    #: to the aggregated round after every client and server metric has been
+    #: added -- the task's ``fit_<metric>``, the rule's own columns and the
+    #: strategy's diagnostics alike. Empty keeps everything; a name no arm
+    #: emits is ignored, so arms of one comparison can share a list.
+    fit_metrics: list[str] = field(default_factory=list)
+    statistics: ClientStatisticsConfig = field(default_factory=ClientStatisticsConfig)
+    #: Write client_metrics.csv and client_update_metrics.csv: one row per
+    #: client per round. Off by default; at clients "all" that is 1.8M rows for
+    #: a 500-round FEMNIST run, and the statistics already summarise it.
+    per_client_csv: bool = False
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
 def worst_percent_label(worst_percent: float) -> str:
     """Name fragment for the worst-N-percent column: 10 -> "10", 2.5 -> "2p5"."""
 
@@ -337,7 +356,7 @@ def client_metric_names(
     """Every aggregate name one evaluated split emits under this configuration.
 
     The two averages are unconditional -- they are what the split means -- and
-    everything else is a client_statistics toggle. This mirrors the loop's
+    everything else is a ``reporting.statistics`` toggle. This mirrors the loop's
     aggregation so that a checkpoint metric can be checked against the columns
     a run will actually produce, before the run starts rather than after it
     finishes with best.pt missing.
@@ -453,7 +472,7 @@ class FullConfig:
     runtime: RuntimeConfig
     numerics: NumericsConfig = field(default_factory=NumericsConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
-    client_statistics: ClientStatisticsConfig = field(default_factory=ClientStatisticsConfig)
+    reporting: ReportingConfig = field(default_factory=ReportingConfig)
     divergence: DivergenceConfig = field(default_factory=DivergenceConfig)
     #: The keys the loader inferred because the config left them out, each
     #: with where from: ``model.input_dim`` and ``model.num_classes`` from the
@@ -631,7 +650,7 @@ def load_config(common_path: str | Path) -> FullConfig:
         runtime=_build_runtime_config(common["runtime"]),
         numerics=_build_numerics_config(common.get("numerics", {})),
         evaluation=_build_evaluation_config(common.get("evaluation", {})),
-        client_statistics=_build_client_statistics_config(common.get("client_statistics", {})),
+        reporting=_build_reporting_config(common.get("reporting", {})),
         divergence=_build_divergence_config(common.get("divergence", {})),
         inferred=inferred,
     )
@@ -839,7 +858,7 @@ MATMUL_PRECISIONS = frozenset({"highest", "high", "medium"})
 
 _KNOWN_EXTRA_KEYS: dict[str, frozenset[str]] = {
     # Nothing reads experiment.extra, evaluation.extra, the per-split extras,
-    # client_statistics.extra or divergence.extra: every option those blocks
+    # reporting.extra, reporting.statistics.extra or divergence.extra: every option those blocks
     # support is a named dataclass field. An empty set is the honest answer,
     # and it is what catches evaluation.val.client for evaluation.val.clients.
     "experiment": frozenset(),
@@ -849,7 +868,8 @@ _KNOWN_EXTRA_KEYS: dict[str, frozenset[str]] = {
     "evaluation.test": frozenset(),
     "evaluation.central_test": frozenset(),
     "evaluation.fit": frozenset(),
-    "client_statistics": frozenset(),
+    "reporting": frozenset(),
+    "reporting.statistics": frozenset(),
     "divergence": frozenset(),
     # data.extra is forwarded as keyword arguments only to
     # synthetic_classification, whose every parameter is already a named
@@ -1173,7 +1193,8 @@ def _validate_unknown_keys(config: FullConfig) -> None:
     _validate_known_keys("evaluation", config.evaluation.extra)
     for split in ("train", "val", "test", "central_test", "fit"):
         _validate_known_keys(f"evaluation.{split}", getattr(config.evaluation, split).extra)
-    _validate_known_keys("client_statistics", config.client_statistics.extra)
+    _validate_known_keys("reporting", config.reporting.extra)
+    _validate_known_keys("reporting.statistics", config.reporting.statistics.extra)
     _validate_known_keys("divergence", config.divergence.extra)
 
     for name in ("checkpointing", "performance", "data_staging"):
@@ -1306,6 +1327,16 @@ _REMOVED_KEYS: dict[tuple[str, str], str] = {
     "every key that changes the numbers a run produces is in the numerics block",
     ("runtime.performance", "precision"): "moved to numerics.precision -- every key "
     "that changes the numbers a run produces is in the numerics block",
+    # The two fit-metric filters, merged into one list the server applies once
+    # after every client and server metric is added. They ran in series with
+    # different exemptions, so a config could name a column in one and lose
+    # it to the other.
+    ("server", "metrics"): "moved to reporting.fit_metrics -- one list, applied "
+    "once by the server after every client and server metric is added, where "
+    "server.metrics and client.metrics were two filters in series",
+    ("client", "metrics"): "moved to reporting.fit_metrics -- one list, applied "
+    "once by the server after every client and server metric is added, where "
+    "server.metrics and client.metrics were two filters in series",
     ("defaults", "local_epochs"): "renamed to defaults.local_iterations, which "
     "counts iterations of the local loop -- what one iteration is depends on "
     "update_mode, docs/04-configuration.md section 2.1. This config predates "
@@ -1323,6 +1354,9 @@ _REMOVED_KEYS: dict[tuple[str, str], str] = {
 #: was refused that way while chapter 04 listed it as a required block.
 _REMOVED_BLOCKS: dict[str, str] = {
     "task": "the task is inferred from model.name through the model's registration",
+    "client_statistics": "moved to reporting: per_client_csv to "
+    "reporting.per_client_csv, and std, variance, min, max and worst_percent to "
+    "reporting.statistics",
 }
 
 #: Blocks a config must write that are read at load and never stored on
@@ -1504,11 +1538,10 @@ def validate_config(config: FullConfig) -> None:
     _refuse_retired_metric_names(config)
     _validate_evaluation(config)
     _validate_evaluation_model_scope(config)
-    _validate_client_statistics(config.client_statistics)
+    _validate_reporting(config.reporting)
     _validate_divergence(config.divergence)
     _validate_checkpoint_selection(config.runtime.extra.get("checkpointing"))
     _validate_checkpoint_metric_is_emitted(config)
-    _require_derived_diagnostic_sources(config)
     _validate_divergence_metric_is_reachable(config)
     _validate_unhonoured_client_options(config)
     _refuse_frozen_off_examples(config)
@@ -1526,8 +1559,6 @@ def validate_config(config: FullConfig) -> None:
     if not isinstance(config.experiment.notes, str):
         raise RunRefused("experiment.notes must be a string")
     _validate_metrics("experiment.tags", config.experiment.tags)
-    _validate_metrics("server.metrics", config.server.metrics)
-    _validate_metrics("client.metrics", config.client.metrics)
     _validate_print_every(config.runtime.extra.get("print_every"))
     _validate_flush_every(config.runtime.extra.get("flush_every"))
     _validate_extra_bools(
@@ -1607,7 +1638,7 @@ def _build_evaluation_config(values: object) -> EvaluationConfig:
         ("test_set", "evaluation.test.every / evaluation.central_test.every"),
         ("test_sets", "evaluation.test.every and evaluation.central_test.every"),
         ("client_scope", "evaluation.<split>.clients, per split"),
-        ("save_client_metrics", "client_statistics.per_client_csv"),
+        ("save_client_metrics", "reporting.per_client_csv"),
     ):
         if retired in values:
             raise RunRefused(f"evaluation.{retired} has been removed; use {replacement}")
@@ -1661,11 +1692,19 @@ def _build_split_evaluation_config(
     )
 
 
-def _build_client_statistics_config(values: object) -> ClientStatisticsConfig:
+def _build_reporting_config(values: object) -> ReportingConfig:
     if not isinstance(values, Mapping):
-        raise RunRefused("client_statistics must be a mapping")
-    known, extra = _split_extra(values, ClientStatisticsConfig)
-    return ClientStatisticsConfig(**known, extra=extra)
+        raise RunRefused("reporting must be a mapping")
+    known, extra = _split_extra(values, ReportingConfig)
+    statistics = known.pop("statistics", {})
+    if not isinstance(statistics, Mapping):
+        raise RunRefused("reporting.statistics must be a mapping")
+    statistics_known, statistics_extra = _split_extra(statistics, ClientStatisticsConfig)
+    return ReportingConfig(
+        **known,
+        statistics=ClientStatisticsConfig(**statistics_known, extra=statistics_extra),
+        extra=extra,
+    )
 
 
 #: Every detector off. `divergence: null` resolves to this -- the spelling that
@@ -1779,7 +1818,7 @@ def _validate_fit_evaluation(config: FullConfig) -> None:
     With the pass never run no round carries a fit_ metric, so a divergence
     monitor watching one -- fit_loss is its default -- would be silenced for
     the whole run, non_finite included, with only a warning after the last
-    round. Refused here instead, on the run path, like the client.metrics
+    round. Refused here instead, on the run path, like the reporting.fit_metrics
     filter that would drop the name (_validate_divergence).
     """
 
@@ -1838,7 +1877,7 @@ def _validate_evaluation_model_scope(config: FullConfig) -> None:
     Also cross-checks checkpoint selection against it: selecting on a
     personal_ metric needs the personalized pass to run at all. Whether the
     scope then emits that exact name is the narrower question
-    _validate_checkpoint_metric_is_emitted answers, once client_statistics has
+    _validate_checkpoint_metric_is_emitted answers, once reporting.statistics has
     been validated.
     """
 
@@ -1897,7 +1936,7 @@ def _validate_checkpoint_metric_is_emitted(config: FullConfig) -> None:
     and skips the update, so a 500-round run finishes with best_checkpoint
     null in run.json and no other sign of it.
 
-    Runs last, after _validate_client_statistics and
+    Runs last, after _validate_reporting and
     _validate_checkpoint_selection, because it reads worst_percent and assumes
     the val_ prefix both of those have already checked.
     """
@@ -1920,15 +1959,15 @@ def _validate_checkpoint_metric_is_emitted(config: FullConfig) -> None:
 
     emitted: set[str] = set()
     for split in splits:
-        emitted |= client_metric_names(split, config.client_statistics)
+        emitted |= client_metric_names(split, config.reporting.statistics)
     if best_metric in emitted:
         return
     raise RunRefused(
         f"runtime.checkpointing.best_metric={best_metric!r} is never emitted, "
         "so best.pt would never be written. This configuration's validation "
         "metrics are: " + ", ".join(sorted(emitted)) + ". Metrics beyond the "
-        "two averages are client_statistics toggles -- turn the one you want "
-        "on, or set client_statistics.worst_percent to the percentage you are "
+        "two averages are reporting.statistics toggles -- turn the one you want "
+        "on, or set reporting.statistics.worst_percent to the percentage you are "
         "selecting on."
     )
 
@@ -1954,7 +1993,7 @@ def checkpoint_selection_problem(config: FullConfig) -> str | None:
     about a column that was never the problem.
 
     Args:
-        config: A resolved config, whose `client_statistics` has already been
+        config: A resolved config, whose `reporting.statistics` has already been
             validated -- the order `validate_config` runs these in.
 
     Returns:
@@ -1975,12 +2014,13 @@ def checkpoint_selection_problem(config: FullConfig) -> str | None:
 
 
 def _metrics_no_filter_can_remove(config: FullConfig) -> set[str]:
-    """Round-record names that never pass through either metrics filter.
+    """Round-record names that never pass through ``reporting.fit_metrics``.
 
-    The evaluation aggregates and the selected strategy's own diagnostics all
-    reach the round record without going through filter_metrics, so a name
-    among them survives whatever either list says. See docs/08-metrics.md
-    section 4.3.
+    The filter is the fit side's: the evaluation aggregates reach the round
+    record without going through it, so a name among them survives whatever
+    the list says. See docs/08-metrics.md section 4.3. The strategy's own
+    diagnostics go through it since the list became one (docs/04 section
+    7.6), like every other fit-side column.
 
     The central-test metrics are the same case but are not enumerable here:
     `loop._evaluate_central_test_set` passes through any finite numeric key a
@@ -1994,45 +2034,29 @@ def _metrics_no_filter_can_remove(config: FullConfig) -> set[str]:
     configs into failures.
     """
 
-    from fedbrew.core.metrics import server_diagnostic_metrics
-
-    # Only the diagnostics this round will carry: one built from a client
-    # metric that client.metrics filters out is absent, and was exempted here
-    # all the same, so divergence.metric could watch a column no round had.
-    # FINDINGS.csv POST-F12.
-    unfiltered: set[str] = set(
-        server_diagnostic_metrics(config.server.strategy, list(config.client.metrics or []))
-    )
+    unfiltered: set[str] = set()
     prefixes = [""] if config.evaluation.model_scope in {"global", "both"} else []
     if config.evaluation.model_scope in {"personal", "both"}:
         prefixes.append(PERSONAL_SPLIT_PREFIX)
     for prefix in prefixes:
         for split in ("train", "val", "test"):
-            unfiltered |= client_metric_names(f"{prefix}{split}", config.client_statistics)
+            unfiltered |= client_metric_names(f"{prefix}{split}", config.reporting.statistics)
     return unfiltered
 
 
 def _validate_divergence_metric_is_reachable(config: FullConfig) -> None:
-    """Require divergence.metric to survive both metrics filters.
+    """Require divergence.metric to survive ``reporting.fit_metrics``.
 
     The sibling of _validate_checkpoint_metric_is_emitted, and the same defect:
     a name passes every syntactic check divergence has -- non-empty, not a
     test_ metric when patience is set -- and is still absent from every round,
-    because a metrics list filtered it out on its way into the round record.
+    because the metrics list filtered it out on its way into the round record.
 
     What that costs is the whole monitor. Every detector reads the one metric
     name, so a name nothing emits silences all of them, non_finite included,
     for the entire run. Nothing fails. The loop prints a warning naming the
     metric -- after the last round, which for a 500-round FEMNIST arm is
     several GPU-hours after it would have been worth knowing.
-
-    There are two filters on the path from the task to the round record, not
-    one. This check covered server.metrics only, and the client-side filter is
-    the earlier and stricter of the two: TorchSGDClient._evaluate_model applies
-    client.metrics to the task metrics before the FitResult exists, so a
-    client.metrics that omits fit_loss means no client ever reports it, the
-    server aggregate has nothing to filter, and the default divergence.metric
-    watches a name no round can contain. Nothing checked it.
 
     Here rather than in validation.py deliberately. validate_full_config runs
     only under --validate-only, so an issue raised there, even at severity
@@ -2041,32 +2065,13 @@ def _validate_divergence_metric_is_reachable(config: FullConfig) -> None:
     load_config. Same reasoning as _validate_unhonoured_client_options.
     """
 
-    from fedbrew.core.metrics import CLIENT_UNFILTERED_FIT_METRICS
-
     divergence = config.divergence
     if divergence is None or not divergence.active:
         return
-
-    metric = divergence.metric
-    unfiltered = _metrics_no_filter_can_remove(config)
-
-    # The client filter first: it runs earlier, and a name it drops is gone
-    # before server.metrics has anything to keep. Its exemptions are the
-    # round-record names above plus the extras this rule adds after filtering.
     _require_metric_survives(
-        metric=metric,
-        requested=list(config.client.metrics or []),
-        unfiltered=unfiltered
-        | set(CLIENT_UNFILTERED_FIT_METRICS.get(config.client.update_rule, frozenset())),
-        key="client.metrics",
-        where=("so the client drops it before the FitResult is built and no round can contain it"),
-    )
-    _require_metric_survives(
-        metric=metric,
-        requested=list(config.server.metrics or []),
-        unfiltered=unfiltered,
-        key="server.metrics",
-        where="so the filter drops it before it reaches the round record",
+        metric=divergence.metric,
+        requested=list(config.reporting.fit_metrics or []),
+        unfiltered=_metrics_no_filter_can_remove(config),
     )
 
 
@@ -2083,8 +2088,7 @@ def _refuse_retired_metric_names(config: FullConfig) -> None:
     from fedbrew.core.metrics import RETIRED_METRIC_NAMES, retired_metric_message
 
     named: list[tuple[str, object]] = [
-        *(("server.metrics", name) for name in config.server.metrics or []),
-        *(("client.metrics", name) for name in config.client.metrics or []),
+        ("reporting.fit_metrics", name) for name in config.reporting.fit_metrics or []
     ]
     if config.divergence is not None:
         named.append(("divergence.metric", config.divergence.metric))
@@ -2096,50 +2100,13 @@ def _refuse_retired_metric_names(config: FullConfig) -> None:
             raise RunRefused(f"{key} names {retired_metric_message(name)}")
 
 
-def _require_derived_diagnostic_sources(config: FullConfig) -> None:
-    """Refuse asking for a server diagnostic whose source the clients filter out.
-
-    FedLALR's ``effective_learning_rate_across_clients_*`` are computed from
-    each client's ``effective_learning_rate_coordinate_mean``. A non-empty
-    ``client.metrics`` without it leaves the server nothing to spread, so the
-    four columns are absent from every round. A ``divergence.metric`` naming
-    one then silences every detector for the run, and a metrics list naming
-    one asks for a column nothing writes. Both loaded; the reachability check
-    exempted every strategy diagnostic whole. FINDINGS.csv POST-F12.
-    """
-
-    from fedbrew.core.metrics import SERVER_DIAGNOSTIC_SOURCES
-
-    sources = SERVER_DIAGNOSTIC_SOURCES.get(config.server.strategy, {})
-    client_metrics = list(config.client.metrics or [])
-    if not sources or not client_metrics:
-        return
-    asked: list[tuple[str, str]] = [
-        *(("server.metrics", name) for name in config.server.metrics or []),
-        *(("client.metrics", name) for name in client_metrics),
-    ]
-    if config.divergence is not None and config.divergence.active:
-        asked.insert(0, ("divergence.metric", config.divergence.metric))
-    for key, name in asked:
-        source = sources.get(name)
-        if source is not None and source not in client_metrics:
-            raise RunRefused(
-                f"{key} names {name!r}, which the {config.server.strategy} server "
-                f"computes from each client's {source!r}, and client.metrics is not "
-                f"empty and does not name {source!r}: the clients drop it, and no "
-                f"round can contain {name!r}. Add {source!r} to client.metrics."
-            )
-
-
 def _require_metric_survives(
     *,
     metric: str,
     requested: list[str],
     unfiltered: set[str],
-    key: str,
-    where: str,
 ) -> None:
-    """Raise unless ``metric`` survives the non-empty metrics list ``key``."""
+    """Raise unless ``metric`` survives a non-empty ``reporting.fit_metrics``."""
 
     if not requested:
         # The empty list keeps everything, which is the default and the case
@@ -2152,26 +2119,31 @@ def _require_metric_survives(
     if metric in requested or metric in unfiltered or metric.startswith("central_test_"):
         return
     raise RunRefused(
-        f"divergence.metric={metric!r} is not in {key}, and {key} is not "
-        f"empty, {where}. Every detector reads that one name, so all of them "
-        "-- non_finite included -- would stay silent for the whole run and the "
-        f"warning would arrive after the last round. Add {metric!r} to {key}, "
-        "or empty the list to keep every metric; evaluation columns and this "
-        "strategy's own diagnostics are not filtered and need neither."
+        f"divergence.metric={metric!r} is not in reporting.fit_metrics, and the "
+        "list is not empty, so the server drops it before it reaches the round "
+        "record. Every detector reads that one name, so all of them -- "
+        "non_finite included -- would stay silent for the whole run and the "
+        f"warning would arrive after the last round. Add {metric!r} to "
+        "reporting.fit_metrics, or empty the list to keep every metric; "
+        "evaluation columns are not filtered and need neither."
     )
 
 
-def _validate_client_statistics(statistics: ClientStatisticsConfig) -> None:
-    for name in ("per_client_csv", "std", "variance", "min", "max"):
+def _validate_reporting(reporting: ReportingConfig) -> None:
+    _validate_metrics("reporting.fit_metrics", reporting.fit_metrics)
+    if not isinstance(reporting.per_client_csv, bool):
+        raise RunRefused("reporting.per_client_csv must be a boolean")
+    statistics = reporting.statistics
+    for name in ("std", "variance", "min", "max"):
         if not isinstance(getattr(statistics, name), bool):
-            raise RunRefused(f"client_statistics.{name} must be a boolean")
+            raise RunRefused(f"reporting.statistics.{name} must be a boolean")
     worst = statistics.worst_percent
     if worst is None:
         return
     if isinstance(worst, bool) or not isinstance(worst, int | float):
-        raise RunRefused("client_statistics.worst_percent must be a number or null")
+        raise RunRefused("reporting.statistics.worst_percent must be a number or null")
     if not 0 <= float(worst) <= 100:
-        raise RunRefused("client_statistics.worst_percent must be between 0 and 100")
+        raise RunRefused("reporting.statistics.worst_percent must be between 0 and 100")
 
 
 def _validate_divergence(divergence: DivergenceConfig) -> None:

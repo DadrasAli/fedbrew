@@ -32,6 +32,7 @@ from fedbrew.core.config import (
     ClientStatisticsConfig,
     DivergenceConfig,
     EvaluationConfig,
+    ReportingConfig,
     evaluates_round,
     parse_evaluation_client_scope,
     parse_evaluation_schedule,
@@ -142,7 +143,7 @@ def run_fl_loop(
     # process had already finished.
     on_termination: Callable[[DivergenceVerdict], None] | None = None,
     evaluation: EvaluationConfig | None = None,
-    client_statistics: ClientStatisticsConfig | None = None,
+    reporting: ReportingConfig | None = None,
     evaluation_seed: int | None = None,
     divergence: DivergenceConfig | None = None,
     # Write the CSV rows, run.json and latest.pt every flush_every rounds
@@ -164,7 +165,8 @@ def run_fl_loop(
     _require_positive_global_rounds(global_rounds)
     _require_positive_flush_every(flush_every)
     evaluation = evaluation or EvaluationConfig()
-    statistics = client_statistics or ClientStatisticsConfig()
+    reporting = reporting or ReportingConfig()
+    statistics = reporting.statistics
     monitor = DivergenceMonitor(divergence or DivergenceConfig())
     # Every split declares its own schedule and its own client set, so the
     # three passes are priced independently: train is a cheap diagnostic over
@@ -249,6 +251,7 @@ def run_fl_loop(
         flush_every=flush_every,
         evaluation=evaluation,
         statistics=statistics,
+        per_client_csv=reporting.per_client_csv,
         monitor=monitor,
         schedules=schedules,
         central_schedule=central_schedule,
@@ -446,7 +449,7 @@ def run_fl_loop(
                 flush_due,
                 state,
                 output_dir,
-                statistics,
+                reporting.per_client_csv,
                 csv_cursor,
                 on_round_flush,
                 staged,
@@ -477,7 +480,7 @@ def run_fl_loop(
             unflushed,
             state,
             output_dir,
-            statistics,
+            reporting.per_client_csv,
             csv_cursor,
             on_round_flush,
             staged,
@@ -521,6 +524,7 @@ class LoopContext:
     flush_every: int
     evaluation: EvaluationConfig
     statistics: ClientStatisticsConfig
+    per_client_csv: bool
     monitor: DivergenceMonitor
     schedules: dict[str, int | None]
     central_schedule: int | None
@@ -1262,7 +1266,7 @@ def _flush_rounds(
     due: bool,
     state: ExperimentState,
     output_dir: str | Path | None,
-    statistics: ClientStatisticsConfig,
+    per_client_csv: bool,
     csv_cursor: dict[str, Any],
     on_round_flush: Callable[[ExperimentState], None] | None,
     staged: StagedCheckpoints | None,
@@ -1287,7 +1291,7 @@ def _flush_rounds(
         state.client_metrics_history,
         state.client_update_metrics_history,
         output_dir,
-        statistics.per_client_csv,
+        per_client_csv,
         csv_cursor,
     )
     # run.json is assembled from config and run metadata the loop does not

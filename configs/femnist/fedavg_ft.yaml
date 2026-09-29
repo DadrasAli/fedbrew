@@ -26,11 +26,6 @@ server:
   # Example-weighted, matching the fedavg/fedprox/scaffold arms. NOT uniform:
   # this arm exists to be compared with them.
   participation_rate: 0.01
-  metrics:
-    - fit_loss
-    - fit_accuracy
-    - optimizer_steps
-    - client_learning_rate
 
 client:
   update_rule: fedavg_ft
@@ -57,11 +52,6 @@ client:
   # null means fine-tuning inherits client.learning_rate, which is the
   # conventional default for this baseline. Set a number to decouple the two.
   finetune_learning_rate: null
-  metrics:
-    - fit_loss
-    - fit_accuracy
-    - optimizer_steps
-    - client_learning_rate
 
 runtime:
   checkpointing:
@@ -165,7 +155,12 @@ evaluation:
   test:
     every: never
 
-client_statistics:
+reporting:
+  fit_metrics:
+    - fit_loss
+    - fit_accuracy
+    - optimizer_steps
+    - client_learning_rate
   # The aggregated personal_val_* columns below already carry the cross-client
   # distribution -- std, min, max and worst10 -- which is what a personalization
   # result is judged on. The per-client CSV is left off: its schema has

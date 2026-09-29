@@ -23,7 +23,14 @@ Two differences are allowed, both declared here rather than taken on trust:
   config left it out, against the value its old reader took then
   (``MOVED_FROM_ABSENT``). The numerics block's six keys moved out of
   ``runtime`` and ``runtime.performance``; every shipped config states all
-  six now, where some left ``deterministic_warn_only`` to its default.
+  six now, where some left ``deterministic_warn_only`` to its default. The
+  reporting block took ``client_statistics`` whole, and
+  ``reporting.fit_metrics`` is the recorded ``server.metrics``: the two fit
+  filters became one list, and the list that decided which fit columns
+  reached the round record was the server's, so the merged list keeps every
+  shipped config's columns -- which the planned column list, compared as
+  recorded, confirms. ``client.metrics`` is ``MERGED`` into it and not
+  compared on its own.
 """
 
 from __future__ import annotations
@@ -46,7 +53,19 @@ MOVED: dict[str, str] = {
     "numerics.use_amp": "runtime.use_amp",
     # The new block's own record of unknown keys, empty in every config.
     "numerics.extra": "numerics.extra",
+    "reporting.fit_metrics": "server.metrics",
+    "reporting.per_client_csv": "client_statistics.per_client_csv",
+    "reporting.statistics.std": "client_statistics.std",
+    "reporting.statistics.variance": "client_statistics.variance",
+    "reporting.statistics.min": "client_statistics.min",
+    "reporting.statistics.max": "client_statistics.max",
+    "reporting.statistics.worst_percent": "client_statistics.worst_percent",
+    "reporting.statistics.extra": "client_statistics.extra",
+    "reporting.extra": "reporting.extra",
 }
+
+#: Recorded keys merged into a moved one, not compared on their own.
+MERGED: dict[str, str] = {"client.metrics": "reporting.fit_metrics"}
 
 #: A moved key's old place -> what its reader took when a config left it out.
 MOVED_FROM_ABSENT: dict[str, Any] = {
@@ -56,6 +75,7 @@ MOVED_FROM_ABSENT: dict[str, Any] = {
     "runtime.extra.performance.cudnn_benchmark": None,
     "runtime.extra.performance.precision": "reference",
     "numerics.extra": {},
+    "reporting.extra": {},
 }
 
 #: Inferred keys whose inferred value may differ from the recorded one.
@@ -72,6 +92,8 @@ def _differences(before: dict[str, Any], now: dict[str, Any]) -> list[str]:
         if key in inferred and key in INFERRED_AND_CHANGED:
             continue
         if key not in moved_back:
+            if key in MERGED:
+                continue
             differences.append(f"{key}: {before[key]!r} -> (gone)")
         elif key not in before:
             if key in MOVED_FROM_ABSENT and moved_back[key] == MOVED_FROM_ABSENT[key]:

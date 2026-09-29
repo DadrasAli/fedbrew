@@ -62,9 +62,6 @@ def _write_config(
             server:
               strategy: {strategy}
               participation_rate: 1
-              metrics:
-                - fit_loss
-                - fit_accuracy
 
             client:
               update_rule: {update_rule}
@@ -78,10 +75,6 @@ def _write_config(
               weight_decay: 0.0
               nesterov: false
               train_shuffle: false
-              metrics:
-                - fit_loss
-                - fit_accuracy
-                - optimizer_steps
 
             data:
               num_clients: {num_clients}
@@ -115,7 +108,10 @@ def _write_config(
               central_test:
                 every: 1
 
-            client_statistics:
+            reporting:
+              fit_metrics:
+                - fit_loss
+                - fit_accuracy
               # This test asserts client_metrics.csv is written, so it has to
               # be the thing that asks for it -- it is opt-in now.
               per_client_csv: true

@@ -59,7 +59,7 @@ _SCHEDULES = {"fit_": "fit", "central_test_": "central_test"}
 def _write(root: Path, name: str, every: int | str, **extra: Any) -> Path:
     config = _config(root / name, rounds=ROUNDS, checkpoint=True)
     config["runtime"]["checkpointing"]["keep_last"] = None
-    config["client_statistics"] = {"per_client_csv": True}
+    config.setdefault("reporting", {})["per_client_csv"] = True
     config["evaluation"] = {
         "train": {"every": every, "clients": "all"},
         "val": {"every": every, "clients": "all"},

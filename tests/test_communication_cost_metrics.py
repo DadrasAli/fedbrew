@@ -14,8 +14,12 @@ configs/femnist/fedlalr.yaml listed both names; delta_sgd.yaml did not, so a
 cost-per-round table across arms had the column for the fedavg family (whose
 client does not filter) and for fedlalr, and a hole where delta_sgd should be.
 
-The configs are fixed. This pins the invariant so the next one cannot repeat
-it, because nothing about writing a config makes the omission visible.
+The configs were fixed, and then the cause went: a run gives its clients no
+metrics list now (``reporting.fit_metrics`` is the server's, applied once to
+the round), so every client reports the cost it measures and
+client_update_metrics.csv carries it for every rule. This pins both: no
+client is built with a list, and the audited arms keep the cost columns in
+round_metrics.csv, where the one list still decides.
 """
 
 from __future__ import annotations
@@ -136,29 +140,14 @@ class ShippedConfigTest(unittest.TestCase):
             {"delta_sgd", "fedlalr", "fedprox", "scaffold"},
         )
 
-    def test_every_such_config_lists_both_cost_metrics(self) -> None:
-        at_risk = self._rules_that_measure_and_filter()
-        checked = 0
-        for path, document in _configs():
-            client = document["client"]
-            if client.get("update_rule") not in at_risk:
-                continue
-            requested = client.get("metrics")
-            if not requested:  # an empty list disables filtering entirely
-                continue
-            with self.subTest(path=path):
-                for name in COST_METRICS:
-                    self.assertIn(
-                        name,
-                        requested,
-                        f"{path} runs {client['update_rule']}, which measures "
-                        f"{name} and then filters through client.metrics. "
-                        "Leaving it out drops the column for the whole run.",
-                    )
-                checked += 1
-        # delta_sgd.yaml, which 13 F1 found; fedlalr, which already had it; and
-        # the two 13 F2 added once their clients started measuring at all.
-        self.assertGreaterEqual(checked, 4)
+    def test_no_run_gives_a_client_a_list(self) -> None:
+        """The factory hands a client every key but ``metrics``, so none filters."""
+
+        from fedbrew.core import factory
+
+        source = inspect.getsource(factory)
+        self.assertNotIn("config.client.metrics", source)
+        self.assertNotIn("metrics", factory.EXTENSION_CLIENT_KEYS)
 
     def test_every_config_the_audit_named_carries_it(self) -> None:
         expected = {
@@ -170,7 +159,10 @@ class ShippedConfigTest(unittest.TestCase):
         carrying = {
             path
             for path, document in _configs()
-            if all(name in (document["client"].get("metrics") or []) for name in COST_METRICS)
+            if all(
+                name in ((document.get("reporting") or {}).get("fit_metrics") or [])
+                for name in COST_METRICS
+            )
         }
         self.assertEqual(expected - carrying, set())
 

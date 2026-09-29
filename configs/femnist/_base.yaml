@@ -88,13 +88,14 @@ evaluation:
   central_test:
     every: 10
 
-client_statistics:
+reporting:
   per_client_csv: false
-  std: true
-  variance: false
-  min: true
-  max: true
-  worst_percent: 10
+  statistics:
+    std: true
+    variance: false
+    min: true
+    max: true
+    worst_percent: 10
 
 # Stop an arm that is no longer learning and record why. A stopped run exits
 # SUCCESSFULLY with status "diverged"/"stalled" in run.json and

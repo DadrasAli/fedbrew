@@ -22,11 +22,6 @@ server:
   # objective is tilted by whichever four clients were drawn, so client drift
   # and client sampling are both live and the arms differ.
   participation_rate: 0.5
-  # Empty, deliberately: filter_metrics keeps everything when the list is
-  # empty, and a non-empty list would drop optimality_gap and
-  # distance_to_optimum on their way to the round record, since neither is a
-  # name a shipped config knows to ask for.
-  metrics: []
 
 client:
   learning_rate: 0.05
@@ -35,7 +30,6 @@ client:
   # Local training carries no minibatch noise at all; the only stochasticity
   # in the problem is which clients the round samples.
   batch_size: 1
-  metrics: []
 
 data:
   path: data/generated/examples/pl-1d/manifest.json
@@ -102,13 +96,19 @@ evaluation:
   central_test:
     every: 1
 
-client_statistics:
+reporting:
+  # Empty, deliberately: filter_metrics keeps everything when the list is
+  # empty, and a non-empty list would drop optimality_gap and
+  # distance_to_optimum on their way to the round record, since neither is a
+  # name a shipped config knows to ask for.
+  fit_metrics: []
   per_client_csv: true
-  std: true
-  variance: false
-  min: true
-  max: true
-  worst_percent: 10
+  statistics:
+    std: true
+    variance: false
+    min: true
+    max: true
+    worst_percent: 10
 
 divergence:
   metric: fit_loss

@@ -46,12 +46,11 @@ _FEDAVG_EXTRA: dict[str, Any] = {
 def _config(data_name: str, **client_extra: Any) -> FullConfig:
     return FullConfig(
         experiment=ExperimentConfig(seed=0, output_dir="outputs/test"),
-        server=ServerConfig(strategy="fedavg", global_rounds=1, participation_rate=1.0, metrics=[]),
+        server=ServerConfig(strategy="fedavg", global_rounds=1, participation_rate=1.0),
         client=ClientConfig(
             update_rule="fedavg",
             local_iterations=1,
             batch_size=1,
-            metrics=[],
             learning_rate=0.1,
             extra={**_FEDAVG_EXTRA, **client_extra},
         ),

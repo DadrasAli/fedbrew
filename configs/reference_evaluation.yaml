@@ -25,9 +25,6 @@ experiment:
 server:
   strategy: fedavg
   participation_rate: 0.02
-  metrics:
-    - fit_loss
-    - fit_accuracy
 
 client:
   update_rule: fedavg
@@ -40,11 +37,6 @@ client:
   momentum: 0.0
   weight_decay: 0.0
   nesterov: false
-  metrics:
-    - fit_loss
-    - fit_accuracy
-    - optimizer_steps
-    - client_learning_rate
 
 data:
   path: data/generated/mnist_one_label/manifest.json
@@ -151,17 +143,21 @@ evaluation:
 # Statistics across clients, computed from the per-client numbers an evaluation
 # pass already produced. Each toggle is independent, and each applies to loss
 # and accuracy alike on all three client splits.
-client_statistics:
+reporting:
+  fit_metrics:
+    - fit_loss
+    - fit_accuracy
   # One row per client per round. Off by default: at `clients: all` this is
   # 1.8M rows for a 500-round FEMNIST run.
   per_client_csv: false
-  std: true
-  variance: true
-  min: true
-  max: true
-  # Mean over the worst N% of clients -- the lowest accuracies, but the highest
-  # losses. Emitted as e.g. test_accuracy_worst10. null or 0 turns it off.
-  worst_percent: 10
+  statistics:
+    std: true
+    variance: true
+    min: true
+    max: true
+    # Mean over the worst N% of clients -- the lowest accuracies, but the highest
+    # losses. Emitted as e.g. test_accuracy_worst10. null or 0 turns it off.
+    worst_percent: 10
 
 # Stop a run that is no longer learning, and record why. A run stopped here
 # exits SUCCESSFULLY with status "diverged" or "stalled" in run.json and

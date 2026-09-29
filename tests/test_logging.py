@@ -21,6 +21,7 @@ from fedbrew.core.config import (
     ExperimentConfig,
     FullConfig,
     ModelConfig,
+    ReportingConfig,
     RuntimeConfig,
     ServerConfig,
     SplitEvaluationConfig,
@@ -35,13 +36,12 @@ def _make_config(
     *,
     strategy: str = "fedavg",
     update_rule: str = "local_sgd",
-    server_metrics: list[str] | None = None,
-    client_metrics: list[str] | None = None,
+    fit_metrics: list[str] | None = None,
     runtime_extra: dict[str, object] | None = None,
     evaluate_test: bool = True,
     evaluate_central: bool = True,
     task: str = "classification",
-    client_statistics: ClientStatisticsConfig | None = None,
+    statistics: ClientStatisticsConfig | None = None,
 ) -> FullConfig:
     return FullConfig(
         experiment=ExperimentConfig(
@@ -53,9 +53,6 @@ def _make_config(
             strategy=strategy,
             global_rounds=3,
             participation_rate=1.0,
-            metrics=list(
-                ["fit_loss", "fit_accuracy"] if server_metrics is None else server_metrics
-            ),
             extra={},
         ),
         client=ClientConfig(
@@ -63,9 +60,6 @@ def _make_config(
             local_iterations=1,
             batch_size=8,
             learning_rate=0.1,
-            metrics=list(
-                ["fit_loss", "fit_accuracy"] if client_metrics is None else client_metrics
-            ),
         ),
         task=TaskConfig(name=task),
         data=DataConfig(name="test-data"),
@@ -74,8 +68,9 @@ def _make_config(
             device="cpu",
             extra=dict(runtime_extra or {}),
         ),
-        client_statistics=(
-            ClientStatisticsConfig() if client_statistics is None else client_statistics
+        reporting=ReportingConfig(
+            fit_metrics=list(["fit_loss", "fit_accuracy"] if fit_metrics is None else fit_metrics),
+            statistics=ClientStatisticsConfig() if statistics is None else statistics,
         ),
         evaluation=EvaluationConfig(
             # "all" so the definitions read as the whole-population wording;
@@ -143,7 +138,7 @@ class LegendTracksTheEmittedColumnsTests(unittest.TestCase):
         return [
             name
             for name, _ in terminal_logging._progress_definitions(
-                _make_config(client_statistics=statistics)
+                _make_config(statistics=statistics)
             )
         ]
 
@@ -179,7 +174,7 @@ class LegendTracksTheEmittedColumnsTests(unittest.TestCase):
     def test_the_worst_percent_definition_states_the_configured_percentage(self) -> None:
         definitions = dict(
             terminal_logging._progress_definitions(
-                _make_config(client_statistics=ClientStatisticsConfig(worst_percent=2.5))
+                _make_config(statistics=ClientStatisticsConfig(worst_percent=2.5))
             )
         )
         self.assertIn(
@@ -290,8 +285,7 @@ class ProgressDefinitionTests(unittest.TestCase):
                 _make_config(
                     strategy="scaffold",
                     update_rule="scaffold",
-                    server_metrics=[],
-                    client_metrics=[],
+                    fit_metrics=[],
                 )
             )
         )
@@ -308,20 +302,22 @@ class ProgressDefinitionTests(unittest.TestCase):
             self.assertIn(name, definitions)
 
     def test_scaffold_definitions_cover_all_displayed_diagnostics(self) -> None:
+        # The server's two diagnostics go through the one list like the rest.
         scaffold_metrics = [
             "fit_loss",
             "fit_accuracy",
             "control_delta_norm",
             "client_control_norm",
             "local_steps",
+            "server_control_norm",
+            "mean_client_control_delta_norm",
         ]
         definitions = dict(
             terminal_logging._progress_definitions(
                 _make_config(
                     strategy="scaffold",
                     update_rule="scaffold",
-                    server_metrics=scaffold_metrics,
-                    client_metrics=scaffold_metrics,
+                    fit_metrics=scaffold_metrics,
                 )
             )
         )
@@ -349,8 +345,7 @@ class ProgressDefinitionTests(unittest.TestCase):
             terminal_logging._progress_definitions(
                 _make_config(
                     update_rule="fedprox",
-                    server_metrics=fedprox_metrics,
-                    client_metrics=fedprox_metrics,
+                    fit_metrics=fedprox_metrics,
                 )
             )
         )

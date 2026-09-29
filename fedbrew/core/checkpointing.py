@@ -63,7 +63,7 @@ def validate_selection_metric(metric_name: str) -> str:
             "test score optimistically biased. Always available: "
             "val_accuracy_sample_weighted_avg, val_accuracy_avg, "
             "val_loss_sample_weighted_avg, val_loss_avg. Also available when "
-            "the matching client_statistics toggle is on: val_accuracy_min, "
+            "the matching reporting.statistics toggle is on: val_accuracy_min, "
             "val_accuracy_max, val_accuracy_std, val_accuracy_variance, "
             "val_accuracy_worst10 (the number follows worst_percent). Each "
             "name also takes a personal_ prefix when evaluation.model_scope "

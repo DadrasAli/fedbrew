@@ -12,9 +12,6 @@ experiment:
 server:
   strategy: fedadam
   participation_rate: 0.02
-  metrics:
-    - fit_loss
-    - fit_accuracy
   server_learning_rate: 0.1
   beta1: 0.9
   beta2: 0.99
@@ -29,9 +26,6 @@ client:
   nesterov: true
   learning_rate_schedule: cosine
   min_learning_rate: 0.0002
-  metrics:
-    - fit_loss
-    - fit_accuracy
 
 data:
   path: data/generated/femnist_natural/manifest.json
@@ -66,13 +60,17 @@ evaluation:
   central_test:
     every: 10
 
-client_statistics:
+reporting:
+  fit_metrics:
+    - fit_loss
+    - fit_accuracy
   per_client_csv: false
-  std: true
-  variance: false
-  min: true
-  max: true
-  worst_percent: 10
+  statistics:
+    std: true
+    variance: false
+    min: true
+    max: true
+    worst_percent: 10
 
 # Every key here changes the numbers a run produces, and arms compared
 # against each other must agree on all of them (docs/04 section 7.5).

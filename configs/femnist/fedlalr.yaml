@@ -26,31 +26,6 @@ server:
   aggregation_weighting: uniform
   # Matches the other cross-device FEMNIST arms.
   participation_rate: 0.01
-  metrics:
-    - fit_loss
-    - fit_accuracy
-    # Synchronized optimizer state.
-    - momentum_norm
-    - second_moment_norm
-    # Per-client rates are what separates this arm from a shared server step,
-    # and the spread across clients is what shows whether they differ; a round
-    # where the std is ~0 is a round where FedLALR reduced to one shared rate.
-    # Read this from round 2 on: in round 1 the coordinates that have not yet
-    # seen a gradient still sit at v_hat = epsilon^2, so the nominal rate
-    # there is alpha/epsilon and dominates the average. Nothing diverges --
-    # m is ~0 on exactly those coordinates -- but the number is meaningless.
-    - effective_learning_rate_across_clients_mean
-    - effective_learning_rate_across_clients_std
-    - effective_learning_rate_across_clients_min
-    - effective_learning_rate_across_clients_max
-    - local_steps
-    # Per-round upload volume, which preflight tells a reader to compare arms
-    # on. This list is the second filter: a client metric it does not name is
-    # dropped before round_metrics.csv, so client.metrics naming these is not
-    # enough on its own -- and for this rule, naming them only here is not
-    # enough either, because its client filters them too. Both lists carry them.
-    - communicated_parameters
-    - communicated_bytes
 
 client:
   update_rule: fedlalr
@@ -74,24 +49,6 @@ client:
   # no update_mode here: Algorithm 1 specifies K chained local steps and this
   # client always runs them chained.
 
-  metrics:
-    - fit_loss
-    - fit_accuracy
-    - client_alpha
-    # Statistics over this client's own coordinates. The server builds the
-    # across-clients spread above from the first, so dropping it drops the
-    # spread, and config load refuses that while anything asks for the spread.
-    - effective_learning_rate_coordinate_mean
-    - effective_learning_rate_coordinate_min
-    - effective_learning_rate_coordinate_max
-    - local_steps
-    # FedLALR sends x, m and v_hat every round in both directions: 3x the
-    # per-round volume of a fedavg arm at the same model size. This counts all
-    # three, so arms can be compared on communicated volume rather than on
-    # round count alone.
-    - communicated_parameters
-    - communicated_bytes
-
 numerics:
   # Must stay false. The AMSGrad update reads raw gradients off .grad, which
   # GradScaler.step consumes instead of leaving there; validation rejects the
@@ -113,6 +70,33 @@ runtime:
 evaluation:
   val:
     clients: all
+
+reporting:
+  fit_metrics:
+    - fit_loss
+    - fit_accuracy
+    # Synchronized optimizer state.
+    - momentum_norm
+    - second_moment_norm
+    # Per-client rates are what separates this arm from a shared server step,
+    # and the spread across clients is what shows whether they differ; a round
+    # where the std is ~0 is a round where FedLALR reduced to one shared rate.
+    # Read this from round 2 on: in round 1 the coordinates that have not yet
+    # seen a gradient still sit at v_hat = epsilon^2, so the nominal rate
+    # there is alpha/epsilon and dominates the average. Nothing diverges --
+    # m is ~0 on exactly those coordinates -- but the number is meaningless.
+    - effective_learning_rate_across_clients_mean
+    - effective_learning_rate_across_clients_std
+    - effective_learning_rate_across_clients_min
+    - effective_learning_rate_across_clients_max
+    - local_steps
+    # Per-round upload volume, which preflight tells a reader to compare arms
+    # on. FedLALR sends x, m and v_hat every round in both directions: 3x the
+    # per-round volume of a fedavg arm at the same model size. This counts all
+    # three, so arms can be compared on communicated volume rather than on
+    # round count alone.
+    - communicated_parameters
+    - communicated_bytes
 
 defaults:
   global_rounds: 500

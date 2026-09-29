@@ -70,14 +70,14 @@ cheapest way to check a new config, and worth running before any long job.
 | --- | --- | --- |
 | `experiment` | yes | identity, seed, output location |
 | `defaults` | yes | the round and local-iteration counts, shared by server and clients — §2.1 |
-| `server` | yes | strategy, participation, metric filter |
-| `client` | yes | update rule, local optimisation, metric filter |
+| `server` | yes | strategy and participation |
+| `client` | yes | update rule and local optimisation |
 | `data` | yes | which dataset, and where |
 | `model` | yes | architecture and its per-builder keys — chapter 06 |
 | `runtime` | yes | device, throughput, checkpointing, staging |
 | `numerics` | no | every setting that changes the numbers a run produces — §7.5 |
 | `evaluation` | no | per-split schedules and client scope |
-| `client_statistics` | no | which cross-client columns are written |
+| `reporting` | no | which columns are written: the one fit-metric filter, the cross-client statistics, the per-client CSVs — §9 |
 | `divergence` | no | when to stop a run that is not learning |
 
 `numerics` and the last three have complete dataclass defaults, so a config
@@ -228,7 +228,6 @@ base counts for every arm that extends it
 | `strategy` | enum | **required** | One of the nine below. |
 | `participation_rate` | float | — | In `(0, 1]`. A fixed number of clients per round, `ceil(rate × clients)` and at least one. **Exactly one** of this and `participation_probability` is required. |
 | `participation_probability` | float | — | In `(0, 1]`. Bernoulli participation, for any strategy: each client joins each round independently with this probability, one value for every client. The count varies by round and can be zero; a round that selects no client is not aggregated, so the model and the server's state carry over unchanged, and it records `num_clients` 0. **Exactly one** of this and `participation_rate` is required. |
-| `metrics` | list[str] | **required** | Filters fit-phase and server-diagnostic columns. Empty list keeps everything. Does **not** filter evaluation columns — chapter 08 §4.3. |
 
 Registered strategies — `server_strategies` (`fedbrew/core/registry.py`):
 
@@ -279,7 +278,6 @@ rule `UNHONOURED_CLIENT_OPTIONS` already applies on the client side.
 | --- | --- | --- | --- |
 | `update_rule` | enum | **required** | One of the nine below. |
 | `batch_size` | int | **required** | Training batch size. |
-| `metrics` | list[str] | **required** | Filters the `fit_`-prefixed task metrics at the client. Applied **before** the algorithm extras, so it cannot remove them. |
 | `learning_rate` | float \| null | `null` | |
 
 Registered update rules — `client_updates` (`fedbrew/core/registry.py`):
@@ -674,19 +672,20 @@ reported. Measured on the two shipped configs in that shape, the overlap was
 as a distribution rather than as "the two sets differ", which a weakly mixed
 key would also satisfy.
 
-## 9. `client_statistics` and `divergence`
+## 9. `reporting` and `divergence`
 
 Both are covered in full by chapter 08 — they decide which metric columns exist
 and when a run stops. Summarised here because they are config blocks:
 
 | Key | Default |
 | --- | --- |
-| `client_statistics.per_client_csv` | `false` |
-| `client_statistics.std` | `true` |
-| `client_statistics.variance` | `false` |
-| `client_statistics.min` | `true` |
-| `client_statistics.max` | `true` |
-| `client_statistics.worst_percent` | `10.0` |
+| `reporting.fit_metrics` | `[]` |
+| `reporting.per_client_csv` | `false` |
+| `reporting.statistics.std` | `true` |
+| `reporting.statistics.variance` | `false` |
+| `reporting.statistics.min` | `true` |
+| `reporting.statistics.max` | `true` |
+| `reporting.statistics.worst_percent` | `10.0` |
 | `divergence.metric` | `"fit_loss"` |
 | `divergence.non_finite` | `true` |
 | `divergence.blowup_factor` | `10.0` |
@@ -702,13 +701,41 @@ is on, and every detector off *is* off. Writing `divergence: null` is the short
 way to say that; turning off each detector individually is the long way, and
 means the same thing.
 
-**`divergence.metric` is cross-checked against `server.metrics`.** A non-empty
-`server.metrics` that omits the watched name filters it out before it reaches
+**`reporting` is every setting that decides which columns a run writes**
+(`ReportingConfig`, `fedbrew/core/config.py`); *when* a split is evaluated
+stays `evaluation`'s (§8).
+
+- **`fit_metrics`** is one list, applied once by the server to the aggregated
+  round after every client and server metric has been added: the task's
+  `fit_<metric>` columns, the update rule's own columns (`optimizer_steps`,
+  `communicated_bytes`, ...) and the strategy's diagnostics
+  (`server_control_norm`, `momentum_norm`, ...) alike. An empty list keeps
+  everything; a non-empty one keeps the names it lists that the run emits, so
+  arms of one comparison can share a list. It does not reach the evaluation
+  columns or `central_test_*` — chapter 08 §4.3 says why. It replaced
+  `server.metrics` and `client.metrics`, two filters applied in series with
+  different exemptions: the client exempted the FedAvg family's extras from
+  its list and the server then dropped them unless its own list named them,
+  so fourteen shipped arms asked for `optimizer_steps` and got no column.
+  Every shipped config's list is the old `server.metrics`, the filter that
+  decided which fit columns reached the round record, so each writes exactly
+  the columns it did (`tests/test_shipped_configs_resolve_as_recorded.py`).
+  A run gives its clients no list, so `client_update_metrics.csv` carries
+  every metric a client reports.
+- **`statistics`** are the cross-client aggregates each evaluated split
+  writes beside its two averages: `std`, `variance`, `min`, `max` and the mean
+  over the worst `worst_percent` of clients, written as `_worst10` for 10 —
+  the column name carries the percent, so two runs that differ in it do not
+  share a column.
+- **`per_client_csv`** writes `client_metrics.csv` and
+  `client_update_metrics.csv`, one row per client per round (chapter 09).
+
+**`divergence.metric` is cross-checked against `reporting.fit_metrics`.** A
+non-empty list that omits the watched name filters it out before it reaches
 the round record, and every detector then watches nothing for the whole run
 without failing. `validate_config` refuses it, so the config fails to load and
-no run starts. Evaluation columns, `central_test_*` and
-the selected strategy's own diagnostics are exempt, because `server.metrics`
-does not reach those — chapter 08 §4.3 says why. The empty default keeps
+no run starts. Evaluation columns and `central_test_*` are exempt, because the
+list does not reach those — chapter 08 §4.3 says why. The empty default keeps
 everything and cannot go wrong.
 
 ## 10. Keys that were removed
@@ -738,8 +765,10 @@ and ignored — `_REMOVED_KEYS` (`fedbrew/core/config.py`).
 | `client.local_epochs` | **renamed and relocated**: set `defaults.local_iterations` — §2.1. A config that writes it predates the rename |
 | `runtime.deterministic`, `runtime.deterministic_warn_only`, `runtime.use_amp` | **relocated**: set them in `numerics` — §7.5 |
 | `runtime.performance.matmul_precision`, `runtime.performance.cudnn_benchmark`, `runtime.performance.precision` | **relocated**: set them in `numerics` — §7.5 |
+| `server.metrics`, `client.metrics` | **merged**: set `reporting.fit_metrics`, one list the server applies once after every client and server metric is added — §9 |
 | `experiment.task` | the task is recorded by the model's registration (`models.register(..., task=)`) and read from `model.name`; a model cannot be registered without it, so there is nothing left to override |
 | the top-level `task` block | the task is inferred from `model.name` through the model's registration |
+| the top-level `client_statistics` block | **relocated**: `per_client_csv` to `reporting.per_client_csv`, the rest to `reporting.statistics` — §9 |
 
 `server.global_rounds` and `client.local_iterations` are relocations rather
 than deletions: the value is still read, and only the spelling a config may use
@@ -897,8 +926,8 @@ python -m pytest tests/test_unknown_config_keys.py \
   has.
 - **Setting `cudnn_benchmark: true` alongside `deterministic: true`.** The
   benchmark setting is skipped entirely; the config reads as though both apply.
-- **Expecting `server.metrics` to narrow the evaluation columns.** It filters
-  the fit path and server diagnostics only — chapter 08 §4.3.
+- **Expecting `reporting.fit_metrics` to narrow the evaluation columns.** It
+  filters the fit path and server diagnostics only — chapter 08 §4.3.
 - **Reading `divergence.enabled` in an old config.** Removed; the load error
   names `divergence: null` as the replacement.
 - **Assuming `server_optimizer` is needed.** Only `strategy: fedopt` requires

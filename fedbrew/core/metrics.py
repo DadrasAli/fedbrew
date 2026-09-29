@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 
 
@@ -35,16 +35,15 @@ def json_safe(value: Any) -> Any:
 
 
 #: Metrics a server strategy adds to the round record itself, keyed by the
-#: strategy name in the server registry. Every one is added *after*
-#: filter_metrics, so ``server.metrics`` never governs them -- which is what
-#: makes this list worth having in a leaf module: preflight needs to know
-#: which names a metrics list is unable to remove, and the alternative is
-#: guessing.
+#: strategy name in the server registry. Each is added *before* the server's
+#: one filter_metrics pass, so ``reporting.fit_metrics`` governs them like
+#: every other fit-side column; the plan header needs the names to list them,
+#: and the alternative is guessing.
 #:
 #: tests/test_metric_filter_scope.py aggregates a round on each of these two
 #: servers and diffs what they actually emitted against this mapping, so a
 #: diagnostic added to a server and not to this dict fails there rather than
-#: producing a wrong preflight verdict.
+#: producing a wrong plan header.
 SERVER_DIAGNOSTIC_METRICS: Mapping[str, frozenset[str]] = {
     "scaffold": frozenset(
         {
@@ -62,24 +61,6 @@ SERVER_DIAGNOSTIC_METRICS: Mapping[str, frozenset[str]] = {
             "effective_learning_rate_across_clients_max",
         }
     ),
-}
-
-#: The server diagnostics that are built from a client metric, and so exist
-#: only in a round whose clients reported it. FedLALR's spread of effective
-#: rates across clients is computed from each client's
-#: ``effective_learning_rate_coordinate_mean``; a client whose
-#: ``client.metrics`` does not name it filters it out, the server has nothing
-#: to spread, and the four columns are absent from the round. Config load
-#: refuses a config that asks for one of the four -- in ``divergence.metric``
-#: or either metrics list -- while ``client.metrics`` filters out its source
-#: (FINDINGS.csv POST-F12).
-SERVER_DIAGNOSTIC_SOURCES: Mapping[str, Mapping[str, str]] = {
-    "fedlalr": {
-        f"effective_learning_rate_across_clients_{statistic}": (
-            "effective_learning_rate_coordinate_mean"
-        )
-        for statistic in ("mean", "std", "min", "max")
-    },
 }
 
 #: Metric names no longer written, mapped to what replaced them. FedLALR's
@@ -123,38 +104,23 @@ def retired_metric_message(name: str) -> str:
     )
 
 
-def server_diagnostic_metrics(strategy: str, client_metrics: Sequence[str]) -> frozenset[str]:
-    """The diagnostics ``strategy`` adds to a round, given the clients' metrics list.
-
-    :data:`SERVER_DIAGNOSTIC_METRICS` less any whose source metric the clients
-    filter out. An empty ``client_metrics`` keeps everything, as
-    :func:`filter_metrics` does, so every source reaches the server.
-    """
-
-    names = SERVER_DIAGNOSTIC_METRICS.get(strategy, frozenset())
-    sources = SERVER_DIAGNOSTIC_SOURCES.get(strategy, {})
-    requested = set(client_metrics)
-    return frozenset(
-        name for name in names if name not in sources or not requested or sources[name] in requested
-    )
-
-
-#: What a client adds to its fit result *after* ``filter_metrics``, keyed by
-#: the update rule in the client registry. The client-side twin of
-#: SERVER_DIAGNOSTIC_METRICS, and needed for the same reason: preflight has to
-#: know which names ``client.metrics`` is unable to remove.
+#: What a client adds to its fit result *after* its own ``filter_metrics``,
+#: keyed by the update rule in the client registry. A run never gives a
+#: client a list -- ``reporting.fit_metrics`` is the server's, applied once to
+#: the whole round -- so a built client reports everything it computes and
+#: this matters only to a client constructed with a ``metrics`` list, as tests
+#: do. It is also the FedAvg family's share of RULE_FIT_METRICS below.
 #:
-#: The two halves of the convention below are not applied uniformly. The rules
-#: built on TorchSGDClient.fit and FedAvgClient.fit filter the task metrics and
-#: then add their extras, so those extras always survive; fedprox, scaffold,
+#: The convention is not applied uniformly. The rules built on
+#: TorchSGDClient.fit and FedAvgClient.fit filter the task metrics and then
+#: add their extras, so those extras always survive; fedprox, scaffold,
 #: delta_sgd and fedlalr assemble everything first and filter the lot, so for
-#: those four nothing survives a list that does not name it. Those four have no
-#: row.
+#: those four nothing survives a list that does not name it. Those four have
+#: no row.
 #:
 #: tests/test_divergence_metric_reachable.py runs every rule's fit under a
 #: metrics list naming nothing real and diffs what survived against this
-#: mapping, so a client that starts or stops filtering its extras fails there
-#: rather than producing a wrong preflight verdict.
+#: mapping, so a client that starts or stops filtering its extras fails there.
 _BASE_CLIENT_FIT_METRICS = frozenset(
     {
         "optimizer_steps",
@@ -177,11 +143,10 @@ CLIENT_UNFILTERED_FIT_METRICS: Mapping[str, frozenset[str]] = {
 _VOLUME = frozenset({"communicated_parameters", "communicated_bytes"})
 
 #: Everything an update rule's fit result carries beside the task's own
-#: ``fit_<metric>`` names, as it reaches the server with no metrics list in
-#: force: the rule's algorithm columns (docs/08 §4.2). The FedAvg family's
-#: are CLIENT_UNFILTERED_FIT_METRICS, exempt from ``client.metrics``; the
-#: other four rules' go through ``client.metrics`` with the task's. The server
-#: diagnostics are SERVER_DIAGNOSTIC_METRICS. The plan header's fit columns
+#: ``fit_<metric>`` names, as it reaches the server: the rule's algorithm
+#: columns (docs/08 §4.2). The server diagnostics are
+#: SERVER_DIAGNOSTIC_METRICS; ``reporting.fit_metrics`` filters both, and the
+#: task's, once at the server. The plan header's fit columns
 #: are built from this, and tests/test_planned_columns_are_written.py runs
 #: every rule on every task to hold it to what is written. An update rule
 #: not listed here (an extension) is planned with the task's metrics alone.
@@ -215,45 +180,6 @@ RULE_FIT_METRICS: Mapping[str, frozenset[str]] = {
 POST_FIT_RULE_METRICS = frozenset({"fit_total_loss"})
 
 
-def client_fit_extras(update_rule: str) -> frozenset[str]:
-    """What this rule's fit result carries past the client's own filter."""
-
-    return CLIENT_UNFILTERED_FIT_METRICS.get(update_rule, frozenset())
-
-
-def surviving_client_fit_extras(update_rule: str, server_metrics: Sequence[str]) -> list[str]:
-    """The rule's extras that reach round_metrics.csv, sorted.
-
-    The client exempts its extras from ``client.metrics`` and then the server
-    runs the whole aggregated dict through :func:`filter_metrics` again against
-    ``server.metrics``, which un-exempts them. So the convention holds on one
-    side of the round and not the other, and the names most likely to be
-    listed in a config -- ``optimizer_steps``, ``client_learning_rate`` -- are
-    exactly the ones that vanish.
-
-    An empty ``server_metrics`` keeps everything, matching
-    :func:`filter_metrics`, so everything survives.
-    """
-
-    extras = client_fit_extras(update_rule)
-    requested = list(server_metrics)
-    if not requested:
-        return sorted(extras)
-    return sorted(extras & set(requested))
-
-
-def dropped_client_fit_extras(update_rule: str, server_metrics: Sequence[str]) -> list[str]:
-    """The rule's extras that ``server.metrics`` removes, sorted.
-
-    The complement of :func:`surviving_client_fit_extras`, which is what
-    preflight reports: a config naming one of these under ``client.metrics``
-    reads as though it asked for a column it will not get.
-    """
-
-    surviving = set(surviving_client_fit_extras(update_rule, server_metrics))
-    return sorted(client_fit_extras(update_rule) - surviving)
-
-
 def filter_metrics(
     metrics: dict[str, float],
     requested: list[str],
@@ -264,13 +190,11 @@ def filter_metrics(
     metrics that exist and silently ignores names that do not, so a list may
     name a metric only some arms emit.
 
-    The convention on both sides is that this filter governs *measured* metrics
-    and nothing else: clients apply it to the task metrics and then add their
-    algorithm extras (torch_sgd_client.py), and the two servers that produce
-    diagnostics apply it to the aggregated client metrics and then add theirs
-    (scaffold.py, fedlalr.py). Filtering a framework
-    diagnostic would let a metrics list silently drop a column that
-    checkpointing.best_metric or the divergence guard names.
+    A run applies it once, at the server, with ``reporting.fit_metrics``: to
+    the aggregated round after the strategy has added its own diagnostics
+    (scaffold.py, fedlalr.py), so every fit-side column goes through the same
+    list. Config load refuses a divergence.metric the list would drop, which
+    is the one column whose absence would silence something.
     """
 
     if not requested:

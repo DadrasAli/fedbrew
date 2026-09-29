@@ -19,13 +19,14 @@ not kept: `fit_*` comes from a separate evaluation pass, the post-fit pass
 
 ```
 task.eval_step                     per batch of the train split, after the update
-  -> task.compute_metrics          every key it returns, one number per client
-  -> filter_metrics(client.metrics)  client-side filter, prefixed "fit_"
+  -> task.compute_metrics          every key it returns, one number per client,
+                                   prefixed "fit_", plus the rule's own columns
   -> FitResult.metrics             one record per selected client
   -> client_update_metrics.csv     one row per client per round; needs
-                                   client_statistics.per_client_csv
+                                   reporting.per_client_csv
   -> WeightedMetricAccumulator     example-weighted mean across clients
-  -> filter_metrics(server.metrics)  server-side filter
+  -> + the strategy's diagnostics  SCAFFOLD's and FedLALR's, §7.2 and §7.3
+  -> filter_metrics(reporting.fit_metrics)  the one filter, at the server
   -> round_metrics.csv             one column per surviving name
 ```
 
@@ -37,7 +38,7 @@ task.eval_step                     per batch, on the client
   -> ["loss", "accuracy"]          the client keeps these two; a task's other
                                    metrics never reach this path
   -> EvalResult.metrics            keyed "{split}_{metric}"
-  -> client_metrics.csv            per client, if client_statistics.per_client_csv
+  -> client_metrics.csv            per client, if reporting.per_client_csv
   -> _aggregate_client_split_metrics   the aggregate columns
   -> round_metrics.csv
 ```
@@ -58,7 +59,7 @@ builds them from what the run's task declares it reports
 (`TaskAdapter.METRICS`, chapter 12 §6) and from the update rule's own columns
 (`RULE_FIT_METRICS`, `fedbrew/core/metrics.py`), and asks
 `client_metric_names` for the aggregates, so it tracks the task, the
-`client_statistics` toggles and the configured `worst_percent` rather than
+`reporting.statistics` toggles and the configured `worst_percent` rather than
 assuming a classification run at the defaults;
 `tests/test_planned_columns_every_task.py` holds it to what every shipped
 config writes.
@@ -259,93 +260,67 @@ already the true upload volume for those arms.
 
 ### 4.3 Which fit metrics survive to `round_metrics.csv`
 
-Two filters, both `filter_metrics` (`fedbrew/core/metrics.py`), whose rule
-is: **an empty list means keep everything**; a non-empty list keeps only the
-named metrics that exist, and silently drops names that do not.
+One filter, `filter_metrics` (`fedbrew/core/metrics.py`), with one list,
+`reporting.fit_metrics`, whose rule is: **an empty list means keep
+everything**; a non-empty list keeps only the named metrics that exist, and
+silently drops names that do not, so arms of one comparison can share a list.
 
-| Filter | Config key | Applies to |
-| --- | --- | --- |
-| Client-side | `client.metrics` | the `fit_`-prefixed task metrics only, before the algorithm extras are added |
-| Server-side | `server.metrics` | the aggregated client metrics, before they reach `round_metrics.csv` |
+The server applies it once, to the aggregated round, after every client and
+server metric has been added: the task's `fit_`-prefixed metrics, the rule's
+own columns (§4.2, §7) and the strategy's diagnostics (§7.2, §7.3) alike —
+`FedAvgServer.aggregate_stream` (`fedbrew/servers/fedavg.py`) and the servers
+that add diagnostics first (`fedbrew/servers/scaffold.py`,
+`fedbrew/servers/fedlalr.py`). A run gives its clients no list, so every
+client reports everything it computes and `client_update_metrics.csv` carries
+all of it. The names are the **prefixed** ones: a config asking for
+`fit_loss` keeps the number the task reports as `loss`.
 
-The client-side filter runs on the **prefixed** names, so a config asking for
-`fit_loss` selects the number the task reports as `loss`
-— `TorchSGDClient._evaluate_model` (`fedbrew/clients/torch_sgd_client.py`).
+**A fit column is written exactly when the list names it or is empty.** There
+are no exemptions to remember. The one column whose absence would silence
+something, `divergence.metric`, is checked against the list at load (§12);
+`checkpointing.best_metric` names an evaluation column, which the list does
+not reach (below).
 
-**Each filter governs measured metrics and nothing else — but only its own
-side.** The algorithm extras in §4.2 and §7 are added *after* the client filter
-in `TorchSGDClient.fit` (`fedbrew/clients/torch_sgd_client.py`), and the two servers that produce
-diagnostics add theirs *after* the server filter (§7.2, §7.3). Neither
-list can remove a diagnostic added on *its* side, which is deliberate: a
-metrics list that could drop `server_control_norm` could also drop a column
-`checkpointing.best_metric` or `divergence.metric` names, and the run would
-then fail mid-flight on a key it never asked to lose. The rule is stated once,
-in `filter_metrics`' docstring (`fedbrew/core/metrics.py`).
+It replaced two lists, `client.metrics` and `server.metrics`, applied in
+series with different exemptions: the FedAvg family's extras
+(`CLIENT_UNFILTERED_FIT_METRICS`) were added after the client filter and then
+dropped by the server's unless it named them, the other four rules filtered
+their extras on the client too, and the strategy diagnostics were added after
+the server's filter and so could not be dropped at all. Fourteen shipped arms
+listed `optimizer_steps` and `client_learning_rate` under `client.metrics`
+and got no column, and the plan header carried a "not written" row to explain
+it. Each shipped config's list is its old `server.metrics` — the filter that
+decided which fit columns reached the round record — so every shipped config
+writes exactly the columns it did
+(`tests/test_shipped_configs_resolve_as_recorded.py`); a run that wants
+`optimizer_steps` adds it to its own list.
 
-**A client extra is exempt from `client.metrics` and not from
-`server.metrics`.** The two filters run in series, so an extra the client adds
-after its own filter still meets the server's. The five names in
-`CLIENT_UNFILTERED_FIT_METRICS` — `optimizer_steps`, `communicated_bytes`,
-`communicated_parameters`, `trainable_parameters`, `active_target_tokens`, plus
-`client_learning_rate` on `fedavg`, `centralized` and `fedavg_ft` — reach
-`round_metrics.csv` **only if `server.metrics` lists them or is empty.**
+**The communication columns.** Preflight tells a reader to compare arms on
+`communicated_bytes` (chapter 07 §4.4), so every shipped arm that reports the
+volume — `fedprox`, `scaffold`, `delta_sgd` and `fedlalr` on FEMNIST,
+`scaffold` on MNIST — names `communicated_parameters` and
+`communicated_bytes` in its list. `tests/test_planned_columns_are_written.py`
+runs the header-against-CSV round trip for every registered rule and checks
+that each shipped arm naming the volume plans it.
 
-**More generally, naming a metric under `client.metrics` does not by itself
-produce a column**, for any rule: the server filters the aggregated dict
-against a non-empty `server.metrics`, so a name the client list carries and the
-server list omits is emitted and then dropped. Fourteen shipped configs are in
-that shape on purpose: every FedAvg-family arm lists `optimizer_steps` and
-`client_learning_rate` under `client.metrics` and neither under
-`server.metrics`, and `delta_sgd.yaml` and `fedlalr.yaml` keep `client_eta_0`
-and `client_alpha` the same way. Nothing is malfunctioning — both lists do
-exactly what the table above says — but the config reads as though it asked for
-columns it does not get, so the plan header names every such name before the
-run starts:
-
-```
-not written   client_learning_rate, optimizer_steps -- named in client.metrics
-              and emitted, then removed by server.metrics. Add them there to
-              keep them.
-```
-
-The shipped arms are left as they are rather than edited: adding the names to
-`server.metrics` would make an arm's `round_metrics.csv` two columns wider than
-the runs it has already written, which is a comparability problem in exchange
-for a diagnostic nothing currently reads. A run that wants the
-columns adds them to `server.metrics` in its own config.
-
-**The communication columns are named in both lists.** Preflight tells a reader
-to compare arms on `communicated_bytes` (chapter 07 §4.4), so every shipped arm
-that reports the volume — `fedprox`, `scaffold`, `delta_sgd` and `fedlalr` on
-FEMNIST, `scaffold` on MNIST — lists `communicated_parameters` and
-`communicated_bytes` under `server.metrics` as well as `client.metrics`. For
-those four rules both are needed: they filter their whole fit result against
-`client.metrics` and have no row in `CLIENT_UNFILTERED_FIT_METRICS`, so a name
-listed only under `server.metrics` never reaches the server. The five used to list them under `client.metrics` alone,
-and the header's row, which then consulted only the FedAvg family's exempt
-extras, said nothing. `tests/test_planned_columns_are_written.py` runs the
-header-against-CSV round trip for every registered rule, and checks that each
-shipped arm asking for the volume writes it.
-
-**The evaluation path is deliberately outside both.** The loop sends
+**The evaluation path is deliberately outside the list.** The loop sends
 `metrics: ["loss", "accuracy"]` in the evaluation request built by
-`_evaluate_models_on_clients` (`fedbrew/core/loop.py`),
-which overrides `client.metrics`, and the split aggregates are written straight
-into `round_info.metrics` without passing through `server.metrics`. Setting
-`server.metrics: [fit_loss]` does **not** remove `test_accuracy_avg` from the
-CSV.
+`_evaluate_models_on_clients` (`fedbrew/core/loop.py`), and the split
+aggregates are written straight into `round_info.metrics` without passing
+through `reporting.fit_metrics`. Setting `fit_metrics: [fit_loss]` does
+**not** remove `test_accuracy_avg` from the CSV.
 
 This is a design choice, not an oversight, and the reasoning is worth stating
 because the alternative looks tidier than it is:
 
 | | Effect |
 | --- | --- |
-| **What controls the evaluation columns instead** | `client_statistics` (§5) plus `evaluation.splits` and `evaluation.model_scope`. That axis is *per statistic* — drop `_std`, drop `_variance`, change `worst_percent` — which is the axis anyone actually wants. Naming 36 columns individually is not. |
-| **Why `server.metrics` is not extended to cover it** | It would silently drop columns other keys depend on: `checkpointing.best_metric` and `divergence.metric` both name evaluation columns, and neither is consulted when the filter runs. It would also change the output of every existing config that sets a non-empty `server.metrics`, including the shipped ones. |
+| **What controls the evaluation columns instead** | `reporting.statistics` (§5) plus `evaluation.splits` and `evaluation.model_scope`. That axis is *per statistic* — drop `_std`, drop `_variance`, change `worst_percent` — which is the axis anyone actually wants. Naming 36 columns individually is not. |
+| **Why `reporting.fit_metrics` is not extended to cover it** | It would silently drop columns other keys depend on: `checkpointing.best_metric` and `divergence.metric` both name evaluation columns, and neither is consulted when the filter runs. It would also change the output of every existing config that sets a non-empty list, including the shipped ones. |
 | **Why there is no third `evaluation.metrics` key** | The config surface is the thing this documentation set is trying to shrink, and a third filter key with a third scope is the shape of surface that produces the drift in the first place. |
 
-The consequence to know: `server.metrics` shortens `round_metrics.csv` on the
-fit side only. The evaluation columns come with the splits you evaluate.
+The consequence to know: `reporting.fit_metrics` shortens `round_metrics.csv`
+on the fit side only. The evaluation columns come with the splits you evaluate.
 
 ## 5. Client-evaluation aggregates
 
@@ -366,11 +341,11 @@ clients with `n_c > 0` on that split, *m_c* the client's value, and
 | --- | --- | --- | --- |
 | `_sample_weighted_avg` | `sum_c (m_c * n_c) / N`; for causal LM `n_c` is a token count (chapter 07 §3.1) | pooled over examples (active target tokens for causal LM) — the largest clients move it most | always on |
 | `_avg` | `(1/\|C\|) * sum_c m_c` | averaged over clients — a 9-example client counts as much as a 900-example one | always on |
-| `_std` | `sqrt( (1/\|C\|) * sum_c (m_c - mean)^2 )` — `statistics.pstdev`, **population**, divides by \|C\| | spread across clients (population standard deviation) | `client_statistics.std` (default `true`) |
-| `_variance` | `(1/\|C\|) * sum_c (m_c - mean)^2` — `statistics.pvariance`, **population** | spread across clients, before the square root (population variance) | `client_statistics.variance` (default `false`) |
-| `_min` | `min_c m_c` | the single lowest client value | `client_statistics.min` (default `true`) |
-| `_max` | `max_c m_c` | the single highest client value | `client_statistics.max` (default `true`) |
-| `_worst{P}` | mean of the *k* worst, `k = max(1, ceil(\|C\| * P / 100))` | the mean over the worst {P}% of clients — the tail, not the average | `client_statistics.worst_percent` (default `10.0`) |
+| `_std` | `sqrt( (1/\|C\|) * sum_c (m_c - mean)^2 )` — `statistics.pstdev`, **population**, divides by \|C\| | spread across clients (population standard deviation) | `reporting.statistics.std` (default `true`) |
+| `_variance` | `(1/\|C\|) * sum_c (m_c - mean)^2` — `statistics.pvariance`, **population** | spread across clients, before the square root (population variance) | `reporting.statistics.variance` (default `false`) |
+| `_min` | `min_c m_c` | the single lowest client value | `reporting.statistics.min` (default `true`) |
+| `_max` | `max_c m_c` | the single highest client value | `reporting.statistics.max` (default `true`) |
+| `_worst{P}` | mean of the *k* worst, `k = max(1, ceil(\|C\| * P / 100))` | the mean over the worst {P}% of clients — the tail, not the average | `reporting.statistics.worst_percent` (default `10.0`) |
 
 `{split}_num_clients` is emitted beside these and is not one of them: it is
 `|C|` itself, the client count every formula above divides by or sums over.
@@ -432,7 +407,7 @@ The `{P}` in the name comes from `worst_percent_label` (`fedbrew/core/config.py`
 
 ### 5.2 Full column list at the default configuration
 
-With `client_statistics` at its defaults (`std` and `min` and `max` on,
+With `reporting.statistics` at its defaults (`std` and `min` and `max` on,
 `variance` off, `worst_percent` 10.0) and `evaluation.model_scope: global`,
 each evaluated split contributes thirteen columns:
 
@@ -485,7 +460,7 @@ for metric in CLIENT_METRIC_BASES:
 A task with no notion of correct/incorrect -- a scalar regression objective,
 say -- reports `{split}_loss` and nothing named `accuracy` at all, on every
 client, every round; no `{split}_accuracy_*` column ever appears for it, the
-same way a column no `client_statistics` toggle turns on never appears.
+same way a column no `reporting.statistics` toggle turns on never appears.
 `fit_accuracy` is unaffected: the fit path is free-form (§4.3) and was never
 gated on this.
 
@@ -573,11 +548,11 @@ Both are example-weighted across clients by §4.1.
 | `server_control_norm` | `||c||_2` of the server control variate after the round | server |
 | `mean_client_control_delta_norm` | `(1/\|R\|) * sum_i ||c_i_new - c_i_old||_2` over participating clients | server |
 
-The two server metrics are added **after** `filter_metrics`
-(`ScaffoldServer.aggregate_stream`, `fedbrew/servers/scaffold.py`), so they
-appear whether or not `server.metrics` lists
-them. `configs/femnist/scaffold.yaml` lists them anyway; the list is not what
-makes them appear.
+The two server metrics are added **before** the server's one
+`filter_metrics` pass (`ScaffoldServer.aggregate_stream`,
+`fedbrew/servers/scaffold.py`), so `reporting.fit_metrics` keeps or drops
+them like any fit column (§4.3). `configs/femnist/scaffold.yaml` and
+`configs/mnist/scaffold.yaml` list them.
 
 The four SCAFFOLD norms, and FedLALR's `momentum_norm` and `second_moment_norm`
 (§7.3), are square roots of `squared_l2_norm_model_state`
@@ -614,33 +589,32 @@ falls below `epsilon^2` (`_learning_rate_metrics`,
 The rates `r_j` are computed in **float32**, whatever the model's dtype
 (`_learning_rate_metrics`). The three `coordinate` names are per-client values: each client's row in
 `client_update_metrics.csv` holds its own, and a round column exists only
-when `server.metrics` passes it, as for every client metric. The four
+when `reporting.fit_metrics` passes it, as for every client metric. The four
 `across_clients` names are the server's, computed in `_dispersion_metrics`
 (`fedbrew/servers/fedlalr.py`) with each client counted once whatever its
 example count, matching §5's population variance.
 
 Both families were once `client_effective_learning_rate_{mean,min,max}`, on
 the client and the server alike: different quantities under one name. In one
-config shape -- a `client.metrics` naming the client's `_min` and not `_mean`
+config shape -- a client list naming the client's `_min` and not `_mean`
 -- the round record carried the clients' averaged minimum under the name
 defined as the server's minimum across clients (`FINDINGS.md`, `POST-F14`).
 The four old names are retired (`RETIRED_METRIC_NAMES`,
-`fedbrew/core/metrics.py`). A config naming one in `server.metrics`,
-`client.metrics`, `divergence.metric` or `best_metric` is refused at load with
-the replacement. A resume onto CSVs whose header carries one is refused
+`fedbrew/core/metrics.py`). A config naming one in `reporting.fit_metrics`,
+`divergence.metric` or `best_metric` is refused at load with the
+replacement. A resume onto CSVs whose header carries one is refused
 before anything is written, so no file holds both spellings.
 
 `momentum_norm`, `second_moment_norm` and the four `across_clients` names are
-added **after** `filter_metrics`, in `FedLALRServer.aggregate_stream`
-(`fedbrew/servers/fedlalr.py`), as SCAFFOLD's are, so they appear whether or
-not `server.metrics` lists them, with one condition. The four spread names
-are computed from each client's `effective_learning_rate_coordinate_mean`, so
-they exist only when the clients report it: a non-empty `client.metrics`
-without it filters it out, and the server has nothing to spread.
-`SERVER_DIAGNOSTIC_SOURCES` (`fedbrew/core/metrics.py`) records that
-dependency. The plan header promises the four only when it holds, and config
-load refuses a config that asks for one of them without it (§12,
-`POST-F12`).
+added **before** the server's one `filter_metrics` pass, in
+`FedLALRServer.aggregate_stream` (`fedbrew/servers/fedlalr.py`), as
+SCAFFOLD's are, so `reporting.fit_metrics` keeps or drops them like any fit
+column. The four spread names are computed from each client's
+`effective_learning_rate_coordinate_mean`, which every client reports: a run
+gives its clients no list, so the source always reaches the server, whether
+or not the list keeps it as a column of its own. Under the two lists a
+`client.metrics` without it left the server nothing to spread, and config load
+refused that (`POST-F12`); the case no longer arises.
 
 ### 7.4 Delta-SGD — `_step_size_metrics` (`fedbrew/clients/torch_delta_sgd_client.py`)
 
@@ -719,8 +693,8 @@ the empty string, not `0`.
 ### 9.2 `client_metrics.csv`
 
 One row per client per round. **Off by default** — written only when
-`client_statistics.per_client_csv` is `true`, which also switches on §9.3. At `clients: all` on a 500-round
-FEMNIST run this is ~1.8M rows (`ClientStatisticsConfig`, `fedbrew/core/config.py`).
+`reporting.per_client_csv` is `true`, which also switches on §9.3. At `clients: all` on a 500-round
+FEMNIST run this is ~1.8M rows (`ReportingConfig`, `fedbrew/core/config.py`).
 
 Fixed thirteen-column schema — `_CLIENT_EVALUATION_FIELDS`
 (`fedbrew/core/artifacts.py`):
@@ -757,7 +731,7 @@ the `personal_` aggregates either way.
 ### 9.3 `client_update_metrics.csv`
 
 One row per selected client per round, from the fit path. **Off by default** —
-`client_statistics.per_client_csv` gates *both* per-client CSVs, not just
+`reporting.per_client_csv` gates *both* per-client CSVs, not just
 `client_metrics.csv` — `flush_round_artifacts` (`fedbrew/core/artifacts.py`) and
 `_artifact_file_names` (`fedbrew/core/runner.py`). **Appended**
 rather than rewritten — `flush_client_csvs` (`fedbrew/core/artifacts.py`): they
@@ -774,10 +748,10 @@ round_id, client_id, phase, num_examples, <every fit metric name, sorted>
 (`_build_client_metric_record`, `fedbrew/core/loop.py`). `num_examples` is the
 client's aggregation weight.
 
-The metric columns are the client's `FitResult.metrics` after `client.metrics`
-filtering and after the algorithm extras were added — so this file carries the
+The metric columns are the client's whole `FitResult.metrics`, the algorithm
+extras included — a run gives its clients no list — so this file carries the
 per-client detail that `round_metrics.csv` only has the mean of, and is not
-subject to `server.metrics`.
+subject to `reporting.fit_metrics`.
 
 ### 9.4 `run.json`
 
@@ -900,37 +874,20 @@ error. The loop notices at the end and prints
 `divergence.metric=... was never present in any round's metrics`
 (`run_fl_loop`, `fedbrew/core/loop.py`), which on a 500-round arm is several
 GPU-hours late. Two
-preflight checks cover the ways a name goes missing, and the first covers
-**both** filters on the path from the task to the round record:
+preflight checks cover the ways a name goes missing:
 
 | Check | Refuses |
 | --- | --- |
-| `_validate_divergence_metric_is_reachable` | a `metric` that a non-empty `client.metrics` would drop before the `FitResult` is built, or that a non-empty `server.metrics` would drop before it reaches the round record. Evaluation columns, `central_test_*` and the strategy's own diagnostics are exempt from both, because §4.3's filter never reaches them. |
+| `_validate_divergence_metric_is_reachable` | a `metric` that a non-empty `reporting.fit_metrics` would drop before it reaches the round record: any fit-side column, the rule's extras and the strategy's diagnostics included. Evaluation columns and `central_test_*` are exempt, because §4.3's filter never reaches them. |
 | `_validate_checkpoint_metric_is_emitted` | the same defect for checkpoint selection: a `val_` name `client_metric_names` never produces. |
 
-**A strategy diagnostic built from a client metric is exempt only while that
-metric survives.** FedLALR's four `effective_learning_rate_across_clients_*`
-columns exist only while `client.metrics` keeps
-`effective_learning_rate_coordinate_mean` (§7.3). The exemption is
-`server_diagnostic_metrics`, which drops them when it does not, and
-`_require_derived_diagnostic_sources` refuses a `divergence.metric` or either
-metrics list naming one of the four under a `client.metrics` without it,
-naming the metric to add. The check once exempted every strategy diagnostic
-whole, so that monitor loaded and watched a column no round carried
-(`FINDINGS.md`, `POST-F12`).
-
-**The client filter is the earlier and the stricter of the two.** Every rule
-runs its fit metrics through `client.metrics` before the `FitResult` exists
-(`TorchSGDClient._evaluate_model`, `fedbrew/clients/torch_sgd_client.py`), so a list omitting `fit_loss` — the
-default
-`divergence.metric` — means no client ever reports it and `server.metrics` has
-nothing left to keep. The two lists also have different exemptions: five rules
-add `optimizer_steps`, `communicated_*`, `trainable_parameters` and
-`active_target_tokens` *after* the client filter, so those survive any
-`client.metrics` (`CLIENT_UNFILTERED_FIT_METRICS`), while `fedprox`,
-`scaffold`, `delta_sgd` and `fedlalr` filter the lot and have no
-exemption at all. `server.metrics` governs every one of those names for every
-rule.
+**One list, no exemptions.** Under the two lists this check had to follow
+both, with their different exemptions: the client list could drop a name
+before the `FitResult` existed, five rules added their extras after it, and a
+FedLALR spread column existed only while the client list kept its source
+(`FINDINGS.md`, `POST-F12`). With one list applied once at the server, the
+question is only whether a non-empty list names the watched column
+(`tests/test_divergence_metric_reachable.py`).
 
 Both live in `validate_config` (`fedbrew/core/config.py`), which `load_config`
 calls, so both stop a run. `fedbrew/core/validation.py` is reached only under
@@ -960,20 +917,19 @@ Every key that adds, removes or renames a column.
 
 | Key | Default | Effect on metrics |
 | --- | --- | --- |
-| `server.metrics` | required | Filters fit-phase and server-diagnostic columns in `round_metrics.csv`. Empty list keeps everything. Does not touch evaluation aggregates. |
-| `client.metrics` | required | Filters the `fit_`-prefixed task metrics at the client, before algorithm extras are added. Does not touch the evaluation pass. |
-| `client_statistics.per_client_csv` | `false` | Writes **both** `client_metrics.csv` and `client_update_metrics.csv`. With it off, a run's only metric artifacts are `round_metrics.csv` and `run.json`. |
-| `client_statistics.std` | `true` | Adds `{split}_{metric}_std`. |
-| `client_statistics.variance` | `false` | Adds `{split}_{metric}_variance`. |
-| `client_statistics.min` | `true` | Adds `{split}_{metric}_min`. |
-| `client_statistics.max` | `true` | Adds `{split}_{metric}_max`. |
-| `client_statistics.worst_percent` | `10.0` | Adds `{split}_{metric}_worst{P}`; `null` or `0` removes it. Changing `P` **renames** the column. |
+| `reporting.fit_metrics` | `[]` | Filters every fit-side column of `round_metrics.csv` — the task's `fit_*`, the rule's own and the strategy's diagnostics — once, at the server. Empty list keeps everything. Does not touch evaluation aggregates (§4.3). |
+| `reporting.per_client_csv` | `false` | Writes **both** `client_metrics.csv` and `client_update_metrics.csv`. With it off, a run's only metric artifacts are `round_metrics.csv` and `run.json`. |
+| `reporting.statistics.std` | `true` | Adds `{split}_{metric}_std`. |
+| `reporting.statistics.variance` | `false` | Adds `{split}_{metric}_variance`. |
+| `reporting.statistics.min` | `true` | Adds `{split}_{metric}_min`. |
+| `reporting.statistics.max` | `true` | Adds `{split}_{metric}_max`. |
+| `reporting.statistics.worst_percent` | `10.0` | Adds `{split}_{metric}_worst{P}`; `null` or `0` removes it. Changing `P` **renames** the column. |
 | `evaluation.model_scope` | `"global"` | `personal` replaces every split name with its `personal_` form; `both` emits both sets. |
 | `evaluation.{train,val,test}.every` | `10`, `5`, `10`; `never` for a split the data does not carry | Which rounds have values in that split's columns. The columns exist for the whole run either way, except for a split the data does not carry, which has none (chapter 04 §8). |
 | `evaluation.central_test.every` | `10` | Same, for every `central_test_*` column. |
 | `evaluation.fit.every` | `1` | Which rounds have values in the `fit_*` task columns and FedProx's `fit_total_loss`, which come from the post-fit pass (§1); `never` removes those columns. |
 | `evaluation.{train,val,test}.clients` | `participating`, `all`, `all` | Which clients enter the aggregate — changes the numbers, not the column set. |
-| `divergence.metric` | `"fit_loss"` | Requires that metric to be present every round. `validate_config` refuses a name a non-empty `server.metrics` would filter out (`config.py`, `_validate_divergence_metric_is_reachable`). |
+| `divergence.metric` | `"fit_loss"` | Requires that metric to be present every round. `validate_config` refuses a name a non-empty `reporting.fit_metrics` would filter out (`config.py`, `_validate_divergence_metric_is_reachable`). |
 | `checkpointing.best_metric` | — | Requires that column to exist; validated against `client_metric_names` at config load. |
 
 A `clients` scope of `all` rather than `selected` changes what
@@ -1051,13 +1007,13 @@ head -1 <output_dir>/round_metrics.csv | tr ',' '\n'
    `server.aggregation_weighting`. That key governs parameter aggregation only.
 8. **`json_safe` must run on every record that reaches JSON**, paired with
    `allow_nan=False` at the `json.dumps` call.
-9. **A metrics list filters measured metrics and nothing else.** A server that
-   adds diagnostics of its own adds them *after* `filter_metrics`, as both
-   that do already agree (§7.2, §7.3); a client adds its algorithm extras after
-   `client.metrics`. Filtering a framework diagnostic would let a list drop a
-   column another key depends on.
-10. **The evaluation path stays outside both filters.** Its columns are
-    controlled by `client_statistics`, `evaluation.splits` and
+9. **One fit filter, applied once, at the server.** `reporting.fit_metrics`
+   runs after every client and server metric is added: a server that adds
+   diagnostics adds them *before* `filter_metrics`, as both that do agree
+   (§7.2, §7.3), and a run gives its clients no list. The column a key depends
+   on, `divergence.metric`, is checked against the list at load (§12).
+10. **The evaluation path stays outside the filter.** Its columns are
+    controlled by `reporting.statistics`, `evaluation.splits` and
     `evaluation.model_scope`, and `fedbrew/core/loop.py` does not import
     `filter_metrics` at all. §4.3 gives the reasoning.
 
@@ -1067,18 +1023,18 @@ head -1 <output_dir>/round_metrics.csv | tr ',' '\n'
 | --- | --- |
 | `tests/test_docs_metric_names.py` | Every aggregate column name in §5.2 equals `client_metric_names()`; the fixed schemas in §9 equal `_CLIENT_EVALUATION_FIELDS` and `_ROUND_TIMING_FIELDS`; the base metrics equal `CLIENT_METRIC_BASES`. |
 | `tests/test_global_evaluation.py` | `test_accuracy_worst10` is computed as the mean of the worst 10%. |
-| `tests/test_evaluation_schedule.py` | Suffix set follows the `client_statistics` toggles, including fractional `worst_percent`. |
+| `tests/test_evaluation_schedule.py` | Suffix set follows the `reporting.statistics` toggles, including fractional `worst_percent`. |
 | `tests/test_evaluation_model_scope.py` | `personal_` prefixing, and that checkpoint selection rejects a `worst` percentage other than the configured one. |
 | `tests/test_aggregation_weighting.py` | Metrics stay example-weighted under uniform parameter weighting. |
 | `tests/test_non_finite_aggregation.py` | A non-finite client value produces `NaN` in every dispersion column without changing the column set. |
-| `tests/test_communication_cost_metrics.py` | A client's cost metrics survive `client.metrics` into the CSV. |
+| `tests/test_communication_cost_metrics.py` | No run gives a client a metrics list, so every client's cost metrics reach `client_update_metrics.csv`, and the audited arms keep them in `round_metrics.csv`. |
 | `tests/test_client_communication_cost.py` | `communicated_bytes` equals every model-shaped state in the payload, for every rule. |
 | `tests/test_scaffold_fedprox_communication_cost.py` | SCAFFOLD's 2x per-round volume. |
 | `tests/test_divergence.py` | Detector thresholds and the `termination` block. |
 | `tests/test_fedlalr_diagnostics.py` | §7.3: each FedLALR learning-rate column equals its hand-computed estimand for two clients with known rates, no name is both a coordinate and an across-clients statistic, a retired name is refused in every config place that names a metric, and a resume onto CSVs carrying one is refused and changes nothing (`POST-F14`). |
-| `tests/test_divergence_metric_reachable.py` | §12's cross-check on both filters: it fires on a name either `client.metrics` or `server.metrics` would drop, stays quiet for evaluation columns, `central_test_*`, the selected strategy's diagnostics and the extras a rule adds after the client filter, derives `CLIENT_UNFILTERED_FIT_METRICS` from every rule's `fit`, no shipped config trips it, and the check stays in `validate_config` rather than the preflight module. |
+| `tests/test_divergence_metric_reachable.py` | §12's cross-check: it fires on a name a non-empty `reporting.fit_metrics` would drop, the rule's extras and the strategy's diagnostics included, stays quiet for evaluation columns and `central_test_*`, derives `CLIENT_UNFILTERED_FIT_METRICS` from every rule's `fit`, no shipped config trips it, and the check stays in `validate_config` rather than the preflight module. |
 | `tests/test_client_history_summary.py` | The running totals `client_update_metrics.csv` column names come from. |
-| `tests/test_metric_filter_scope.py` | §4.3, §7.2 and §7.3: both servers add diagnostics after the filter, the loop never filters, and §4.3 states the choice as one. Fails if a third server starts emitting diagnostics. |
+| `tests/test_metric_filter_scope.py` | §4.3, §7.2 and §7.3: both servers add diagnostics before the one filter, so the list keeps or drops them, the loop never filters, and §4.3 states the choice as one. Fails if a third server starts emitting diagnostics. |
 
 ### Known failure modes
 
@@ -1089,19 +1045,20 @@ head -1 <output_dir>/round_metrics.csv | tr ',' '\n'
 - **`_avg` and `_sample_weighted_avg` treated as interchangeable.** They are
   equal only when every client's split is the same size. On FEMNIST they are
   not, and quoting the wrong one changes the headline number.
-- **Expecting `server.metrics` to shorten the evaluation columns.** It governs
-  the fit side only (§4.3). Use `evaluation.splits`, `evaluation.model_scope`
-  and `client_statistics`.
-- **A non-empty `server.metrics` that omits `divergence.metric`.** The monitor
+- **Expecting `reporting.fit_metrics` to shorten the evaluation columns.** It
+  governs the fit side only (§4.3). Use `evaluation.splits`,
+  `evaluation.model_scope` and `reporting.statistics`.
+- **A non-empty `reporting.fit_metrics` that omits `divergence.metric`.** The monitor
   then watches a name no round emits and every detector — `non_finite`
   included — stays silent, with the loop's warning arriving after the last
   round. `validate_config` refuses it, so the config fails to load and no run
   starts. Both defaults
-  avoided it anyway: an empty `server.metrics` keeps everything, and `fit_loss`
+  avoided it anyway: an empty list keeps everything, and `fit_loss`
   is emitted by every arm.
-- **`server.metrics` expected to filter evaluation columns.** It does not. The
-  evaluation path writes into `round_info.metrics` directly, and the loop
-  overrides `client.metrics` with `["loss", "accuracy"]` for the eval request.
+- **A non-empty list that omits a strategy diagnostic.** `server_control_norm`
+  and FedLALR's norms go through `reporting.fit_metrics` like any fit column;
+  under the two lists they could not be dropped. A list that wants them names
+  them, as the shipped SCAFFOLD and FedLALR arms do.
 - **Changing `worst_percent` mid-sweep.** It renames the column
   (`worst10` to `worst5`), so `round_metrics.csv` files from the two halves of
   the sweep no longer share that column, and a `best_metric` naming the old
@@ -1122,7 +1079,7 @@ head -1 <output_dir>/round_metrics.csv | tr ',' '\n'
 - **Assuming `phase` in `client_update_metrics.csv` has more than one value.**
   It is always `"fit"`.
 - **Looking for the per-client CSVs in a default run.** Both are gated on
-  `client_statistics.per_client_csv`, which is `false`. A default run writes
+  `reporting.per_client_csv`, which is `false`. A default run writes
   `round_metrics.csv`, `run.json` and `checkpoints/` only —
   `DEFAULT_ARTIFACT_FILES` names all four possible files, but
   `runner._artifact_file_names` decides which a given config produces.

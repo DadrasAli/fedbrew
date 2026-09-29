@@ -87,15 +87,15 @@ CONFIG = """
 experiment:
   seed: 42
   output_dir: {out}
+reporting:
+  fit_metrics: [fit_loss]
 server:
   strategy: scaffold
   participation_rate: 1
-  metrics: [fit_loss]
 client:
   update_rule: scaffold
   batch_size: 4
   learning_rate: 0.05
-  metrics: [fit_loss, val_loss]
 data:
   num_clients: 4
   samples_per_client: 16

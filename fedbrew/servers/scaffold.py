@@ -209,16 +209,18 @@ class ScaffoldServer(FedAvgServer):
         self._model_state = new_model_state
         self._server_control = new_server_control
 
-        # Filter first, then add the server's own diagnostics, so server.metrics
-        # governs the client-reported metrics and only those. Matches
+        # The server's own diagnostics first, then the run's one filter
+        # (reporting.fit_metrics) over the whole round, so a column is kept or
+        # dropped by the same list wherever it came from. Matches
         # servers/fedlalr.py.
-        metrics = filter_metrics(metric_accumulator.result(), self.metrics)
+        metrics = metric_accumulator.result()
         metrics.update(
             {
                 "server_control_norm": squared_l2_norm_model_state(self._server_control) ** 0.5,
                 "mean_client_control_delta_norm": total_control_delta_norm / num_results,
             }
         )
+        metrics = filter_metrics(metrics, self.metrics)
         round_info.metrics.update(metrics)
         # Go through _federated_payload so adapter-scoped runs keep
         # model_state_scope / model_state_metadata, then add the control variate

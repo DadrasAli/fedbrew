@@ -83,7 +83,7 @@ RULES: dict[str, dict[str, Any]] = {
 def _write(root: Path, name: str, client: dict[str, Any]) -> Path:
     config = _config(root / name, rounds=ROUNDS, checkpoint=True)
     config["runtime"]["checkpointing"]["keep_last"] = None
-    config["client_statistics"] = {"per_client_csv": True}
+    config.setdefault("reporting", {})["per_client_csv"] = True
     config["client"].update(client)
     config["client"] = {key: value for key, value in config["client"].items() if value is not None}
     if config["client"]["update_rule"] == "scaffold":

@@ -11,6 +11,11 @@ across clients (FINDINGS.csv POST-F14). They are now
 ``effective_learning_rate_across_clients_*``; the old names are refused in a
 config and on a resume.
 
+A run gives the clients no metrics list (``reporting.fit_metrics`` is the
+server's), so every client reports all three coordinate statistics; the
+audited shape is reproduced below by handing the server results that carry
+only some of them, as a client constructed with its own list would send.
+
 Two clients with known v_hat and alpha = 1, so every rate is exact in binary:
 
   client a, 1 example:  v_hat = [1, 4, 16, 64]      rates [1, 1/2, 1/4, 1/8]
@@ -118,18 +123,15 @@ class EachColumnIsItsEstimandTest(unittest.TestCase):
         )
 
     def test_every_round_column_equals_its_hand_computed_value(self) -> None:
-        metrics = _round(COORDINATE_NAMES, COORDINATE_NAMES)
+        metrics = _round(COORDINATE_NAMES, [])
         for name, expected in EXPECTED_ROUND.items():
             with self.subTest(column=name):
                 self.assertEqual(metrics[name], expected)
 
     def test_the_audited_shape_no_longer_puts_one_quantity_under_another_s_name(self) -> None:
-        """client.metrics keeps the coordinate minimum and not the mean."""
+        """The clients report the coordinate minimum and not the mean."""
 
-        metrics = _round(
-            ["effective_learning_rate_coordinate_min"],
-            ["effective_learning_rate_coordinate_min"],
-        )
+        metrics = _round(["effective_learning_rate_coordinate_min"], [])
         self.assertEqual(metrics["effective_learning_rate_coordinate_min"], 13 / 32)
         for name in ACROSS_NAMES:
             self.assertNotIn(name, metrics)
@@ -145,12 +147,11 @@ def _smoke_fedlalr(directory: Path, **client_extra: object) -> dict:
     raw = yaml.safe_load(Path("configs/dev/smoke.yaml").read_text(encoding="utf-8"))
     raw["experiment"]["output_dir"] = str(directory / "run")
     raw["server"]["strategy"] = "fedlalr"
-    raw["server"]["metrics"] = ["fit_loss", *COORDINATE_NAMES]
+    raw["reporting"]["fit_metrics"] = ["fit_loss", *COORDINATE_NAMES, *ACROSS_NAMES]
     raw["client"] = {
         "update_rule": "fedlalr",
         "batch_size": 4,
         "learning_rate": 0.01,
-        "metrics": ["fit_loss", *COORDINATE_NAMES],
         **client_extra,
     }
     raw["runtime"]["checkpointing"] = {
@@ -160,7 +161,7 @@ def _smoke_fedlalr(directory: Path, **client_extra: object) -> dict:
         "save_every_round": False,
         "keep_last": 0,
     }
-    raw["client_statistics"] = {"per_client_csv": True}
+    raw.setdefault("reporting", {})["per_client_csv"] = True
     raw["defaults"]["global_rounds"] = 2
     return raw
 
@@ -179,13 +180,11 @@ class ARetiredNameIsRefusedInAConfigTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = _smoke_fedlalr(Path(directory))
         for old, guidance in RETIRED_METRIC_NAMES.items():
-            for place in ("server.metrics", "client.metrics", "divergence.metric", "best_metric"):
+            for place in ("reporting.fit_metrics", "divergence.metric", "best_metric"):
                 with self.subTest(name=old, place=place):
                     raw = yaml.safe_load(yaml.safe_dump(base))
-                    if place == "server.metrics":
-                        raw["server"]["metrics"].append(old)
-                    elif place == "client.metrics":
-                        raw["client"]["metrics"].append(old)
+                    if place == "reporting.fit_metrics":
+                        raw["reporting"]["fit_metrics"].append(old)
                     elif place == "divergence.metric":
                         raw["divergence"] = {"metric": old, "non_finite": True}
                     else:

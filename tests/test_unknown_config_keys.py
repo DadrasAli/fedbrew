@@ -169,11 +169,12 @@ class DefaultsBlockTest(unittest.TestCase):
 
 
 #: The three root blocks the release audit misspelled, and what each typo cost:
-#: the shipped synthetic config's value the loader dropped for its default.
+#: the shipped synthetic config's value the loader dropped for its default. The
+#: third was client_statistics, which is part of the reporting block now.
 MISSPELLED_ROOT_BLOCKS = (
     ("evaluation", "evaluaton"),
     ("divergence", "divergance"),
-    ("client_statistics", "client_statstics"),
+    ("reporting", "reportng"),
 )
 SYNTHETIC = Path("configs/synthetic/fedavg.yaml")
 SMOKE = Path("configs/dev/smoke.yaml")
@@ -225,7 +226,7 @@ class RootKeysTest(unittest.TestCase):
                 "runtime",
                 "numerics",
                 "evaluation",
-                "client_statistics",
+                "reporting",
                 "divergence",
                 "server_config",
                 "client_config",

@@ -26,13 +26,13 @@ from fedbrew.clients.base import ClientUpdate
 from fedbrew.core.config import (
     CentralTestConfig,
     ClientConfig,
-    ClientStatisticsConfig,
     DataConfig,
     DivergenceConfig,
     EvaluationConfig,
     ExperimentConfig,
     FullConfig,
     ModelConfig,
+    ReportingConfig,
     RuntimeConfig,
     ServerConfig,
     SplitEvaluationConfig,
@@ -56,8 +56,8 @@ from fedbrew.servers.base import ServerStrategy
 def _config(**runtime_extra: Any) -> FullConfig:
     return FullConfig(
         experiment=ExperimentConfig(seed=0, output_dir="outputs/test"),
-        server=ServerConfig(strategy="fedavg", global_rounds=1, participation_rate=1.0, metrics=[]),
-        client=ClientConfig(update_rule="fedavg", local_iterations=1, batch_size=1, metrics=[]),
+        server=ServerConfig(strategy="fedavg", global_rounds=1, participation_rate=1.0),
+        client=ClientConfig(update_rule="fedavg", local_iterations=1, batch_size=1),
         task=TaskConfig(name="classification"),
         data=DataConfig(),
         model=ModelConfig(name="mlp"),
@@ -211,7 +211,7 @@ def _run(bad_round: int, rounds: int, on_termination: Any = None) -> Any:
             global_rounds=rounds,
             output_dir=Path(directory),
             evaluation=_NO_EVAL,
-            client_statistics=ClientStatisticsConfig(per_client_csv=False),
+            reporting=ReportingConfig(per_client_csv=False),
             # metric="fit_loss", non_finite=True by default -- exactly what
             # _GoesToNanOnRound reports.
             divergence=DivergenceConfig(),

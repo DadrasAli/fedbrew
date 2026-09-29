@@ -30,8 +30,8 @@ def _minimal_config():
 
     return FullConfig(
         experiment=ExperimentConfig(seed=0, output_dir="outputs/test"),
-        server=ServerConfig(strategy="fedavg", global_rounds=1, participation_rate=1.0, metrics=[]),
-        client=ClientConfig(update_rule="fedavg", local_iterations=1, batch_size=1, metrics=[]),
+        server=ServerConfig(strategy="fedavg", global_rounds=1, participation_rate=1.0),
+        client=ClientConfig(update_rule="fedavg", local_iterations=1, batch_size=1),
         task=TaskConfig(name="classification"),
         data=DataConfig(),
         model=ModelConfig(name="mlp"),

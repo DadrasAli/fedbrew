@@ -195,8 +195,9 @@ from its constructor. An object built outside a run carries `None` there.
 
 `RoundInfo.metrics` is mutated in place by both the server and the loop. That
 is how the fit-phase metrics and the evaluation aggregates end up in one dict —
-and it is why `server.metrics` filters one group and not the other, since only
-the server's own path passes through `filter_metrics`. Chapter 08 §4.3.
+and it is why `reporting.fit_metrics` filters one group and not the other,
+since only the server's own path passes through `filter_metrics`. Chapter 08
+§4.3.
 
 ## 5. The four abstract bases
 

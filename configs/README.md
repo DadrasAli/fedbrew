@@ -55,7 +55,7 @@ here -- or, for a family, in its `_base.yaml`.
 |---|---|---|
 | `llm_assets/` | Model download/preparation manifests, referenced by `model.preparation_config` in the LLM configs. `_hpc` variants write to `$FL_CACHE_ROOT`. | No — consumed by `fedbrew prepare-llm` |
 | `dev/` | Small fixtures for tests, smoke runs, and the getting-started docs. Not experiments; nothing here is meant to be reported. | Yes, in seconds |
-| `reference_evaluation.yaml` | Every `evaluation:` and `client_statistics:` option in one runnable 12-round MNIST job, documented inline. Read this before editing a config's evaluation block. | Yes, on CPU |
+| `reference_evaluation.yaml` | Every `evaluation:` and `reporting:` option in one runnable 12-round MNIST job, documented inline. Read this before editing a config's evaluation block. | Yes, on CPU |
 
 ## Naming
 

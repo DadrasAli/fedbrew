@@ -187,7 +187,7 @@ can answer, asked at the moment they are the only person thinking about it.
 | `tests/test_aggregation_weighting_notice.py` | `AGGREGATION_WEIGHTING_NOTICE` in `fedbrew/core/validation.py` | the aggregation-weighting notice this strategy emits, or `None` with the reason it emits none |
 | `tests/test_ignored_client_options.py` | `RULE_CONFIGS`, in the test | a config that builds the rule, so its ignored-option row is derived from the factory's gates rather than asserted |
 | `tests/test_client_communication_cost.py` | `BUILDERS`, in the test | how to build the client, so the communication meter is checked against the payload it actually sends |
-| `tests/test_planned_columns_are_written.py` | `RULES`, in the test | a minimal client block for the rule and the strategy it pairs with, so the plan header's column list and its "not written" row are checked against the CSV the rule actually writes |
+| `tests/test_planned_columns_are_written.py` | `RULES`, in the test | a minimal client block for the rule and the strategy it pairs with, so the plan header's column list is checked against the CSV the rule actually writes |
 | `tests/test_adapter_state_support.py` | `ADAPTER_STATE_CLIENT_RULES` or `FULL_STATE_ONLY_CLIENT_RULES` in `fedbrew/core/federated_state.py` | whether the rule trains adapter-only (LoRA) state, or why it cannot and is refused with it — chapter 07 §5.1. Asks of a rule only |
 | `tests/test_active_target_weighting_is_honoured_or_refused.py` | `AGGREGATION_WEIGHT_HOOK_CLIENT_RULES` or `AGGREGATION_WEIGHT_HOOK_BYPASS_RULES` in `fedbrew/core/federated_state.py` | whether the rule's client asks the task for its aggregation weight, checked by running its `fit`; a rule that does not is refused with `active_target_weighting` on — chapter 07 §3.1. Asks of a rule only |
 
@@ -668,10 +668,10 @@ produce `NaN` in the new column without changing the column set, because a
 round that dropped columns would change the CSV schema partway through a run.
 
 **An algorithm diagnostic** is easier, and is the one an extension can do: emit
-it from your client or server and list it in `client.metrics` or
-`server.metrics`. Decide deliberately whether it goes before or after
-`filter_metrics` — chapter 08 §7 documents that the two built-in strategies
-with diagnostics add theirs after it, so no metrics list can drop them.
+it from your client or server and list it in `reporting.fit_metrics` (or
+leave the list empty). A server adds its diagnostics *before* its
+`filter_metrics` pass, as the two built-in strategies with diagnostics do
+(chapter 08 §7), so the one list governs every fit column alike.
 
 **Anything used for checkpoint selection** must be a `val_` or `personal_val_`
 metric, and its name must contain a word from one of the two direction

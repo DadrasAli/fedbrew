@@ -52,8 +52,8 @@ pytestmark = pytest.mark.fast
 def _config(data_path: str, local_root: str) -> FullConfig:
     return FullConfig(
         experiment=ExperimentConfig(seed=0, output_dir="outputs/test"),
-        server=ServerConfig(strategy="fedavg", global_rounds=1, participation_rate=1.0, metrics=[]),
-        client=ClientConfig(update_rule="fedavg", local_iterations=1, batch_size=1, metrics=[]),
+        server=ServerConfig(strategy="fedavg", global_rounds=1, participation_rate=1.0),
+        client=ClientConfig(update_rule="fedavg", local_iterations=1, batch_size=1),
         task=TaskConfig(name="classification"),
         data=DataConfig(name="manifest_dataset", path=data_path),
         model=ModelConfig(name="mlp"),

@@ -23,8 +23,8 @@ import torch
 from fedbrew.clients.base import ClientUpdate
 from fedbrew.core.config import (
     CentralTestConfig,
-    ClientStatisticsConfig,
     EvaluationConfig,
+    ReportingConfig,
     SplitEvaluationConfig,
 )
 from fedbrew.core.loop import run_fl_loop
@@ -211,7 +211,7 @@ class TheLoopRecordsItRatherThanCrashingTests(unittest.TestCase):
             output_dir=output_dir,
             checkpointing={"enabled": True, "save_every_round": True, "keep_last": None},
             evaluation=_EVALUATION,
-            client_statistics=ClientStatisticsConfig(per_client_csv=False),
+            reporting=ReportingConfig(per_client_csv=False),
             on_termination=on_termination,
         )
         return state, output_dir

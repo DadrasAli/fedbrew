@@ -2,34 +2,21 @@
 
 `_planned_metric_names` says of itself: "A column listed here that the run does
 not write, or written and not listed, would make the header worse than no
-header." It was promising six columns no FedAvg-family run writes.
+header." It once promised six columns no FedAvg-family run wrote.
 
-The mechanism is one filter applied twice with different lists. A client
-exempts its own extras -- `optimizer_steps`, `communicated_bytes`,
-`client_learning_rate` and two more -- from `client.metrics`, adding them after
-`filter_metrics` so a metrics list cannot remove them. The server then runs the
-whole aggregated dict through `filter_metrics` again, against `server.metrics`,
-which un-exempts them. `configs/femnist/fedavg.yaml` lists
-`optimizer_steps` and `client_learning_rate` under `client.metrics` and neither
-under `server.metrics`; fourteen shipped configs are in that shape, which is
-every FedAvg-family arm in the tree.
+The mechanism was one filter applied twice with different lists: a client
+exempted its own extras from `client.metrics`, and the server ran the whole
+aggregated dict through `server.metrics`, which un-exempted them, so fourteen
+shipped arms asked for `optimizer_steps` and got no column. The two lists are
+one now, `reporting.fit_metrics`, applied once by the server after every
+client and server metric is added (docs/04 section 9), so a column is kept
+exactly when the list names it or the list is empty.
 
-The existing guard on the header, `test_the_verbose_column_list_is_what_the_run
-_will_write`, checks that particular names *are* in the planned list. It cannot
-catch a name that is in the list and not in the file, which is this defect. So
-the check here is the round trip: run, then diff the header against the CSV in
+The check here is the round trip: run, then diff the header against the CSV in
 both directions. Nothing in it is hand-listed, so it holds for columns nobody
-has thought of yet.
-
-The round trip used to run one rule, `fedavg`, and the header's "not written"
-row consulted only the extras that rule family exempts. The four rules that
-filter everything -- fedprox, scaffold, delta_sgd, fedlalr -- were covered by
-neither, and five shipped configs of theirs listed `communicated_bytes` under
-`client.metrics` while `server.metrics` dropped it: no column, and no row saying
-so, under a preflight notice telling the reader to compare arms on exactly that
-column. Reading a run's CSV found it. So the round trip now runs every
-registered rule, `RULES` has to name each one, and the shipped arms that ask
-for the volume are checked to write it.
+has thought of yet. It runs every registered rule, `RULES` has to name each
+one, and the shipped arms that ask for the upload volume are checked to plan
+it.
 """
 
 from __future__ import annotations
@@ -48,16 +35,8 @@ import yaml
 
 from fedbrew.core import runner
 from fedbrew.core.config import load_config
-from fedbrew.core.logging import (
-    _client_metrics_the_server_filter_removes,
-    _planned_metric_names,
-)
-from fedbrew.core.metrics import (
-    CLIENT_UNFILTERED_FIT_METRICS,
-    client_fit_extras,
-    dropped_client_fit_extras,
-    surviving_client_fit_extras,
-)
+from fedbrew.core.logging import _planned_metric_names
+from fedbrew.core.metrics import CLIENT_UNFILTERED_FIT_METRICS
 from fedbrew.core.registry import client_updates, register_builtin_components
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -80,14 +59,13 @@ BOOKKEEPING = frozenset(
 )
 
 
-def _write(root: Path, name: str, **overrides: Any) -> Path:
+def _write(root: Path, name: str, fit_metrics: list[str]) -> Path:
     raw = yaml.safe_load(BASE_CONFIG.read_text(encoding="utf-8"))
     raw["experiment"]["output_dir"] = str(root / name)
     raw["client"]["update_rule"] = "fedavg"
     raw["client"]["update_mode"] = "sequential_epoch"
     raw["client"]["frozen_gradient_weighting"] = "examples"
-    for section, values in overrides.items():
-        raw[section].update(values)
+    raw.setdefault("reporting", {})["fit_metrics"] = list(fit_metrics)
     path = root / f"{name}.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     return path
@@ -147,19 +125,14 @@ RULES: dict[str, dict[str, Any]] = {
 }
 
 
-def _write_rule(
-    root: Path, name: str, rule: str, *, server_metrics: list[str], client_metrics: list[str]
-) -> Path:
-    """One round of `rule` on the synthetic base, with the two lists as given."""
+def _write_rule(root: Path, name: str, rule: str, *, fit_metrics: list[str]) -> Path:
+    """One round of `rule` on the synthetic base, with the list as given."""
 
     raw = yaml.safe_load(BASE_CONFIG.read_text(encoding="utf-8"))
     raw["experiment"]["output_dir"] = str(root / name)
-    raw["server"] = {
-        "strategy": RULES[rule]["strategy"],
-        "participation_rate": 1,
-        "metrics": list(server_metrics),
-    }
-    raw["client"] = {"update_rule": rule, **RULES[rule]["client"], "metrics": list(client_metrics)}
+    raw["server"] = {"strategy": RULES[rule]["strategy"], "participation_rate": 1}
+    raw["client"] = {"update_rule": rule, **RULES[rule]["client"]}
+    raw.setdefault("reporting", {})["fit_metrics"] = list(fit_metrics)
     if "evaluation" in RULES[rule]:
         raw.setdefault("evaluation", {}).update(RULES[rule]["evaluation"])
     raw["defaults"]["global_rounds"] = 1
@@ -189,118 +162,41 @@ class TheHeaderMatchesTheFileTest(unittest.TestCase):
             written - planned, set(), "the run writes columns the header does not list"
         )
 
-    def test_when_server_metrics_does_not_list_the_client_extras(self) -> None:
-        """The shipped shape: asked for under client.metrics, dropped anyway."""
+    def test_when_the_list_does_not_name_the_extras(self) -> None:
+        """The shipped FedAvg-family shape: the extras are not kept."""
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            path = _write(
-                root,
-                "dropped",
-                server={"metrics": ["fit_loss", "fit_accuracy"]},
-                client={"metrics": ["fit_loss", "fit_accuracy", *self.EXTRAS]},
-            )
+            path = _write(Path(directory), "dropped", ["fit_loss", "fit_accuracy"])
             self._check(path)
             written = _run_and_read_header(path)
             for name in self.EXTRAS:
                 self.assertNotIn(name, written)
 
-    def test_when_server_metrics_does_list_them(self) -> None:
-        """The same config with the extras added where they are read."""
-
+    def test_when_the_list_names_them(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            path = _write(
-                root,
-                "kept",
-                server={"metrics": ["fit_loss", "fit_accuracy", *self.EXTRAS]},
-                client={"metrics": ["fit_loss", "fit_accuracy", *self.EXTRAS]},
-            )
+            path = _write(Path(directory), "kept", ["fit_loss", "fit_accuracy", *self.EXTRAS])
             self._check(path)
             written = _run_and_read_header(path)
             for name in self.EXTRAS:
                 self.assertIn(name, written)
 
-    def test_when_server_metrics_is_empty_and_keeps_everything(self) -> None:
+    def test_when_the_list_is_empty_and_keeps_everything(self) -> None:
         """An empty list keeps everything, so every extra the rule emits lands."""
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            path = _write(
-                root,
-                "unfiltered",
-                server={"metrics": []},
-                client={"metrics": ["fit_loss", "fit_accuracy"]},
-            )
+            path = _write(Path(directory), "unfiltered", [])
             self._check(path)
             written = _run_and_read_header(path)
-            for name in client_fit_extras("fedavg"):
+            for name in CLIENT_UNFILTERED_FIT_METRICS["fedavg"]:
                 self.assertIn(name, written)
 
 
-@pytest.mark.fast
-class TheSurvivingSetIsTheComplementTest(unittest.TestCase):
-    def test_surviving_and_dropped_partition_the_extras(self) -> None:
-        for rule in ("fedavg", "local_sgd", "scaffold"):
-            for server_metrics in ([], ["fit_loss"], ["fit_loss", "optimizer_steps"]):
-                with self.subTest(rule=rule, server_metrics=server_metrics):
-                    surviving = set(surviving_client_fit_extras(rule, server_metrics))
-                    dropped = set(dropped_client_fit_extras(rule, server_metrics))
-                    self.assertEqual(surviving | dropped, set(client_fit_extras(rule)))
-                    self.assertEqual(surviving & dropped, set())
-
-    def test_an_empty_server_list_drops_nothing(self) -> None:
-        self.assertEqual(dropped_client_fit_extras("fedavg", []), [])
-
-    def test_a_rule_with_no_exempt_extras_still_loses_what_it_asks_for(self) -> None:
-        """No exempt extras is not nothing to drop.
-
-        This test used to read "the five rules that filter everything at the end
-        have no row", and pinned it -- four rules, and the row was wrong to be
-        silent: their client keeps what client.metrics names, and the server
-        then drops what server.metrics does not.
-        """
-
-        self.assertEqual(client_fit_extras("scaffold"), frozenset())
-        self.assertEqual(dropped_client_fit_extras("scaffold", ["fit_loss"]), [])
-
-        config = load_config(str(REPO_ROOT / "configs" / "femnist" / "scaffold.yaml"))
-        config.server.metrics = [name for name in config.server.metrics if name not in VOLUME]
-        self.assertEqual(_client_metrics_the_server_filter_removes(config), sorted(VOLUME))
-
-
-@pytest.mark.fast
-class TheHeaderSaysWhatItWillNotWriteTest(unittest.TestCase):
-    """Naming the gap is the other half: the config is not wrong, just unmet."""
-
-    def test_the_line_names_only_what_was_asked_for_and_dropped(self) -> None:
-        config = load_config(str(REPO_ROOT / "configs" / "femnist" / "fedavg.yaml"))
-        self.assertEqual(
-            _client_metrics_the_server_filter_removes(config),
-            ["client_learning_rate", "optimizer_steps"],
-        )
-
-    def test_an_extra_the_config_never_asked_for_is_not_named(self) -> None:
-        """`communicated_bytes` is dropped too, and no config asks for it.
-
-        Reporting every dropped extra would put five names in front of every
-        reader, four of which nobody wanted. The line exists to close the gap
-        between what a config asks for and what it gets, so it says nothing
-        when the config asked for nothing.
-        """
-
-        config = load_config(str(REPO_ROOT / "configs" / "femnist" / "fedavg.yaml"))
-        dropped = dropped_client_fit_extras(config.client.update_rule, config.server.metrics)
-        self.assertIn("communicated_bytes", dropped)
-        self.assertNotIn("communicated_bytes", _client_metrics_the_server_filter_removes(config))
-
-
 class EveryRuleRoundTripsTest(unittest.TestCase):
-    """Header, row and file agree for every registered rule, in all three shapes."""
+    """Header and file agree for every registered rule, and one list decides for all."""
 
     KEPT = ["fit_loss", "fit_accuracy"]
 
-    def _round_trip(self, path: Path) -> tuple[set[str], list[str]]:
+    def _round_trip(self, path: Path) -> set[str]:
         config = load_config(str(path))
         planned = set(_planned_metric_names(config))
         written = _run_and_read_header(path) - BOOKKEEPING
@@ -310,7 +206,7 @@ class EveryRuleRoundTripsTest(unittest.TestCase):
         self.assertEqual(
             written - planned, set(), "the run writes columns the header does not list"
         )
-        return written, _client_metrics_the_server_filter_removes(config)
+        return written
 
     @pytest.mark.fast
     def test_every_registered_rule_has_an_entry(self) -> None:
@@ -319,97 +215,60 @@ class EveryRuleRoundTripsTest(unittest.TestCase):
         register_builtin_components()
         self.assertEqual(sorted(client_updates.list()), sorted(RULES))
 
-    def test_asked_for_by_the_client_and_not_kept_by_the_server(self) -> None:
-        """The shipped defect's shape: no column, and the row has to say so."""
-
+    def test_a_list_that_does_not_name_the_volume(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             for rule in sorted(RULES):
                 with self.subTest(rule=rule):
                     path = _write_rule(
-                        Path(directory),
-                        f"{rule}-asked",
-                        rule,
-                        server_metrics=self.KEPT,
-                        client_metrics=self.KEPT + VOLUME,
+                        Path(directory), f"{rule}-without", rule, fit_metrics=self.KEPT
                     )
-                    written, not_written = self._round_trip(path)
-                    self.assertTrue(set(VOLUME).isdisjoint(written))
-                    self.assertEqual(not_written, sorted(VOLUME))
+                    self.assertTrue(set(VOLUME).isdisjoint(self._round_trip(path)))
 
-    def test_named_by_both_lists(self) -> None:
-        """The fix: every rule writes them, and the row is empty."""
+    def test_a_list_that_names_the_volume(self) -> None:
+        """Enough for every rule: nothing filters it before the server's list.
 
-        with tempfile.TemporaryDirectory() as directory:
-            for rule in sorted(RULES):
-                with self.subTest(rule=rule):
-                    path = _write_rule(
-                        Path(directory),
-                        f"{rule}-both",
-                        rule,
-                        server_metrics=self.KEPT + VOLUME,
-                        client_metrics=self.KEPT + VOLUME,
-                    )
-                    written, not_written = self._round_trip(path)
-                    self.assertTrue(set(VOLUME) <= written)
-                    self.assertEqual(not_written, [])
-
-    def test_named_by_the_server_only(self) -> None:
-        """Enough for a rule that exempts its extras, not for the four that filter them.
-
-        Which is why the five arms name the volume in both lists: moving the
-        names from client.metrics to server.metrics would lose them again.
+        Under the two lists, the rules that filtered their extras on the client
+        needed the names in both, and the FedAvg family in the server's only.
         """
 
         with tempfile.TemporaryDirectory() as directory:
             for rule in sorted(RULES):
                 with self.subTest(rule=rule):
                     path = _write_rule(
-                        Path(directory),
-                        f"{rule}-server",
-                        rule,
-                        server_metrics=self.KEPT + VOLUME,
-                        client_metrics=self.KEPT,
+                        Path(directory), f"{rule}-with", rule, fit_metrics=self.KEPT + VOLUME
                     )
-                    written, not_written = self._round_trip(path)
-                    if rule in CLIENT_UNFILTERED_FIT_METRICS:
-                        self.assertTrue(set(VOLUME) <= written)
-                    else:
-                        self.assertTrue(set(VOLUME).isdisjoint(written))
-                    self.assertEqual(not_written, [])
+                    self.assertTrue(set(VOLUME) <= self._round_trip(path))
 
 
 class ADiagnosticBuiltFromAClientMetricTest(unittest.TestCase):
-    """FedLALR's spread across clients exists only if its clients report the mean.
+    """FedLALR's spread across clients is built from each client's coordinate mean.
 
-    The header used to promise the four columns unconditionally; a config whose
-    client.metrics left out effective_learning_rate_coordinate_mean got none of
-    them. The round trips above run that shape; this runs the other.
+    Under the two lists a client list without the mean dropped the spread; the
+    clients have no list now, so the spread is kept or dropped by the one list
+    like any other column, whether or not it keeps the mean itself.
     """
 
     SPREAD = {f"effective_learning_rate_across_clients_{s}" for s in ("mean", "std", "min", "max")}
+    SOURCE = "effective_learning_rate_coordinate_mean"
 
-    def test_the_spread_is_promised_and_written_when_the_source_is_reported(self) -> None:
+    def test_the_spread_is_written_when_the_list_names_it_and_not_its_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = _write_rule(
                 Path(directory),
                 "fedlalr-spread",
                 "fedlalr",
-                server_metrics=["fit_loss"],
-                client_metrics=["fit_loss", "effective_learning_rate_coordinate_mean"],
+                fit_metrics=["fit_loss", *sorted(self.SPREAD)],
             )
             planned = set(_planned_metric_names(load_config(str(path))))
             written = _run_and_read_header(path) - BOOKKEEPING
             self.assertEqual(planned, written)
             self.assertTrue(self.SPREAD <= written)
+            self.assertNotIn(self.SOURCE, written)
 
-    def test_the_spread_is_not_promised_when_the_source_is_filtered_out(self) -> None:
+    def test_the_spread_is_dropped_when_the_list_does_not_name_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = _write_rule(
-                Path(directory),
-                "fedlalr-nospread",
-                "fedlalr",
-                server_metrics=["fit_loss"],
-                client_metrics=["fit_loss"],
+                Path(directory), "fedlalr-nospread", "fedlalr", fit_metrics=["fit_loss"]
             )
             planned = set(_planned_metric_names(load_config(str(path))))
             written = _run_and_read_header(path) - BOOKKEEPING
@@ -417,27 +276,25 @@ class ADiagnosticBuiltFromAClientMetricTest(unittest.TestCase):
             self.assertTrue(self.SPREAD.isdisjoint(written))
 
 
-class TheShippedArmsWriteTheVolumeTheyAskForTest(unittest.TestCase):
+class TheShippedArmsPlanTheVolumeTheyAskForTest(unittest.TestCase):
     """Preflight tells a reader to compare arms on communicated_bytes.
 
-    So an arm that asks for the volume under client.metrics has to write it.
-    Scoped to every config in the tree, so a new arm is covered without an edit
-    here.
+    So an arm whose list names the volume has to plan it. Scoped to every
+    config in the tree, so a new arm is covered without an edit here.
     """
 
-    def test_no_shipped_config_asks_for_the_volume_and_drops_it(self) -> None:
+    def test_every_shipped_config_that_names_the_volume_plans_it(self) -> None:
+        from tests.shipped_resolved_configs import REPO, no_generated_data, shipped_run_configs
+
         checked = 0
-        for path in sorted((REPO_ROOT / "configs").rglob("*.yaml")):
-            try:
-                config = load_config(str(path))
-            except Exception:  # noqa: BLE001 - config-loading coverage is elsewhere.
-                continue
-            if not set(VOLUME) & set(config.client.metrics or ()):
+        for path in shipped_run_configs():
+            with no_generated_data():
+                config = load_config(REPO / path)
+            if not set(VOLUME) & set(config.reporting.fit_metrics):
                 continue
             checked += 1
-            with self.subTest(config=str(path.relative_to(REPO_ROOT))):
-                dropped = _client_metrics_the_server_filter_removes(config)
-                self.assertEqual([name for name in dropped if name in VOLUME], [])
+            with self.subTest(config=str(path)):
+                self.assertTrue(set(VOLUME) <= set(_planned_metric_names(config)))
         # fedprox, scaffold, delta_sgd and fedlalr on FEMNIST, scaffold on MNIST.
         self.assertEqual(checked, 5)
 

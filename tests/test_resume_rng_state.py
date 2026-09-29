@@ -26,8 +26,8 @@ import torch
 from fedbrew.clients.base import ClientUpdate
 from fedbrew.core.config import (
     CentralTestConfig,
-    ClientStatisticsConfig,
     EvaluationConfig,
+    ReportingConfig,
     SplitEvaluationConfig,
 )
 from fedbrew.core.loop import run_fl_loop
@@ -157,7 +157,7 @@ def _run(output_dir: Path, rounds: int, resume_from: Path | None = None):
         resume_from=resume_from,
         checkpointing={"enabled": True, "save_every_round": True, "keep_last": None},
         evaluation=_EVALUATION,
-        client_statistics=ClientStatisticsConfig(per_client_csv=False),
+        reporting=ReportingConfig(per_client_csv=False),
     )
 
 

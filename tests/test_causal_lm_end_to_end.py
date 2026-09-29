@@ -62,9 +62,6 @@ class CausalLMEndToEndTests(unittest.TestCase):
                     server:
                       strategy: fedavg
                       participation_rate: 1
-                      metrics:
-                        - fit_loss
-                        - fit_accuracy
                     client:
                       update_rule: local_adamw
                       batch_size: 4
@@ -75,9 +72,6 @@ class CausalLMEndToEndTests(unittest.TestCase):
                       beta1: 0.9
                       beta2: 0.999
                       epsilon: 1.0e-8
-                      metrics:
-                        - fit_loss
-                        - fit_accuracy
                     data:
                       name: manifest_dataset
                       path: {manifest_path}
@@ -114,13 +108,17 @@ class CausalLMEndToEndTests(unittest.TestCase):
                         every: never
                       central_test:
                         every: 1
-                    client_statistics:
+                    reporting:
+                      fit_metrics:
+                        - fit_loss
+                        - fit_accuracy
                       per_client_csv: true
-                      std: true
-                      variance: false
-                      min: true
-                      max: true
-                      worst_percent: 10
+                      statistics:
+                        std: true
+                        variance: false
+                        min: true
+                        max: true
+                        worst_percent: 10
                     defaults:
                       global_rounds: 1
                       local_iterations: 1
@@ -135,7 +133,7 @@ class CausalLMEndToEndTests(unittest.TestCase):
             # The exact column set of a real round, written out rather than
             # derived: this is the one place a reader can see what a run of
             # this shape actually produces. The config states every
-            # client_statistics toggle, so each aggregate below is a choice
+            # reporting.statistics toggle, so each aggregate below is a choice
             # the config made and not a default that could move underneath it.
             required_metrics = {
                 # The fit phase, aggregated over participating clients.
@@ -157,7 +155,7 @@ class CausalLMEndToEndTests(unittest.TestCase):
                     )
                 ),
                 # How many clients each split's aggregates are over. Not a
-                # client_statistics toggle: every evaluated split writes it,
+                # reporting.statistics toggle: every evaluated split writes it,
                 # whatever the config says (P07-F06).
                 "train_num_clients",
                 "val_num_clients",

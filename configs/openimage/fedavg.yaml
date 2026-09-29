@@ -12,9 +12,6 @@ experiment:
 server:
   strategy: fedavg
   participation_rate: 0.01
-  metrics:
-    - fit_loss
-    - fit_accuracy
 
 client:
   update_rule: fedavg
@@ -36,11 +33,6 @@ client:
   momentum: 0.0
   weight_decay: 0.0
   nesterov: false
-  metrics:
-    - fit_loss
-    - fit_accuracy
-    - optimizer_steps
-    - client_learning_rate
 
 data:
   # THIS ARM NEEDS DATA THIS REPOSITORY DOES NOT SHIP.
@@ -144,13 +136,17 @@ evaluation:
   central_test:
     every: 10
 
-client_statistics:
+reporting:
+  fit_metrics:
+    - fit_loss
+    - fit_accuracy
   per_client_csv: false
-  std: true
-  variance: false
-  min: true
-  max: true
-  worst_percent: 10
+  statistics:
+    std: true
+    variance: false
+    min: true
+    max: true
+    worst_percent: 10
 
 defaults:
   global_rounds: 500

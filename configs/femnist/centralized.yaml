@@ -15,9 +15,6 @@ server:
   strategy: centralized
   # Meaningless with a single pooled client; kept so runs stay comparable.
   participation_rate: 1
-  metrics:
-    - fit_loss
-    - fit_accuracy
 
 client:
   update_rule: centralized
@@ -34,11 +31,6 @@ client:
   momentum: 0.0
   weight_decay: 0.0
   nesterov: false
-  metrics:
-    - fit_loss
-    - fit_accuracy
-    - optimizer_steps
-    - client_learning_rate
 
 runtime:
   checkpointing:
@@ -57,6 +49,11 @@ runtime:
 evaluation:
   val:
     clients: all
+
+reporting:
+  fit_metrics:
+    - fit_loss
+    - fit_accuracy
 
 defaults:
   global_rounds: 100

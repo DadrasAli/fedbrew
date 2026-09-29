@@ -45,8 +45,7 @@ def _config(directory: Path, local_iterations: int, client: dict[str, Any]) -> P
     raw["data"]["samples_per_client"] = TRAIN_ROWS
     raw["defaults"]["local_iterations"] = local_iterations
     raw["client"]["batch_size"] = BATCH_SIZE
-    raw["client"]["metrics"] = ["fit_loss", "optimizer_steps"]
-    raw["server"]["metrics"] = ["fit_loss", "optimizer_steps"]
+    raw["reporting"]["fit_metrics"] = ["fit_loss", "optimizer_steps"]
     raw["client"].update(client)
     # `local_adamw` refuses the SGD keys the smoke config carries.
     raw["client"] = {key: value for key, value in raw["client"].items() if value is not None}

@@ -46,6 +46,7 @@ from fedbrew.core.config import (
     CentralTestConfig,
     ClientStatisticsConfig,
     EvaluationConfig,
+    ReportingConfig,
     SplitEvaluationConfig,
 )
 from fedbrew.core.loop import (
@@ -331,7 +332,7 @@ class LoopTests(unittest.TestCase):
                 test=SplitEvaluationConfig(every=1, clients="all"),
                 central_test=CentralTestConfig(every="never"),
             ),
-            client_statistics=ALL_STATISTICS,
+            reporting=ReportingConfig(statistics=ALL_STATISTICS),
         )
 
         self.assertEqual(len(state.metrics_history), rounds)

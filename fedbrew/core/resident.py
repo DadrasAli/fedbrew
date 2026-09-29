@@ -1432,7 +1432,7 @@ class _Loop:
                 True,
                 context.state,
                 context.output_dir,
-                context.statistics,
+                context.per_client_csv,
                 context.csv_cursor,
                 context.on_round_flush,
                 None if staged is None else staged.written(),

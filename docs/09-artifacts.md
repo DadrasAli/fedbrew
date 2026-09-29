@@ -14,8 +14,8 @@ mid-experiment.
 ```
 <output_dir>/
   round_metrics.csv          always
-  client_metrics.csv         only with client_statistics.per_client_csv
-  client_update_metrics.csv  only with client_statistics.per_client_csv
+  client_metrics.csv         only with reporting.per_client_csv
+  client_update_metrics.csv  only with reporting.per_client_csv
   run.json                   always
   checkpoints/               unless checkpointing.enabled is false
 ```

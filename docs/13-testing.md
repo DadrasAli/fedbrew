@@ -298,8 +298,8 @@ Seventeen more guard documentation without belonging to one chapter:
 | `tests/test_round_block.py` | every column a run can produce classifies into a group, a split and a qualifier, and a name neither authority knows lands in a loud `unclassified` group rather than a plausible one |
 | `tests/test_data_command_reporting.py` | `generate`/`prepare-llm`/`prepare-oasst1` report the stages that earn a line, the partition statistics reach the terminal, and all four printing commands accept the same three flags |
 | `tests/test_no_local_only_references.py` | nothing in the shipped tree cites a path inside the gitignored `AUDIT/`, in code and configs as well as chapters |
-| `tests/test_metric_filter_scope.py` | what `client.metrics` and `server.metrics` reach, in the code and in chapter 08 §4.3 |
-| `tests/test_divergence_metric_reachable.py` | `load_config` refuses a `divergence.metric` that `client.metrics` or `server.metrics` would filter out, and the check stays on the run path |
+| `tests/test_metric_filter_scope.py` | what `reporting.fit_metrics` reaches, in the code and in chapter 08 §4.3 |
+| `tests/test_divergence_metric_reachable.py` | `load_config` refuses a `divergence.metric` that `reporting.fit_metrics` would filter out, and the check stays on the run path |
 
 And two predate the set and set its pattern:
 

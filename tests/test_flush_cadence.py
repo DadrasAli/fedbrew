@@ -39,7 +39,7 @@ import yaml
 
 from fedbrew.core import loop
 from fedbrew.core.checkpointing import get_checkpoint_round_id
-from fedbrew.core.config import ClientStatisticsConfig
+from fedbrew.core.config import ReportingConfig
 from fedbrew.core.refusal import RunRefused
 from fedbrew.core.runner import run
 from tests.test_non_finite_aggregation import _EVALUATION, _BlowsUpOnRound, _Client, _Dataset
@@ -53,7 +53,7 @@ def _write(root: Path, name: str, flush_every: int, rounds: int = ROUNDS, **extr
     config = _config(root / name, rounds=rounds, checkpoint=True)
     config["runtime"]["flush_every"] = flush_every
     config["runtime"]["checkpointing"].update({"save_best": True, "keep_last": None})
-    config["client_statistics"] = {"per_client_csv": True}
+    config.setdefault("reporting", {})["per_client_csv"] = True
     config.update(extra)
     path = root / f"{name}.yaml"
     path.write_text(yaml.safe_dump(config), encoding="utf-8")
@@ -284,7 +284,7 @@ class ARefusedRoundBetweenFlushesTest(_TempRoot):
             output_dir=self.root,
             checkpointing={"enabled": True, "save_every_round": True, "keep_last": None},
             evaluation=_EVALUATION,
-            client_statistics=ClientStatisticsConfig(per_client_csv=False),
+            reporting=ReportingConfig(per_client_csv=False),
             flush_every=4,
         )
         self.assertEqual(state.status, "diverged")

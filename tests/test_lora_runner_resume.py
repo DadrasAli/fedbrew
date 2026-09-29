@@ -103,7 +103,7 @@ def _write_run_config(
 ) -> Path:
     server_path = root / f"server_{rounds}.yaml"
     server_path.write_text(
-        "strategy: fedavg\nparticipation_rate: 1\nmetrics:\n  - fit_loss\n  - fit_accuracy\n",
+        "strategy: fedavg\nparticipation_rate: 1\n",
         encoding="utf-8",
     )
     client_path = root / "client.yaml"
@@ -117,10 +117,7 @@ def _write_run_config(
         "beta2: 0.999\n"
         "epsilon: 1.0e-8\n"
         "weight_decay: 0.0\n"
-        "max_local_steps: 1\n"
-        "metrics:\n"
-        "  - fit_loss\n"
-        "  - fit_accuracy\n",
+        "max_local_steps: 1\n",
         encoding="utf-8",
     )
     resume_line = f"  resume_from: {resume_from}\n" if resume_from else ""
@@ -132,6 +129,10 @@ def _write_run_config(
   output_dir: {output_dir}
 server_config: {server_path}
 client_config: {client_path}
+reporting:
+  fit_metrics:
+    - fit_loss
+    - fit_accuracy
 data:
   name: manifest_dataset
   path: {data_manifest}

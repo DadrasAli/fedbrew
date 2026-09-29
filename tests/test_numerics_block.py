@@ -40,7 +40,6 @@ BASE = textwrap.dedent("""
     server:
       strategy: fedavg
       participation_rate: 1
-      metrics: []
     client:
       update_rule: fedavg
       update_mode: sequential_epoch
@@ -49,7 +48,6 @@ BASE = textwrap.dedent("""
       learning_rate_schedule: constant
       momentum: 0.0
       weight_decay: 0.0
-      metrics: []
     data:
       num_clients: 2
       samples_per_client: 8

@@ -183,10 +183,11 @@ class TheFactoryActuallyCallsItTest(unittest.TestCase):
             experiment:
               seed: 1
               output_dir: {directory / "run"}
+            reporting:
+              fit_metrics: [fit_loss]
             server:
               strategy: fedavg
               participation_rate: 1
-              metrics: [fit_loss]
             client:
               update_rule: local_sgd
               batch_size: 4
@@ -196,7 +197,6 @@ class TheFactoryActuallyCallsItTest(unittest.TestCase):
               momentum: 0.0
               weight_decay: 0.0
               nesterov: false
-              metrics: [fit_loss]
             data:
               num_clients: 2
               samples_per_client: 8

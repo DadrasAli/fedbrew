@@ -29,23 +29,6 @@ server:
   # are close here in a way they are not on a naturally partitioned dataset.
   # aggregation_weighting: uniform
 
-  metrics:
-    - fit_loss
-    - fit_accuracy
-    - control_delta_norm
-    - client_control_norm
-    - local_steps
-    - server_control_norm
-    - mean_client_control_delta_norm
-
-    # Per-round upload volume, which preflight tells a reader to compare arms
-    # on. This list is the second filter: a client metric it does not name is
-    # dropped before round_metrics.csv, so client.metrics naming these is not
-    # enough on its own -- and for this rule, naming them only here is not
-    # enough either, because its client filters them too. Both lists carry them.
-    - communicated_parameters
-    - communicated_bytes
-
 client:
   update_rule: scaffold
 
@@ -59,20 +42,6 @@ client:
   # arms do not consume the same data per round and are not like-for-like at a
   # fixed round count. The comparable FedAvg baseline is update_mode:
   # sequential_epoch.
-
-  metrics:
-    - fit_loss
-    - fit_accuracy
-    - control_delta_norm
-    - client_control_norm
-    - local_steps
-
-    # SCAFFOLD uploads the model and the control-variate delta together and
-    # receives the server control variate back beside the model, so a round is
-    # 2x a FedAvg arm's volume at the same model size. This counts both, so
-    # arms can be compared on communicated volume rather than round count.
-    - communicated_parameters
-    - communicated_bytes
 
 data:
   path: data/generated/mnist_one_label/manifest.json
@@ -141,13 +110,30 @@ evaluation:
   central_test:
     every: 50
 
-client_statistics:
+reporting:
+  fit_metrics:
+    - fit_loss
+    - fit_accuracy
+    - control_delta_norm
+    - client_control_norm
+    - local_steps
+    - server_control_norm
+    - mean_client_control_delta_norm
+
+    # Per-round upload volume, which preflight tells a reader to compare arms
+    # on. SCAFFOLD uploads the model and the control-variate delta together and
+    # receives the server control variate back beside the model, so a round is
+    # 2x a FedAvg arm's volume at the same model size. This counts both, so
+    # arms can be compared on communicated volume rather than round count.
+    - communicated_parameters
+    - communicated_bytes
   per_client_csv: false
-  std: true
-  variance: false
-  min: true
-  max: true
-  worst_percent: 10
+  statistics:
+    std: true
+    variance: false
+    min: true
+    max: true
+    worst_percent: 10
 
 # Stop an arm that is no longer learning and record why. A stopped run exits
 # SUCCESSFULLY with status "diverged"/"stalled" in run.json and

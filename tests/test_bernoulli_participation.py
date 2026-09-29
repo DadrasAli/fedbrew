@@ -165,7 +165,8 @@ class ExactlyOneSchemeTest(unittest.TestCase):
 def _write_config(root: Path, *, seed: int = 42, rounds: int = 3, **participation: object) -> Path:
     config = {
         "experiment": {"seed": seed, "output_dir": str(root / "run"), "use_run_subdir": False},
-        "server": {"strategy": "fedavg", "metrics": ["fit_loss"], **participation},
+        "reporting": {"fit_metrics": ["fit_loss"]},
+        "server": {"strategy": "fedavg", **participation},
         "client": {
             "update_rule": "local_sgd",
             "batch_size": 4,
@@ -175,7 +176,6 @@ def _write_config(root: Path, *, seed: int = 42, rounds: int = 3, **participatio
             "nesterov": False,
             "learning_rate_schedule": "constant",
             "min_learning_rate": 0.0,
-            "metrics": ["fit_loss"],
         },
         "data": {"num_clients": 2, "samples_per_client": 8, "input_dim": 4, "num_classes": 2},
         "model": {"name": "mlp", "input_dim": 4, "hidden_dim": 4, "num_classes": 2},

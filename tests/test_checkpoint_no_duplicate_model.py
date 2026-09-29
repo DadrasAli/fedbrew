@@ -169,10 +169,11 @@ def _write_config(directory: Path, hidden: int = 512) -> Path:
             experiment:
               seed: 42
               output_dir: {directory / "run"}
+            reporting:
+              fit_metrics: [fit_loss]
             server:
               strategy: fedavg
               participation_rate: 1
-              metrics: [fit_loss]
             client:
               update_rule: local_sgd
               batch_size: 4
@@ -182,7 +183,6 @@ def _write_config(directory: Path, hidden: int = 512) -> Path:
               momentum: 0.0
               weight_decay: 0.0
               nesterov: false
-              metrics: [fit_loss]
             data:
               num_clients: 2
               samples_per_client: 8

@@ -101,12 +101,12 @@ class FileListTest(unittest.TestCase):
         from fedbrew.core.runner import _artifact_file_names
 
         config = _minimal_config()
-        config.client_statistics.per_client_csv = False
+        config.reporting.per_client_csv = False
         default = _artifact_file_names(config)
         self.assertEqual(default, ["round_metrics.csv", "run.json"])
         self.assertTrue(_says("A default run writes **two**"))
 
-        config.client_statistics.per_client_csv = True
+        config.reporting.per_client_csv = True
         self.assertEqual(len(_artifact_file_names(config)), len(DEFAULT_ARTIFACT_FILES))
 
 

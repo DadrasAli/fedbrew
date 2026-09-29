@@ -424,16 +424,16 @@ class EmittedSelectionMetricTest(unittest.TestCase):
 
     def test_turning_the_statistic_on_makes_its_metric_selectable(self) -> None:
         config = self._config("val_accuracy_variance")
-        config.client_statistics.variance = True
+        config.reporting.statistics.variance = True
         validate_config(config)
 
         config = self._config("val_accuracy_worst5")
-        config.client_statistics.worst_percent = 5
+        config.reporting.statistics.worst_percent = 5
         validate_config(config)
 
     def test_a_fractional_worst_percent_keeps_the_loop_spelling(self) -> None:
         config = self._config("val_accuracy_worst2p5")
-        config.client_statistics.worst_percent = 2.5
+        config.reporting.statistics.worst_percent = 2.5
         validate_config(config)
 
     def test_the_personal_pass_is_checked_against_its_own_columns(self) -> None:
@@ -441,7 +441,7 @@ class EmittedSelectionMetricTest(unittest.TestCase):
         config.evaluation.model_scope = "personal"
         with self.assertRaises(ValueError):
             validate_config(config)
-        config.client_statistics.variance = True
+        config.reporting.statistics.variance = True
         validate_config(config)
 
     def test_the_predicted_names_are_the_names_the_loop_emits(self) -> None:

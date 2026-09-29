@@ -211,7 +211,7 @@ class ExtraKeyCoverageTest(unittest.TestCase):
     def test_sections_that_accept_nothing_are_not_given_keys(self) -> None:
         """A section with an empty allow-list must not be shown taking options."""
 
-        for section in ("experiment", "data", "client_statistics", "divergence"):
+        for section in ("experiment", "data", "reporting", "reporting.statistics", "divergence"):
             with self.subTest(section=section):
                 self.assertEqual(_KNOWN_EXTRA_KEYS[section], frozenset())
 
@@ -229,17 +229,17 @@ class DataclassDefaultsTest(unittest.TestCase):
                 values[field.name] = field.default
         return values
 
-    def test_client_statistics_defaults_match(self) -> None:
+    def test_reporting_statistics_defaults_match(self) -> None:
         for name, value in self._defaults(ClientStatisticsConfig).items():
             if name == "extra":
                 continue
             with self.subTest(key=name):
                 row = re.search(
-                    rf"^\| `client_statistics\.{re.escape(name)}` \| `([^`]+)` \|$",
+                    rf"^\| `reporting\.statistics\.{re.escape(name)}` \| `([^`]+)` \|$",
                     self.text,
                     flags=re.MULTILINE,
                 )
-                self.assertIsNotNone(row, f"client_statistics.{name} has no default row")
+                self.assertIsNotNone(row, f"reporting.statistics.{name} has no default row")
                 assert row is not None
                 self.assertEqual(
                     row.group(1),

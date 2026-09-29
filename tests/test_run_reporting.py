@@ -43,6 +43,7 @@ from fedbrew.core.config import (
     ExperimentConfig,
     FullConfig,
     ModelConfig,
+    ReportingConfig,
     RuntimeConfig,
     ServerConfig,
     SplitEvaluationConfig,
@@ -68,21 +69,18 @@ def _config(
 ) -> FullConfig:
     return FullConfig(
         experiment=ExperimentConfig(seed=3, output_dir="outputs/run-reporting", name="reporting"),
-        server=ServerConfig(
-            strategy="fedavg", global_rounds=rounds, participation_rate=1.0, metrics=[]
-        ),
+        server=ServerConfig(strategy="fedavg", global_rounds=rounds, participation_rate=1.0),
         client=ClientConfig(
             update_rule="local_sgd",
             local_iterations=1,
             batch_size=8,
-            metrics=[],
             learning_rate=0.1,
         ),
         task=TaskConfig(name="classification"),
         data=DataConfig(name="synthetic_classification"),
         model=ModelConfig(name="mlp"),
         runtime=RuntimeConfig(device="cpu", extra=dict(runtime_extra or {})),
-        client_statistics=ClientStatisticsConfig(),
+        reporting=ReportingConfig(),
         evaluation=EvaluationConfig(
             train=SplitEvaluationConfig(every=train, clients="all"),
             val=SplitEvaluationConfig(every=val, clients="all"),
@@ -660,7 +658,7 @@ class TheValidationSplitIsReportedTest(unittest.TestCase):
 
     def test_a_selection_metric_no_run_emits_is_not_promised(self) -> None:
         config = _config(runtime_extra={"checkpointing": {"best_metric": "val_accuracy_worst10"}})
-        config.client_statistics = ClientStatisticsConfig(worst_percent=None)
+        config.reporting.statistics = ClientStatisticsConfig(worst_percent=None)
         self.assertNotIn("val_accuracy_worst10", terminal_logging._client_val_metric_names(config))
 
 

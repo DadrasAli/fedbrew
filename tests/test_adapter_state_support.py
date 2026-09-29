@@ -123,13 +123,13 @@ def _config(
         evaluation["model_scope"] = "both"
     return {
         "experiment": {"seed": 0, "output_dir": str(output_dir), "use_run_subdir": False},
+        "reporting": {"fit_metrics": ["fit_loss"]},
         "server": {
             "strategy": server,
             "participation_rate": 1,
-            "metrics": ["fit_loss"],
             **FEDAVG_SERVERS.get(server, {}),
         },
-        "client": {"update_rule": rule, "batch_size": 1, "metrics": ["fit_loss"], **RULES[rule]},
+        "client": {"update_rule": rule, "batch_size": 1, **RULES[rule]},
         "data": {"name": "manifest_dataset", "path": str(data_manifest)},
         "model": {
             "name": "hf_causal_lm_lora",
@@ -263,7 +263,6 @@ class TheClientRefusesATaskThatReportsAdapterScopeTest(unittest.TestCase):
                 raw["client"] = {
                     "update_rule": rule,
                     "batch_size": 4,
-                    "metrics": ["fit_loss"],
                     **options,
                 }
                 path = Path(directory) / "run.yaml"

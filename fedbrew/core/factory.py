@@ -425,7 +425,10 @@ def _build_server(
         "participation_rate": config.server.participation_rate,
         "participation_probability": config.server.participation_probability,
         "seed": config.experiment.seed,
-        "metrics": config.server.metrics,
+        # reporting.fit_metrics: the run's one fit filter, applied by the
+        # server after every client and server metric is added. Clients are
+        # given no list, so each reports everything it computes.
+        "metrics": config.reporting.fit_metrics,
         "aggregation_weighting": _aggregation_weighting(config),
     }
     if is_extension(server_strategies, config.server.strategy):
@@ -517,7 +520,6 @@ EXTENSION_CLIENT_KEYS: tuple[str, ...] = (
     "eval_batch_size",
     "learning_rate",
     "device",
-    "metrics",
     "base_seed",
     "train_shuffle",
     "eval_shuffle",
@@ -545,7 +547,6 @@ def _extension_client_kwargs(
         "eval_batch_size": _eval_batch_size(config),
         "learning_rate": config.client.learning_rate,
         "device": config.runtime.device,
-        "metrics": config.client.metrics,
         "base_seed": config.experiment.seed,
         "train_shuffle": _client_extra_bool(config, "train_shuffle", True),
         "eval_shuffle": _client_extra_bool(config, "eval_shuffle", False),
@@ -583,7 +584,6 @@ def _training_client_kwargs(
         "eval_batch_size": _eval_batch_size(config),
         "learning_rate": learning_rate,
         "device": config.runtime.device,
-        "metrics": config.client.metrics,
         "base_seed": config.experiment.seed,
         "train_shuffle": _client_extra_bool(config, "train_shuffle", True),
         "eval_shuffle": _client_extra_bool(config, "eval_shuffle", False),

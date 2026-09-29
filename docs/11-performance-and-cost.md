@@ -152,11 +152,11 @@ never in visits.
 `evaluation.*.every` is the other half: a split evaluated every 10 rounds costs
 a tenth of one evaluated every round, and the columns exist either way.
 
-### 4.2 `client_statistics.per_client_csv`
+### 4.2 `reporting.per_client_csv`
 
 Off by default, and it gates **both** per-client CSVs. Turning it on at
 FEMNIST scale with `clients: all` produces roughly **1.8M rows over 500
-rounds** (recorded on `ClientStatisticsConfig`, `fedbrew/core/config.py`).
+rounds** (recorded on `ReportingConfig`, `fedbrew/core/config.py`).
 
 The write cost used to be far worse: the files were rewritten in full on every
 round that wrote a checkpoint, which `save_last` makes every round, so each

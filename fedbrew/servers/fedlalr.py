@@ -209,13 +209,11 @@ class FedLALRServer(FedAvgServer):
             second_moment,
         )
 
-        # Filter first, then add the server's own diagnostics, so server.metrics
-        # governs the client-reported metrics and only those. Matches
-        # servers/scaffold.py and the client-side convention in
-        # torch_sgd_client.py, where the algorithm extras are likewise added
-        # after client.metrics has been applied. Filtering these would let a
-        # metrics list silently drop a column checkpointing.best_metric names.
-        metrics = filter_metrics(metric_accumulator.result(), self.metrics)
+        # The server's own diagnostics first, then the run's one filter
+        # (reporting.fit_metrics) over the whole round, so a column is kept or
+        # dropped by the same list wherever it came from. Matches
+        # servers/scaffold.py.
+        metrics = metric_accumulator.result()
         metrics.update(
             {
                 "momentum_norm": squared_l2_norm_model_state(self._momentum) ** 0.5,
@@ -223,6 +221,7 @@ class FedLALRServer(FedAvgServer):
             }
         )
         metrics.update(_dispersion_metrics(effective_learning_rates))
+        metrics = filter_metrics(metrics, self.metrics)
         round_info.metrics.update(metrics)
         return self._with_optimizer_state(self._federated_payload(metrics=metrics))
 

@@ -29,9 +29,6 @@ server:
   beta1: 0.9
   beta2: 0.99
   tau: 0.0001
-  metrics:
-    - fit_loss
-    - fit_accuracy
 
 # Identical to the fedavg/fedprox/scaffold baselines so the ONLY difference
 # between those sweeps and this one is the server update rule.
@@ -46,11 +43,6 @@ client:
   momentum: 0.0
   weight_decay: 0.0
   nesterov: false
-  metrics:
-    - fit_loss
-    - fit_accuracy
-    - optimizer_steps
-    - client_learning_rate
 
 runtime:
   checkpointing:
@@ -61,6 +53,11 @@ runtime:
 evaluation:
   val:
     clients: all
+
+reporting:
+  fit_metrics:
+    - fit_loss
+    - fit_accuracy
 
 defaults:
   global_rounds: 500

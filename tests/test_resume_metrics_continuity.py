@@ -19,8 +19,8 @@ from typing import Any
 from fedbrew.clients.base import ClientUpdate
 from fedbrew.core.config import (
     CentralTestConfig,
-    ClientStatisticsConfig,
     EvaluationConfig,
+    ReportingConfig,
     SplitEvaluationConfig,
 )
 from fedbrew.core.loop import run_fl_loop
@@ -173,7 +173,7 @@ def _run(
         checkpointing=checkpointing
         or {"enabled": True, "save_every_round": True, "keep_last": None},
         evaluation=_EVALUATION,
-        client_statistics=ClientStatisticsConfig(per_client_csv=per_client_csv),
+        reporting=ReportingConfig(per_client_csv=per_client_csv),
         on_round_end=on_round_end,
         on_round_flush=on_round_flush,
     )

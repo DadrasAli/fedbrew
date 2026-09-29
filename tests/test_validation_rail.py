@@ -66,12 +66,11 @@ def _config(
 ) -> FullConfig:
     return FullConfig(
         experiment=ExperimentConfig(seed=1, output_dir=output_dir, name="rail-test"),
-        server=ServerConfig(strategy="fedavg", global_rounds=5, participation_rate=1.0, metrics=[]),
+        server=ServerConfig(strategy="fedavg", global_rounds=5, participation_rate=1.0),
         client=ClientConfig(
             update_rule="local_sgd",
             local_iterations=1,
             batch_size=8,
-            metrics=[],
             learning_rate=0.1,
         ),
         task=TaskConfig(name="classification"),

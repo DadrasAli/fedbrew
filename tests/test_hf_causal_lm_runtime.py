@@ -275,7 +275,7 @@ def _write_run_config(
 ) -> tuple[Path, Path]:
     server_path = root / "server.yaml"
     server_path.write_text(
-        "strategy: fedavg\nparticipation_rate: 1\nmetrics:\n  - fit_loss\n  - fit_accuracy\n",
+        "strategy: fedavg\nparticipation_rate: 1\n",
         encoding="utf-8",
     )
     client_path = root / "client.yaml"
@@ -288,10 +288,7 @@ def _write_run_config(
         "weight_decay: 0.0\n"
         "beta1: 0.9\n"
         "beta2: 0.999\n"
-        "epsilon: 1.0e-8\n"
-        "metrics:\n"
-        "  - fit_loss\n"
-        "  - fit_accuracy\n",
+        "epsilon: 1.0e-8\n",
         encoding="utf-8",
     )
     output_dir = root / "output"
@@ -303,6 +300,10 @@ def _write_run_config(
   output_dir: {output_dir}
 server_config: {server_path}
 client_config: {client_path}
+reporting:
+  fit_metrics:
+    - fit_loss
+    - fit_accuracy
 data:
   name: manifest_dataset
   path: {data_manifest}

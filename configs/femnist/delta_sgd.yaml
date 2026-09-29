@@ -22,26 +22,6 @@ server:
   aggregation_weighting: uniform
   # Matches the other cross-device FEMNIST arms.
   participation_rate: 0.01
-  metrics:
-    - fit_loss
-    - fit_accuracy
-    # The step-size trace is the algorithm. A run whose mean step size never
-    # leaves eta_0 is one where the auto-tuner did nothing, and that is only
-    # visible if these are written every round.
-    - client_step_size_mean
-    - client_step_size_min
-    - client_step_size_max
-    - client_step_size_final
-    - step_size_clamp_fraction
-    - undefined_curvature_fraction
-    - optimizer_steps
-    # Per-round upload volume, which preflight tells a reader to compare arms
-    # on. This list is the second filter: a client metric it does not name is
-    # dropped before round_metrics.csv, so client.metrics naming these is not
-    # enough on its own -- and for this rule, naming them only here is not
-    # enough either, because its client filters them too. Both lists carry them.
-    - communicated_parameters
-    - communicated_bytes
 
 client:
   update_rule: delta_sgd
@@ -72,23 +52,6 @@ client:
   update_mode: sequential_epoch
   # Read only by frozen_batch_gradients: examples | uniform | sum.
   frozen_gradient_weighting: examples
-  metrics:
-    - fit_loss
-    - fit_accuracy
-    - client_eta_0
-    - client_step_size_mean
-    - client_step_size_min
-    - client_step_size_max
-    - client_step_size_final
-    - step_size_clamp_fraction
-    - undefined_curvature_fraction
-    - optimizer_steps
-    # The run's communication cost. Delta-SGD filters its fit metrics through
-    # this list, so a name left out here is dropped before the FitResult is
-    # built and the column is simply absent from client_update_metrics.csv --
-    # silently, for the whole run.
-    - communicated_parameters
-    - communicated_bytes
 
 numerics:
   # Must stay false. The step-size rule reads the raw gradient off .grad,
@@ -108,6 +71,25 @@ runtime:
 evaluation:
   val:
     clients: all
+
+reporting:
+  fit_metrics:
+    - fit_loss
+    - fit_accuracy
+    # The step-size trace is the algorithm. A run whose mean step size never
+    # leaves eta_0 is one where the auto-tuner did nothing, and that is only
+    # visible if these are written every round.
+    - client_step_size_mean
+    - client_step_size_min
+    - client_step_size_max
+    - client_step_size_final
+    - step_size_clamp_fraction
+    - undefined_curvature_fraction
+    - optimizer_steps
+    # Per-round upload volume, which preflight tells a reader to compare arms
+    # on.
+    - communicated_parameters
+    - communicated_bytes
 
 defaults:
   global_rounds: 500

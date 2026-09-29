@@ -15,18 +15,6 @@ experiment:
 server:
   strategy: fedavg
   participation_rate: 1
-  metrics:
-    - fit_loss
-    - fit_accuracy
-    - fit_proximal_loss
-    - fit_total_loss
-    # Per-round upload volume, which preflight tells a reader to compare arms
-    # on. This list is the second filter: a client metric it does not name is
-    # dropped before round_metrics.csv, so client.metrics naming these is not
-    # enough on its own -- and for this rule, naming them only here is not
-    # enough either, because its client filters them too. Both lists carry them.
-    - communicated_parameters
-    - communicated_bytes
 
 client:
   update_rule: fedprox
@@ -40,17 +28,6 @@ client:
   # learning_rate_schedule are intentionally absent - it would ignore them.
   # The comparable FedAvg baseline is update_mode: sequential_epoch.
 
-  metrics:
-    - fit_loss
-    - fit_accuracy
-    - fit_proximal_loss
-    - fit_total_loss
-    # One model's worth per round, the same as FedAvg -- the proximal term is
-    # local. Reported so a cost table joining arms reads a number here rather
-    # than a missing column, which looks like no cost at all.
-    - communicated_parameters
-    - communicated_bytes
-
 runtime:
   checkpointing:
     best_metric: val_accuracy_sample_weighted_avg
@@ -60,6 +37,19 @@ runtime:
 evaluation:
   val:
     clients: all
+
+reporting:
+  fit_metrics:
+    - fit_loss
+    - fit_accuracy
+    - fit_proximal_loss
+    - fit_total_loss
+    # Per-round upload volume, which preflight tells a reader to compare arms
+    # on. One model's worth per round, the same as FedAvg -- the proximal term
+    # is local. Reported so a cost table joining arms reads a number here
+    # rather than a missing column, which looks like no cost at all.
+    - communicated_parameters
+    - communicated_bytes
 
 defaults:
   global_rounds: 500

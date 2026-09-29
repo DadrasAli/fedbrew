@@ -21,11 +21,6 @@ server:
   # exactly in the average and FedAvg is unbiased however large zeta is.
   # `--participation-rate 1.0` is the control.
   participation_rate: 0.5
-  # Empty, deliberately: filter_metrics keeps everything when the list is
-  # empty, and a non-empty list would drop the three metrics beyond `loss` on
-  # their way to the round record, since none is a name a shipped config knows
-  # to ask for.
-  metrics: []
 
 client:
   # One row per client, so a "batch" is that client's whole objective and
@@ -33,7 +28,6 @@ client:
   # Local training carries no minibatch noise at all; the only stochasticity
   # in the problem is which clients the round samples.
   batch_size: 1
-  metrics: []
 
 data:
   path: data/generated/examples/drift-quad-rate/manifest.json
@@ -108,13 +102,19 @@ evaluation:
   central_test:
     every: 1
 
-client_statistics:
+reporting:
+  # Empty, deliberately: filter_metrics keeps everything when the list is
+  # empty, and a non-empty list would drop the three metrics beyond `loss` on
+  # their way to the round record, since none is a name a shipped config knows
+  # to ask for.
+  fit_metrics: []
   per_client_csv: true
-  std: true
-  variance: false
-  min: true
-  max: true
-  worst_percent: 10
+  statistics:
+    std: true
+    variance: false
+    min: true
+    max: true
+    worst_percent: 10
 
 divergence:
   metric: fit_loss

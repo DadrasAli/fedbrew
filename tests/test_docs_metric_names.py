@@ -337,14 +337,14 @@ class PerClientCsvGateTest(unittest.TestCase):
         from fedbrew.core.runner import _artifact_file_names
 
         config = _minimal_config()
-        config.client_statistics.per_client_csv = False
+        config.reporting.per_client_csv = False
         self.assertEqual(
             _artifact_file_names(config),
             ["round_metrics.csv", "run.json"],
             "with per_client_csv off, a run writes two metric artifacts",
         )
 
-        config.client_statistics.per_client_csv = True
+        config.reporting.per_client_csv = True
         self.assertEqual(
             _artifact_file_names(config),
             [
@@ -377,8 +377,8 @@ def _minimal_config():
 
     return FullConfig(
         experiment=ExperimentConfig(seed=1, output_dir="outputs/docs-test"),
-        server=ServerConfig(strategy="fedavg", global_rounds=1, participation_rate=1.0, metrics=[]),
-        client=ClientConfig(update_rule="local_sgd", local_iterations=1, batch_size=4, metrics=[]),
+        server=ServerConfig(strategy="fedavg", global_rounds=1, participation_rate=1.0),
+        client=ClientConfig(update_rule="local_sgd", local_iterations=1, batch_size=4),
         task=TaskConfig(name="classification"),
         data=DataConfig(name="synthetic_classification"),
         model=ModelConfig(name="mlp"),
