@@ -1,0 +1,31 @@
+# examples/heterogeneous-quadratic -- the Geman-McClure double well (smooth nonconvex), decoupled cell:
+# omega = 0: shifts and Hessian dissimilarity, uncorrelated, delta* = 0.
+#
+# The construction, its closed forms and every dial: examples/heterogeneous-quadratic/
+# problem.py and its README.md.
+# sigma is the per-row noise: 20 is the design's sigma_mid; 0 gives exact gradients.
+#
+#   fedbrew generate --config data/configs/examples/heterogeneous-quadratic-double-well-decoupled.yaml
+
+dataset:
+  name: heterogeneous_quadratic
+  output_dir: data/generated/examples/heterogeneous-quadratic-double-well-decoupled
+  # The rows are a deterministic function of the dials: nothing is drawn.
+  seed: 0
+  extensions:
+    - examples/heterogeneous-quadratic/problem.py
+
+partition:
+  strategy: analytic
+  # N: a power of two with 2d <= N - 1.
+  num_clients: 64
+
+problem:
+  member: geman_mcclure
+  dim: 16
+  kappa: 10.0
+  zeta_star: 0.25
+  epsilon: 0.5
+  omega: 0.0
+  sigma: 20.0
+  theta: 1.0

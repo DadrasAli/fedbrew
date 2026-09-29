@@ -1,0 +1,30 @@
+# examples/heterogeneous-quadratic -- the heterogeneous quadratic (smooth convex), shift-only cell:
+# epsilon = 0: shifts without Hessian dissimilarity, delta* = 0.
+#
+# The construction, its closed forms and every dial: examples/heterogeneous-quadratic/
+# problem.py and its README.md.
+# sigma is the per-row noise: 20 is the design's sigma_mid; 0 gives exact gradients.
+#
+#   fedbrew generate --config data/configs/examples/heterogeneous-quadratic-shift.yaml
+
+dataset:
+  name: heterogeneous_quadratic
+  output_dir: data/generated/examples/heterogeneous-quadratic-shift
+  # The rows are a deterministic function of the dials: nothing is drawn.
+  seed: 0
+  extensions:
+    - examples/heterogeneous-quadratic/problem.py
+
+partition:
+  strategy: analytic
+  # N: a power of two with 2d <= N - 1.
+  num_clients: 64
+
+problem:
+  member: heterogeneous_quadratic
+  dim: 16
+  kappa: 10.0
+  zeta_star: 1.0
+  epsilon: 0.0
+  omega: 1.0
+  sigma: 20.0

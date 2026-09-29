@@ -239,7 +239,7 @@ class ShowTest(_Tree):
 class TheShippedLayoutTest(unittest.TestCase):
     def test_every_arm_beside_a_base_extends_it_and_every_base_is_extended(self) -> None:
         bases = sorted((REPO / "configs").rglob("_base.yaml"))
-        self.assertEqual(len(bases), 11)
+        self.assertEqual(len(bases), 12)
         extended = set()
         for base in bases:
             for arm in sorted(base.parent.glob("*.yaml")):

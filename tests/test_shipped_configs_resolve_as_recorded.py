@@ -43,6 +43,11 @@ moved to this schema, in the record's own, with
 ``evaluation.splits_without_data`` at the ``[]`` a config without client splits
 evaluated resolves to (the key came after their record), and the column list
 their task declares, which the loader could not plan before it did.
+
+A config added since is recorded when it is added, written in the record's own
+schema -- each key at the place ``MOVED`` maps it back to -- so the comparison
+holds it as it holds the others. The heterogeneous-quadratic example's eight
+arms were recorded so.
 """
 
 from __future__ import annotations
@@ -135,7 +140,7 @@ class EveryShippedConfigResolvesAsRecordedTest(unittest.TestCase):
     @pytest.mark.fast
     def test_the_record_covers_every_shipped_config(self) -> None:
         self.assertEqual(sorted(self.record), sorted(str(path) for path in shipped_run_configs()))
-        self.assertEqual(len(self.record), 131)
+        self.assertEqual(len(self.record), 139)
 
     def test_each_resolves_to_its_record(self) -> None:
         for path in shipped_run_configs():

@@ -60,6 +60,29 @@ FED_LOGISTIC_SETTINGS = tuple(
     )
 )
 
+#: Settings no arm directory of their own is written for: the
+#: heterogeneous-quadratic example's controls and its other two members are
+#: datasets its one directory of arms runs on by pointing data.path at them,
+#: since its model block carries no dial. Their generator configs are held to
+#: the same rules as every other.
+SETTINGS_WITHOUT_ARMS = frozenset(
+    f"heterogeneous-quadratic{cell}"
+    for cell in (
+        "-iid",
+        "-shift",
+        "-decoupled",
+        "-lasso",
+        "-lasso-iid",
+        "-lasso-shift",
+        "-lasso-decoupled",
+        "-lasso-support",
+        "-double-well",
+        "-double-well-iid",
+        "-double-well-shift",
+        "-double-well-decoupled",
+    )
+)
+
 #: example directory -> (its extension file, the dataset/task name it
 #: registers, its model name, the generator-config settings it ships).
 #: Every entry is a claim that the example is on the hook; the test below
@@ -80,6 +103,28 @@ EXAMPLES = {
     ),
     "nonconvex-simplex": ("nonconvex_simplex", "simplex_point", ("nonconvex-simplex",)),
     "fed-logistic-l1": ("fed_logistic_l1", "logistic_vector", FED_LOGISTIC_SETTINGS),
+    "heterogeneous-quadratic": (
+        "heterogeneous_quadratic",
+        "heterogeneous_quadratic_vector",
+        tuple(
+            f"heterogeneous-quadratic{cell}"
+            for cell in (
+                "",
+                "-iid",
+                "-shift",
+                "-decoupled",
+                "-lasso",
+                "-lasso-iid",
+                "-lasso-shift",
+                "-lasso-decoupled",
+                "-lasso-support",
+                "-double-well",
+                "-double-well-iid",
+                "-double-well-shift",
+                "-double-well-decoupled",
+            )
+        ),
+    ),
 }
 
 
@@ -361,6 +406,9 @@ class EveryExampleIsAnExtensionTest(unittest.TestCase):
     def test_every_arm_config_loads_and_names_its_own_extension(self) -> None:
         for name, (dataset, model, settings) in EXAMPLES.items():
             for setting in settings:
+                if setting in SETTINGS_WITHOUT_ARMS:
+                    self.assertFalse((REPO_ROOT / "configs" / "examples" / setting).exists())
+                    continue
                 directory = REPO_ROOT / "configs" / "examples" / setting
                 self.assertTrue(directory.is_dir(), f"{setting} ships no arm configs")
                 for path in _arms(directory):

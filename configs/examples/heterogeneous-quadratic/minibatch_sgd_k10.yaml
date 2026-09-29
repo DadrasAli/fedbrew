@@ -1,0 +1,30 @@
+# examples/heterogeneous-quadratic, minibatch SGD at batch K*b = 160, the
+# equal-sample baseline of FedAvg at K = 10.
+#
+#   fedbrew generate --config data/configs/examples/heterogeneous-quadratic.yaml
+#   fedbrew run --config configs/examples/heterogeneous-quadratic/minibatch_sgd_k10.yaml
+#
+# One SGD step per round on each client's minibatch of 160 rows drawn iid with
+# replacement, the clients' models averaged: as many samples a round as FedAvg
+# at K = 10, in one step. At K = 1 this arm is fedavg_k1.
+
+extends: _base.yaml
+
+experiment:
+  tags:
+    - examples
+    - heterogeneous-quadratic
+    - minibatch-sgd
+
+client:
+  update_rule: fedavg
+  learning_rate: 0.1
+  update_mode: single_batch
+  learning_rate_schedule: constant
+  momentum: 0.0
+  weight_decay: 0.0
+  batch_size: 160
+
+schedule:
+  rounds: 2000
+  local_iterations: 1

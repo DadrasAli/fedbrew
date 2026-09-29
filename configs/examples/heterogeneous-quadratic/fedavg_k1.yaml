@@ -1,0 +1,27 @@
+# examples/heterogeneous-quadratic, FedAvg at a fixed step, K = 1 local steps.
+#
+#   fedbrew generate --config data/configs/examples/heterogeneous-quadratic.yaml
+#   fedbrew run --config configs/examples/heterogeneous-quadratic/fedavg_k1.yaml
+#
+# K iid minibatches of 16 rows, one plain SGD step on each (update_mode
+# single_batch), the clients' models averaged. The step is frozen across K.
+
+extends: _base.yaml
+
+experiment:
+  tags:
+    - examples
+    - heterogeneous-quadratic
+    - fedavg
+
+client:
+  update_rule: fedavg
+  learning_rate: 0.01
+  update_mode: single_batch
+  learning_rate_schedule: constant
+  momentum: 0.0
+  weight_decay: 0.0
+
+schedule:
+  rounds: 2000
+  local_iterations: 1

@@ -37,13 +37,13 @@ example that is only ever checked by a test is a slow test, and one that is
 only ever read is a blog post. They ship as configs plus a `README.md` so both
 uses stay open.
 
-**Not a private code path.** None of the six registers anything at import,
+**Not a private code path.** None of the seven registers anything at import,
 composes a config in Python, or reaches the round loop except through the CLI.
 Every table was re-measured through `fedbrew run`, and every number matched
 what the earlier private runners produced except two, both wrong before the
 migration (`FINDINGS.md`, *Two corrections that are not rows*).
 
-## 3. The six that ship
+## 3. The seven that ship
 
 One `problem.py` per example holds the objective, its analytic gradient, the
 reference optimum, the generator that writes the data, and a `register()` that
@@ -57,9 +57,10 @@ it and guarded against it in both directions.
 | [`fed-lasso`](../examples/fed-lasso/) | `f_i(x) = (1/2m)‖Hx − y_i‖² + λ‖x‖₁` over a planted 3-sparse signal, orthonormal design. `x* = S_λ(x_true)` in closed form. A `penalty` dial swaps the L1 term for `λ‖x‖²/2m` at the same λ, where `x* = (m+λ)⁻¹Hᵀȳ` | What subgradient descent does to a composite objective: a floor set by `ηλ`, no sparsity at any round, and a support that exists only at a threshold — with the smooth control removing the non-smoothness and not the penalty, so every arm converges and still produces no zeros | **None.** There is no proximal operator in fedbrew, so no arm produces a single exact zero. `fedprox` is not the exception — its penalty is smooth. A decaying step size helps the gap and not the sparsity. All nine solve the L2 setting, which is a different problem and not a rescue |
 | [`fed-logistic-l1`](../examples/fed-logistic-l1/) | A loss of the margin plus a penalty on the iterate, `(1/n)Σ loss(b_i xᵀa_i) + λ r(x)`: l1-regularized and ridge logistic regression, logistic regression with the nonconvex regularizer `λΣx²/(1+x²)`, and the sigmoid loss `1 − tanh(b aᵀx)` with a ridge term, on a planted signal (Halton design, at 32 and 1,000 clients and three condition numbers) and on three LIBSVM corpora pinned by SHA-256. One dataset per corpus. A convex problem's `x*` has no closed form; it is solved once and certified to a KKT residual under `1e-12`, into a table keyed by the corpus's content digest, the loss, the penalty and `λ`. The nonconvex ones have no `F*` | That a problem whose optimum is a certified solve rather than a formula is scored the same way: the optima table carries `x*` and `F*`, and the gap is measured against them | **None** for the L1 problem, for fed-lasso's reason: there is no proximal operator, so no arm produces an exact zero |
 | [`simplex-lsq`](../examples/simplex-lsq/) | Least squares over the probability simplex `Δ`, orthonormal design, with the unconstrained optimum placed outside `Δ`. `x* = Π_Δ(θ̄)` in closed form | That the objective column inverts: every arm converges to an infeasible point and ends with a **negative** optimality gap, beating `F*` by leaving the feasible set | **None.** No projection, no Frank-Wolfe step and no mirror map, and no hook one could attach to. Every arm converges — to the wrong set |
+| [`heterogeneous-quadratic`](../examples/heterogeneous-quadratic/) | Three members on one construction -- a heterogeneous quadratic, a planted lasso with a diagonal design, a Geman–McClure double well -- over 64 clients whose curvature and shifts come from Hadamard columns, so ζ\*, the Hessian dissimilarity ε and their correlation ω are each exact dials. x\*, F\*, the client optima, δ\* and FedAvg's exact floor per (α, K) are closed forms in the manifest | That FedAvg's drift is set by δ\* = ε ω ζ\* ā/√d and vanishes in the iid, shift-only and decoupled controls; that K raises FedAvg's floor where δ\* ≠ 0; on per-row noise sampled iid by the task's own loader | SCAFFOLD removes the δ\* drift in the quadratic; fixed-step FedAvg sits on its closed-form floor; the lasso's subgradient step floor and support disagreement stay for every arm |
 | [`nonconvex-simplex`](../examples/nonconvex-simplex/) | Motzkin-Straus: `−½xᵀAx` over `Δ` for a `K₅` disjoint from a star `K₁,₂₅`, so the clique number is the clique's and the spectral radius is the star's. `F* = −½(1 − 1/ω) = −0.4` | That every arm diverges, no divergence detector fires, all eight report `status: completed`, and projecting the result afterwards is no better than never having run: worse for four arms, level with the start for three, and 0.025 better for one | **None**, and the unconstrained problem is unbounded below. `blowup_factor` never arms because the loss is never positive |
 
-**Four of the six pose problems no shipped algorithm can solve.** That is the
+**Four of the seven pose problems no shipped algorithm can solve.** That is the
 point of having them, not a gap in the set. A problem is worth stating before
 its algorithm exists, and each of those four names what is missing —
 a proximal operator (twice), a projection, a bounded feasible set — in a section of its
@@ -107,8 +108,8 @@ above carries it in `fed-lasso`'s row.
    out-of-tree component.
 2. **This chapter is the discipline.** §4, every rule with its reason.
 3. **`examples/drift-quad/` is the file to copy.** It is chapter 12's worked
-   case, it is the only one with both dials and both controls, and its
-   `_self_check()` is the fullest of the six.
+   case, it was the first with both dials and both controls, and its
+   `_self_check()` is the fullest of the first six.
 
 Then: a generator config under `data/configs/examples/`, one run config per arm
 under `configs/examples/<name>/`, a `run.py` that runs that directory and
@@ -126,7 +127,7 @@ because there is no such subcommand: `tests/test_cli_commands_exist.py` refuses
 a `fedbrew <name>` written anywhere in the tree that `COMMANDS` does not know,
 and it refused this paragraph's first draft.)
 
-**A `status` field marking comparison versus failure-demo.** Four of the six
+**A `status` field marking comparison versus failure-demo.** Four of the seven
 are failure demonstrations, and a reader learns which from prose. A machine
 reader — a docs guard, a summary table, anything that walks `examples/` —
 cannot tell a table meant as a comparison from a table meant as evidence that
@@ -139,7 +140,7 @@ absence of both, so this section stays true or fails.
 
 | Path | What it is |
 | --- | --- |
-| `examples/README.md` | the index, and the authority on the six-example table in §3 |
+| `examples/README.md` | the index, and the authority on the seven-example table in §3 |
 | `examples/drift-quad/problem.py` | the worked case: objective, gradient, generator, `register()`, `_self_check()` |
 | `examples/drift-quad/README.md` | the fullest README — two dials, two controls, and the tuning protocol with its own limitations section |
 | `configs/examples/<name>/` | one run config per arm |
@@ -163,7 +164,7 @@ python -m pytest tests/test_docs_illustrative_examples.py -v
 ### Invariants
 
 1. **The ground truth is asserted in `problem.py` and runs at import.** Every
-   one of the six defines `_self_check()` and calls it at module scope. A
+   one of the seven defines `_self_check()` and calls it at module scope. A
    plotted claim is not a checked one.
 2. **A dial is a generator config.** Never a run-config flag — §4.1.
 3. **Nothing registers at import except the self-check.** `register()` is

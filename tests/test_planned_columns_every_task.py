@@ -240,7 +240,7 @@ class EveryTaskDeclaresItsMetricsTest(unittest.TestCase):
 
         register_builtin_components()
         names = {load_config(paths[0]).task.name for paths in _shipped_groups().values()}
-        self.assertEqual(len(names), 8)
+        self.assertEqual(len(names), 9)
         for name in sorted(names):
             with self.subTest(task=name):
                 self.assertTrue(tasks.metrics(name), f"{name} declares no metrics")

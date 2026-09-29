@@ -116,6 +116,7 @@ def example_cases() -> list[_Case]:
         ("drift-quad", "drift_quad"),
         ("nonconvex-simplex", "nonconvex_simplex"),
         ("pl-1d", "pl_1d"),
+        ("heterogeneous-quadratic", "heterogeneous_quadratic"),
     ):
         module = extensions._import_file(REPO_ROOT / "examples" / name / "problem.py")
         task = _example_task(module, dataset)
@@ -139,7 +140,7 @@ def _example_task(module: Any, dataset: str) -> Any:
 def _example_split(name: str) -> Any:
     def split(rows: int) -> dict[str, Any]:
         numbers = torch.arange(rows, dtype=torch.float64)
-        if name in {"fed-lasso", "simplex-lsq"}:
+        if name in {"fed-lasso", "simplex-lsq", "heterogeneous-quadratic"}:
             return {"x": numbers.unsqueeze(1), "y": numbers}
         if name == "pl-1d":
             return {"x": numbers}

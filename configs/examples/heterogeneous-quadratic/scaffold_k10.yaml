@@ -1,0 +1,25 @@
+# examples/heterogeneous-quadratic, SCAFFOLD, K = 10 local steps.
+#
+#   fedbrew generate --config data/configs/examples/heterogeneous-quadratic.yaml
+#   fedbrew run --config configs/examples/heterogeneous-quadratic/scaffold_k10.yaml
+#
+# Option II control variates, global step 1, each client's c_i kept between
+# the rounds it is sampled in. Its own loop is sequential_epoch, and one pass
+# of this task's training loader is one iid minibatch, so local_iterations is
+# K steps. The step is frozen across K.
+
+extends: _base.yaml
+
+experiment:
+  tags:
+    - examples
+    - heterogeneous-quadratic
+    - scaffold
+
+client:
+  update_rule: scaffold
+  learning_rate: 0.01
+
+schedule:
+  rounds: 2000
+  local_iterations: 10

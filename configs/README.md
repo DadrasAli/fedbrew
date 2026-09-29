@@ -37,6 +37,7 @@ examples/    pl-1d/                     (7 arms)
              fed-logistic-l1-synthetic-kappa1/                        (4 arms)
              fed-logistic-l1-synthetic-kappa10/                       (4 arms)
              fed-logistic-l1-synthetic-kappa100/                      (4 arms)
+             heterogeneous-quadratic/                                 (8 arms)
 ```
 
 `examples/` is one directory per *dial setting* rather than per dataset,
