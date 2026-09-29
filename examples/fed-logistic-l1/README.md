@@ -1,7 +1,9 @@
 # examples/fed-logistic-l1 — linear classifiers with a penalty, and the datasets they are posed on
 
-The example keeps the name it was first written under, for the logistic loss
-with an L1 penalty; it now poses four problems, the tanh loss among them.
+The example keeps the name it was first written under, for l1-regularized
+logistic regression; it now poses four problems: l1-regularized and ridge
+logistic regression, logistic regression with a nonconvex regularizer, and the
+sigmoid loss with a ridge term.
 
 A problem here is a loss of the margin, a penalty on the iterate and its weight
 `λ`, posed on a dataset of rows `(a_i, b_i)` with `b_i ∈ {-1, +1}`:
@@ -28,25 +30,29 @@ loss, the penalty and `λ` (below).
 
 ## The problems
 
-### Logistic loss with an L1 penalty
+### l1-regularized logistic regression
 
 ```
 F(x) = (1/n) Σ_i log(1 + exp(-b_i xᵀa_i)) + λ‖x‖₁          (loss: logistic, penalty: l1)
 ∇ℓ(x) = -(1/n) Σ_i b_i σ(-b_i xᵀa_i) a_i                   ∇²ℓ(x) ⪯ AᵀA / 4n
 ```
 
-Convex and non-smooth at every point with a zero coordinate. `∇ℓ` is Lipschitz
+Koh, Kim & Boyd, "An interior-point method for large-scale ℓ1-regularized
+logistic regression", JMLR 8, 2007. Convex and non-smooth at every point with
+a zero coordinate. `∇ℓ` is Lipschitz
 with `L = ‖A‖₂²/4n`, which the manifest records as `reference.lipschitz`. `F`
 is coercive, so a minimiser exists without a box. `F*` is certified once per
 corpus and `λ`, into the optima table (below).
 
-### Logistic loss with a squared-L2 penalty
+### Ridge logistic regression
 
 ```
 F(x) = (1/n) Σ_i log(1 + exp(-b_i xᵀa_i)) + (λ/2)‖x‖²      (loss: logistic, penalty: l2sq)
 ```
 
-Convex, smooth and `λ`-strongly convex: `∇F = ∇ℓ + λx` is Lipschitz with
+ℓ2-regularized (ridge) logistic regression: le Cessie & van Houwelingen,
+"Ridge estimators in logistic regression", JRSS-C 41(1), 1992. Convex, smooth
+and `λ`-strongly convex: `∇F = ∇ℓ + λx` is Lipschitz with
 `L + λ`, and the minimiser is unique. `F*` is certified into the optima table.
 The arms, `logistic-l2sq-lambda<λ>` in each corpus's directory:
 
@@ -60,14 +66,17 @@ The arms, `logistic-l2sq-lambda<λ>` in each corpus's directory:
 | `fed-logistic-l1-ijcnn1-32` | 0.01 | 0.4154526395889211 |
 | `fed-logistic-l1-gisette` | 0.001 | 0.4580582604022483 |
 
-### Logistic loss with a nonconvex penalty
+### Logistic regression with a nonconvex regularizer
 
 ```
 F(x) = (1/n) Σ_i log(1 + exp(-b_i xᵀa_i)) + λ Σ_j x_j²/(1 + x_j²)      (loss: logistic, penalty: nonconvex)
 r'(u) = 2λu/(1 + u²)²        |r''(u)| ≤ 2λ
 ```
 
-A smooth penalty that behaves like `λu²` near 0 and saturates at `λ` far from
+The benchmark of stochastic nonconvex optimization under that name (Wang,
+Ji, Zhou, Liang & Tarokh, SpiderBoost, NeurIPS 2019, experiments). Per
+coordinate the regularizer is the Geman–McClure function `u²/(1 + u²)`. A
+smooth penalty that behaves like `λu²` near 0 and saturates at `λ` far from
 it, so it shrinks small coordinates and leaves large ones alone; it is
 nonconvex (`r''` turns negative past `|u| = 1/√3`), so `F` is. There is **no
 certified `F*`**: the table holds no entry for it, and a run reports no
@@ -76,14 +85,17 @@ at `L + 2λ`. The arms, `logistic-nonconvex-lambda<λ>`: on synthetic-1000
 (`λ = 0.001`), the three kappa corpora (0.01), a9a (0.001), ijcnn1-32 (0.01)
 and gisette (0.001).
 
-### The tanh-loss SVM with a squared-L2 penalty
+### The sigmoid loss with a ridge term
 
 ```
 F(x) = 1 + (1/n) Σ_i tanh(-b_i xᵀa_i) + (λ/2)‖x‖²      (loss: tanh, penalty: l2sq)
 loss'(z) = 1 − tanh(z)²      |loss''(z)| ≤ 4/(3√3)
 ```
 
-The loss `1 − tanh(b aᵀx)`, a smooth, bounded surrogate of the 0-1 loss:
+The loss `1 − tanh(b aᵀx)` is the sigmoid loss, Mason, Baxter, Bartlett &
+Frean's margin cost `1 − tanh(λz)` at `λ = 1` ("Boosting algorithms as
+gradient descent", NIPS 12, 1999, eq. 4), which other code calls a "tanh-loss
+SVM"; `loss: tanh` names it here. A smooth, bounded surrogate of the 0-1 loss:
 nonconvex in `x`, so `F` is, even with the ridge term. `∇F` is Lipschitz at
 `(4/(3√3))‖A‖²/n + λ`. There is **no certified `F*`**, as for the nonconvex
 penalty. The arms, `tanh-l2sq-lambda<λ>`: on synthetic-1000 (`λ = 0.001`), the
@@ -255,7 +267,7 @@ client a round at full participation, is gradient descent on `F` at step
 `1/(L + λ)` and converges to `x*`; with more local steps, client drift moves
 its fixed point, and the gap measures by how much.
 
-**The nonconvex-penalty and tanh-loss problems: gradient arms reach a stationary point**,
+**Logistic regression with a nonconvex regularizer, and the sigmoid loss: gradient arms reach a stationary point**,
 not a certified minimum; with no `F*` there is no gap to read, and `F(x)` and
 the distance to `x_true` are what a run reports.
 

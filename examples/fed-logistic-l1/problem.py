@@ -1,4 +1,9 @@
-"""Federated logistic regression with an L1 penalty, over a planted sparse signal.
+"""Linear classifiers with a regularizer, federated, on planted and real corpora.
+
+Four problems: l1-regularized and ridge logistic regression, logistic
+regression with a nonconvex regularizer, and the sigmoid loss with a ridge
+term. The first is written out below; the others swap the loss or the penalty
+(:data:`LOSSES`, :data:`PENALTIES`, :data:`PROBLEMS`).
 
 The problem
 -----------
@@ -113,6 +118,7 @@ from fedbrew.data.writers.torch_shards import (
 from fedbrew.models.config_keys import reject_unknown_model_keys
 from fedbrew.tasks.base import (
     LoaderOrder,
+    ReportedMetrics,
     TaskAdapter,
     batch_row_numbers,
     listed_loader_order,
@@ -264,7 +270,7 @@ def _logistic_weights(signed: Tensor) -> Tensor:
 
 
 def _tanh(signed: Tensor, mask: Tensor | None = None) -> Tensor:
-    """`1 + mean tanh(z)`, the tanh-loss SVM's `1 - tanh(b a.x)`: the constant added once."""
+    """`1 + mean tanh(z)`, the sigmoid loss `1 - tanh(b a.x)`: the constant added once."""
 
     return 1.0 + row_mean(torch.tanh(signed), mask)
 
@@ -1603,6 +1609,49 @@ class FedLogisticL1Task(TaskAdapter):
     them from.
     """
 
+    #: What compute_metrics and the central pass can report, and which side of
+    #: each is better (TaskAdapter.METRICS). Which of them a run reports depends
+    #: on its problem and its corpus (:func:`reported_metrics`): the gap and the
+    #: distance to `x*` only where `F*` is certified, the distance to `x_true`
+    #: only on a planted corpus, and the gap only on the central pass.
+    #: support_size and exact_zeros are read against a support, not as smaller
+    #: or larger.
+    METRICS = {
+        "loss": "min",
+        "optimality_gap": "min",
+        "distance_to_optimum": "min",
+        "distance_to_truth": "min",
+        "support_size": "none",
+        "support_f1": "max",
+        "exact_zeros": "none",
+    }
+
+    #: What each metric measures, for the plan header's glosses (TaskAdapter.METRIC_GLOSSES).
+    METRIC_GLOSSES = {
+        "loss": (
+            "client objective (1/m) Σ_i ℓ(b_i a_iᵀx) + λ r(x), ℓ the logistic or the sigmoid "
+            "loss and r the l1, the ridge or the nonconvex regularizer"
+        ),
+        "optimality_gap": "optimality gap F(x) − F*, F* certified in the optima table",
+        "distance_to_optimum": "distance ‖x − x*‖₂ to the certified optimum",
+        "distance_to_truth": "distance ‖x − x_true‖₂ to the planted vector",
+        "support_size": "count of coordinates with |x_j| above model.support_tolerance",
+        "support_f1": (
+            "F1 of the support above model.support_tolerance against the planted one, or "
+            "against x*'s on a corpus with nothing planted"
+        ),
+        "exact_zeros": "count of coordinates exactly 0.0",
+    }
+
+    #: What its grad_norm_sq measures (TaskAdapter.GRAD_NORM_GLOSS).
+    GRAD_NORM_GLOSS = (
+        "squared norm of the gradient of the federated objective F(x) = (1/n) Σ_i "
+        "ℓ(b_i a_iᵀx) + λ r(x) at the global model -- ridge or l1-regularized logistic "
+        "regression, logistic regression with a nonconvex regularizer, or the sigmoid loss "
+        "with a ridge term; under the l1 regularizer, of F's minimum-norm subgradient, whose "
+        "coordinates at x_j = 0 are the smooth gradient's soft-thresholded at λ"
+    )
+
     def __init__(
         self,
         model_config: Mapping[str, Any] | None = None,
@@ -1674,19 +1723,9 @@ class FedLogisticL1Task(TaskAdapter):
         # What a client evaluation reports, and what the central pass adds to
         # it. `optimality_gap` is F over every row, the same in every client's
         # copy, so it is measured once a round by `evaluate_model`.
-        self._names = (
-            "loss",
-            *(("distance_to_optimum",) if self._optimum is not None else ()),
-            *(("distance_to_truth",) if self._truth is not None else ()),
-            "support_size",
-            *(("support_f1",) if self._truth_support else ()),
-            "exact_zeros",
-        )
-        self._central_names = (
-            "loss",
-            *(("optimality_gap",) if self._optimal_objective is not None else ()),
-            *self._names[1:],
-        )
+        reported = _reported(spec, entry)
+        self._names = reported.client
+        self._central_names = reported.central
         # Read as `getattr(task, "_scaler", None)` by four client rules, to
         # decide whether to refuse `runtime.use_amp: true`.
         self._scaler: Any = None
@@ -1775,6 +1814,17 @@ class FedLogisticL1Task(TaskAdapter):
         with torch.no_grad():
             outputs = self.functional_eval(model, None, None, self._move_batch(batch))
         return {name: float(value) for name, value in outputs.items()}
+
+    def objective_loss(self, model: Any, batch: Any) -> tuple[Tensor, float]:
+        """The batch's objective, as ``train_step`` takes it, and its rows (TaskAdapter)."""
+
+        loss, _ = self.functional_loss(model, None, None, self._move_batch(batch))
+        return loss, float(self.evaluation_total(batch) or 0.0)
+
+    def objective_l1(self, model: Any) -> dict[str, float]:
+        """``lam ||x||_1`` on ``x`` under the l1 regularizer; nothing under the smooth ones."""
+
+        return {"x": model.penalty_strength} if model.penalty_form == "l1" else {}
 
     # -- the batched executor (fedbrew.tasks.base.BatchableTask) --------------
 
@@ -1971,6 +2021,57 @@ def _check_model_against_reference(model_config: Mapping[str, Any], spec: Proble
         )
 
 
+def _reported(spec: ProblemSpec, entry: Mapping[str, Any]) -> ReportedMetrics:
+    """What a run on ``spec``'s corpus and problem reports, ``entry`` its optimum or empty.
+
+    The distance to `x*` where the problem is certified, the distance to
+    `x_true` where the corpus is planted, the support's F1 where there is a
+    support to score against -- the planted one, or `x*`'s -- and the gap on
+    the central pass alone, which measures `F` over every row.
+    """
+
+    certified = bool(entry)
+    planted = spec.source is None
+    support = spec.truth_support() if planted else set(entry.get("optimum_support", ()))
+    client = (
+        "loss",
+        *(("distance_to_optimum",) if certified else ()),
+        *(("distance_to_truth",) if planted else ()),
+        "support_size",
+        *(("support_f1",) if support else ()),
+        "exact_zeros",
+    )
+    central = ("loss", *(("optimality_gap",) if certified else ()), *client[1:])
+    return ReportedMetrics(client=client, central=central)
+
+
+def reported_metrics(config: Any) -> ReportedMetrics | None:
+    """Which of ``METRICS`` a run of ``config`` reports (``registry.tasks.register(reported=)``).
+
+    Read from the corpus the manifest describes and the problem the model block
+    poses, as the task decides it when built; None -- every declared name --
+    where the data has not been generated, or the problem has no optimum this
+    run could use, which the task then refuses when it is built.
+    """
+
+    from fedbrew.core import inferred
+
+    manifest = inferred.read_manifest(config.data.path)
+    reference = dict((manifest or {}).get("reference") or {})
+    if "problem" not in reference or "corpus_digest" not in reference:
+        return None
+    model_config = {**config.model.extra, "input_dim": config.model.input_dim}
+    try:
+        spec = _spec_from_reference(reference, model_config)
+        entry: Mapping[str, Any] = {}
+        if spec.certified:
+            table = Path(str(model_config.get("optima") or OPTIMA_TABLE))
+            entry = find_optimum(read_optima(table), str(reference["corpus_digest"]), spec)
+    except (KeyError, TypeError, ValueError):
+        return None
+    return _reported(spec, entry)
+
+
 def _loader_config(config: Mapping[str, Any] | bool | None) -> dict[str, Any]:
     if isinstance(config, bool):
         return {"shuffle": config}
@@ -2009,7 +2110,14 @@ def register() -> None:
         generate_fed_logistic_l1_from_config,
         sections={"problem": PROBLEM_KEYS, "source": SOURCE_KEYS},
     )
-    registry.tasks.register(TASK_NAME, lambda **kwargs: FedLogisticL1Task(**kwargs))
+    registry.tasks.register(
+        TASK_NAME,
+        lambda **kwargs: FedLogisticL1Task(**kwargs),
+        metrics=FedLogisticL1Task.METRICS,
+        glosses=FedLogisticL1Task.METRIC_GLOSSES,
+        grad_norm=FedLogisticL1Task.GRAD_NORM_GLOSS,
+        reported=reported_metrics,
+    )
     registry.models.register(MODEL_NAME, build_logistic_vector, task=TASK_NAME)
 
 
