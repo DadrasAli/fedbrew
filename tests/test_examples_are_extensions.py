@@ -362,18 +362,26 @@ class EveryExampleIsAnExtensionTest(unittest.TestCase):
                         )
 
     @pytest.mark.fast
-    def test_every_arm_config_sets_its_own_experiment_name(self) -> None:
-        """The five ship the same arm names; the stem alone would collide."""
+    def test_every_arm_is_recorded_under_its_own_experiment_name(self) -> None:
+        """The five ship the same arm names; the stem alone would collide.
+
+        Each arm set ``experiment.name: <setting>-<arm>`` for that reason
+        until the loader inferred exactly that from the path
+        (fedbrew/core/inferred.py); the name checked is the one the run
+        records, stated or inferred.
+        """
+
+        from fedbrew.core.inferred import inferred_name
 
         seen: dict[str, str] = {}
         for _, (_, _, settings) in EXAMPLES.items():
             for setting in settings:
                 for path in sorted((REPO_ROOT / "configs" / "examples" / setting).glob("*.yaml")):
                     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-                    name = raw["experiment"].get("name")
+                    name = raw["experiment"].get("name") or inferred_name(path)
                     relative = str(path.relative_to(REPO_ROOT))
                     with self.subTest(config=relative):
-                        self.assertIsNotNone(name, "an arm config must set experiment.name")
+                        self.assertEqual(name, f"{setting}-{path.stem}")
                         self.assertNotIn(
                             name,
                             seen,

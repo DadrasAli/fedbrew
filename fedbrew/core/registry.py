@@ -226,6 +226,16 @@ class Registry(Generic[T]):
 #: Read through ``task_for_model``, which registers the built-ins first.
 MODEL_TASKS: dict[str, str] = {}
 
+#: The shape keys a model's builder is sized by, of the two a manifest states
+#: (``input_dim``, ``num_classes``): the ones the loader fills from the manifest
+#: when a config leaves them out (fedbrew/core/inferred.py). Declared at
+#: registration, because every builder is handed both and a builder that
+#: ignores one -- FEMNIST's ResNet takes no input_dim -- cannot say so.
+MODEL_SHAPE_KEYS: dict[str, tuple[str, ...]] = {}
+
+#: What ``shape_keys`` may name.
+SHAPE_KEYS = ("input_dim", "num_classes")
+
 
 class ModelRegistry(Registry[ModelFactory]):
     """The model registry, which also records the task each model needs."""
@@ -236,6 +246,7 @@ class ModelRegistry(Registry[ModelFactory]):
         obj: ModelFactory,
         *,
         task: str,
+        shape_keys: Iterable[str] = (),
         origin: str | None = None,
     ) -> None:
         """Register a model builder together with the task adapter it needs.
@@ -246,13 +257,26 @@ class ModelRegistry(Registry[ModelFactory]):
             task: The ``task.name`` this model trains under. Required: a
                 model with no task cannot be run, and a config cannot supply
                 one because the pairing is a fact about the model.
+            shape_keys: Which of ``input_dim`` and ``num_classes`` the builder
+                is sized by, which a config may then leave to the manifest.
+                None by default: a config states every key the model reads.
             origin: As for ``Registry.register``.
         """
 
         if not isinstance(task, str) or not task.strip():
             raise ValueError(f"models: {name!r} must name the task adapter it needs (task=...)")
+        if isinstance(shape_keys, str):
+            raise ValueError(f"models: {name!r} shape_keys must be a collection of key names")
+        keys = tuple(shape_keys)
+        unknown = sorted(set(keys) - set(SHAPE_KEYS))
+        if unknown:
+            raise ValueError(
+                f"models: {name!r} shape_keys may name only {', '.join(SHAPE_KEYS)}, "
+                f"not {', '.join(unknown)}"
+            )
         super().register(name, obj, origin=origin)
         MODEL_TASKS[name] = task
+        MODEL_SHAPE_KEYS[name] = keys
 
 
 class TaskRegistry(Registry[TaskFactory]):
@@ -335,6 +359,13 @@ def task_for_model(model_name: str) -> str:
             "model (chapter 12)."
         )
     return MODEL_TASKS[model_name]
+
+
+def model_shape_keys(model_name: str) -> tuple[str, ...]:
+    """The shape keys a registered model is sized by; none for a name not registered."""
+
+    register_builtin_components()
+    return MODEL_SHAPE_KEYS.get(model_name, ())
 
 
 #: The two shapes a dataset generator can take; see ``GeneratorSpec``.
@@ -522,12 +553,36 @@ def register_builtin_components() -> None:
     _register_once(client_updates, "fedavg_ft", _build_fedavg_ft_client)
     _register_once(datasets, "synthetic_classification", _build_synthetic_dataset)
     _register_once(datasets, "manifest_dataset", _build_manifest_dataset)
-    _register_once(models, "mlp", _build_torch_mlp, task="classification")
-    _register_once(models, "cnn", _build_torch_cnn, task="classification")
-    _register_once(models, "small_cnn", _build_torch_small_cnn, task="classification")
-    _register_once(models, "femnist_resnet18", _build_femnist_resnet18, task="classification")
     _register_once(
-        models, "openimage_shufflenet", _build_openimage_shufflenet, task="classification"
+        models,
+        "mlp",
+        _build_torch_mlp,
+        task="classification",
+        shape_keys=("input_dim", "num_classes"),
+    )
+    _register_once(
+        models, "cnn", _build_torch_cnn, task="classification", shape_keys=("num_classes",)
+    )
+    _register_once(
+        models,
+        "small_cnn",
+        _build_torch_small_cnn,
+        task="classification",
+        shape_keys=("num_classes",),
+    )
+    _register_once(
+        models,
+        "femnist_resnet18",
+        _build_femnist_resnet18,
+        task="classification",
+        shape_keys=("num_classes",),
+    )
+    _register_once(
+        models,
+        "openimage_shufflenet",
+        _build_openimage_shufflenet,
+        task="classification",
+        shape_keys=("num_classes",),
     )
     _register_once(models, "tiny_gpt2", _build_tiny_gpt2, task="causal_lm")
     _register_once(models, "hf_causal_lm", _build_hf_causal_lm, task="causal_lm")

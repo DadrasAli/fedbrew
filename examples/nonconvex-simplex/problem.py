@@ -1002,7 +1002,9 @@ def register() -> None:
         lambda **kwargs: NonconvexSimplexTask(**kwargs),
         metrics=NonconvexSimplexTask.METRICS,
     )
-    registry.models.register(MODEL_NAME, build_simplex_point, task=TASK_NAME)
+    registry.models.register(
+        MODEL_NAME, build_simplex_point, task=TASK_NAME, shape_keys=("input_dim",)
+    )
 
 
 def _self_check() -> None:

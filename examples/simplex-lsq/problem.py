@@ -1020,7 +1020,9 @@ def register() -> None:
     registry.tasks.register(
         TASK_NAME, lambda **kwargs: SimplexLSQTask(**kwargs), metrics=SimplexLSQTask.METRICS
     )
-    registry.models.register(MODEL_NAME, build_simplex_vector, task=TASK_NAME)
+    registry.models.register(
+        MODEL_NAME, build_simplex_vector, task=TASK_NAME, shape_keys=("input_dim",)
+    )
 
 
 def _self_check() -> None:

@@ -296,10 +296,10 @@ def _identity_rows(
 ) -> list[Row]:
     experiment = config.experiment
     runtime_extra = config.runtime.extra
-    rows = [Row("Experiment", experiment.name or "(unnamed)")]
+    rows = [Row("Experiment", _marked(config, "experiment.name", experiment.name or "(unnamed)"))]
     if experiment.run_id:
         rows.append(Row("Run", str(experiment.run_id)))
-    rows.append(Row("Output", str(experiment.output_dir)))
+    rows.append(Row("Output", _marked(config, "experiment.output_dir", experiment.output_dir)))
     note = _output_dir_note(config, resume_from)
     if note is not None:
         # Its own row rather than a trailing note on the one above: an output
@@ -346,6 +346,13 @@ def _identity_rows(
     return rows
 
 
+def _marked(config: FullConfig, key: str, value: object) -> str:
+    """``value``, with where it came from when the loader inferred it."""
+
+    source = config.inferred.get(key)
+    return str(value) if source is None else f"{value} (inferred from {source})"
+
+
 def _data_rows(config: FullConfig, client_count: int | None) -> list[Row]:
     data = config.data
     rows = [Row("Dataset", data.name or "(unset)")]
@@ -388,6 +395,14 @@ def _algorithm_rows(config: FullConfig) -> list[Row]:
         Row("Update rule", client.update_rule),
         Row("Task", config.task.name),
         Row("Model", config.model.name),
+        *(
+            Row(label, _marked(config, f"model.{key}", getattr(config.model, key)), tone=DIM)
+            for label, key in (
+                ("Model input dimension", "input_dim"),
+                ("Model classes", "num_classes"),
+            )
+            if f"model.{key}" in config.inferred
+        ),
         Row("Local iterations", str(client.local_iterations)),
         Row("Batch size", str(client.batch_size)),
     ]

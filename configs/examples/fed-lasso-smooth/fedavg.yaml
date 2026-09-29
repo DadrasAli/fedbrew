@@ -10,10 +10,6 @@
 # is stated over, not a tuned winner: the gap is exactly 0.0 across all of it.
 
 experiment:
-  # Set rather than left to the filename stem, which is the convention's
-  # exception: the examples ship the same arm names, so the stem alone would
-  # put "fedavg" in runs_index.jsonl once per example and dial setting.
-  name: fed-lasso-smooth-fedavg
   seed: 42
   output_dir: outputs/examples/fed-lasso-smooth/fedavg
   use_run_subdir: false

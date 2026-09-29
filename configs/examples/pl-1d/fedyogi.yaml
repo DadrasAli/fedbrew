@@ -10,10 +10,6 @@
 # the search band each sits inside rather than a grid it was picked from.
 
 experiment:
-  # Set rather than left to the filename stem, which is the convention's
-  # exception: the five examples ship the same arm names, so the stem alone
-  # would put "fedyogi" in runs_index.jsonl once per example.
-  name: pl-1d-fedyogi
   seed: 42
   output_dir: outputs/examples/pl-1d/fedyogi
   use_run_subdir: false

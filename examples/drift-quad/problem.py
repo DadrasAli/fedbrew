@@ -1035,7 +1035,9 @@ def register() -> None:
     registry.tasks.register(
         TASK_NAME, lambda **kwargs: DriftQuadTask(**kwargs), metrics=DriftQuadTask.METRICS
     )
-    registry.models.register(MODEL_NAME, build_quad_vector, task=TASK_NAME)
+    registry.models.register(
+        MODEL_NAME, build_quad_vector, task=TASK_NAME, shape_keys=("input_dim",)
+    )
 
 
 def _self_check() -> None:

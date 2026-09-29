@@ -593,9 +593,11 @@ def _training_client_kwargs(
         kwargs.update(
             momentum=_client_extra_float(config, "momentum"),
             weight_decay=_client_extra_float(config, "weight_decay"),
-            nesterov=_client_extra_bool(config, "nesterov"),
+            # Both optional where they do not act (config._validate_local_sgd_options):
+            # nesterov without momentum, the floor under a constant schedule.
+            nesterov=_client_extra_bool(config, "nesterov", False),
             learning_rate_schedule=_client_extra_choice(config, "learning_rate_schedule"),
-            min_learning_rate=_client_extra_float(config, "min_learning_rate"),
+            min_learning_rate=_client_extra_optional_float(config, "min_learning_rate"),
             total_rounds=config.server.global_rounds,
         )
 
@@ -618,7 +620,7 @@ def _training_client_kwargs(
             beta2=_client_extra_float(config, "beta2"),
             epsilon=_client_extra_float(config, "epsilon"),
             learning_rate_schedule=_client_extra_choice(config, "learning_rate_schedule"),
-            min_learning_rate=_client_extra_float(config, "min_learning_rate"),
+            min_learning_rate=_client_extra_optional_float(config, "min_learning_rate"),
             total_rounds=config.server.global_rounds,
             max_local_steps=_client_extra_optional_positive_int(config, "max_local_steps"),
         )
@@ -680,9 +682,9 @@ def _update_mode_kwargs(config: FullConfig) -> dict[str, Any]:
     elif config.client.update_rule in UPDATE_MODE_CLIENT_RULES:
         kwargs["update_mode"] = _client_extra_choice(config, "update_mode")
     if config.client.update_rule in FROZEN_WEIGHTING_CLIENT_RULES:
-        kwargs["frozen_gradient_weighting"] = _client_extra_choice(
-            config, "frozen_gradient_weighting"
-        )
+        # None where the mode reads none: required only under
+        # frozen_batch_gradients (config._validate_update_mode_options).
+        kwargs["frozen_gradient_weighting"] = config.client.extra.get("frozen_gradient_weighting")
     return kwargs
 
 
@@ -708,6 +710,14 @@ def _model_config(
     values.update(config.model.extra)
     if dataset is not None:
         metadata = dataset.get_metadata()
+        # What the loader infers when it can read the manifest at load
+        # (fedbrew/core/inferred.py), filled here from the same metadata when
+        # it could not -- data staged elsewhere, or generated since.
+        from fedbrew.core.registry import model_shape_keys
+
+        for name in model_shape_keys(config.model.name):
+            if values.get(name) is None and name in metadata:
+                values[name] = metadata[name]
         mismatch = model_data_shape_mismatch(values, metadata)
         if mismatch is not None:
             raise RunRefused(mismatch)
@@ -920,6 +930,14 @@ def _client_extra_float(config: FullConfig, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, float | int):
         raise RunRefused(f"client.{name} must be numeric" + yaml_number_cause(value))
     return float(value)
+
+
+def _client_extra_optional_float(config: FullConfig, name: str) -> float | None:
+    """A numeric client extra where the config may leave it out; None when it does."""
+
+    if name not in config.client.extra:
+        return None
+    return _client_extra_float(config, name)
 
 
 def _client_extra_choice(config: FullConfig, name: str) -> str:

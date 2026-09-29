@@ -13,10 +13,6 @@
 # scored on it would select for the defect.
 
 experiment:
-  # Set rather than left to the filename stem, which is the convention's
-  # exception: the examples ship the same arm names, so the stem alone would
-  # put "fedadam" in runs_index.jsonl once per example and dial setting.
-  name: simplex-lsq-feasible-fedadam
   seed: 42
   output_dir: outputs/examples/simplex-lsq-feasible/fedadam
   use_run_subdir: false

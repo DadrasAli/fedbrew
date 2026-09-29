@@ -138,7 +138,7 @@ the section order *is* the organisation.
 | `scale` | what the run actually did — §3.2 |
 | `artifacts` | which files and checkpoints exist |
 | `reproducibility` | §3.3 |
-| `config` | the config echo |
+| `config` | the config echo, resolved; its `inferred` names each key the loader filled in and where from (chapter 04 §6.1) |
 
 **`num_rounds` counts records, which equals rounds run only when
 `first_round` is 1.** A resume whose history cannot be read is refused rather

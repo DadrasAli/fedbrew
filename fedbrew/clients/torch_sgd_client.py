@@ -1118,10 +1118,12 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
         )
 
     def _round_learning_rate(self, round_id: int) -> float:
-        if self.learning_rate_schedule is None or self.min_learning_rate is None:
+        if self.learning_rate_schedule is None:
             raise ValueError("local_sgd requires learning-rate schedule settings")
         if self.learning_rate_schedule == "constant":
             return self.learning_rate
+        if self.min_learning_rate is None:
+            raise ValueError("a cosine schedule requires min_learning_rate, its floor")
         if self.total_rounds is None or self.total_rounds <= 1:
             return self.learning_rate
         progress = (round_id - 1) / (self.total_rounds - 1)

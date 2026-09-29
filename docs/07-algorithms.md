@@ -328,7 +328,8 @@ the local-update modes cannot drift apart, which is the point.
 ### 4.1 `local_sgd`, `fedavg`, `centralized`
 
 The shared SGD engine. `fedavg` and `centralized` additionally require
-`update_mode` and `frozen_gradient_weighting`.
+`update_mode`, and `frozen_gradient_weighting` under
+`update_mode: frozen_batch_gradients`, the one mode that reads it.
 
 | `client.update_mode` | One local iteration |
 | --- | --- |

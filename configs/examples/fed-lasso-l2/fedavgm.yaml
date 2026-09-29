@@ -12,10 +12,6 @@
 # scored on central_test_optimality_gap at the final round.
 
 experiment:
-  # Set rather than left to the filename stem, which is the convention's
-  # exception: the examples ship the same arm names, so the stem alone would
-  # put "fedavgm" in runs_index.jsonl once per example and dial setting.
-  name: fed-lasso-l2-fedavgm
   seed: 42
   output_dir: outputs/examples/fed-lasso-l2/fedavgm
   use_run_subdir: false

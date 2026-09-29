@@ -33,6 +33,7 @@ from fedbrew.clients.torch_delta_sgd_client import (
     DEFAULT_THETA_0,
 )
 from fedbrew.core.config import MATMUL_PRECISIONS, NUMERICS_PERFORMANCE_KEYS
+from fedbrew.core.inferred import inferred_name
 
 pytestmark = pytest.mark.fast
 
@@ -64,11 +65,12 @@ class ExperimentHeaderConventionTest(unittest.TestCase):
     anything about the runs, so a reader comparing two arms met two different
     headers and could not tell which difference was meaningful.
 
-    ``name`` is the one field that may be absent OR present. load_config fills
-    it from the filename stem, and config.py says restating it invites drift --
-    three of the five that set it restated the stem exactly. So the rule is
-    that a config sets it only when the recorded name must differ from the
-    filename, and each such config says why.
+    ``name`` is the one field that may be absent OR present. load_config
+    infers it from the config's path -- ``<directory>-<file stem>`` under
+    ``configs/``, fedbrew/core/inferred.py -- and restating an inferred value
+    invites drift: the 69 example arms each wrote exactly that until it was
+    inferred. So the rule is that a config sets it only when the recorded name
+    must differ from the inferred one, and each such config says why.
     """
 
     def setUp(self) -> None:
@@ -86,17 +88,17 @@ class ExperimentHeaderConventionTest(unittest.TestCase):
                         "again in runs_index.jsonl",
                     )
 
-    def test_a_config_names_itself_only_to_differ_from_its_filename(self) -> None:
+    def test_a_config_names_itself_only_to_differ_from_the_inferred_name(self) -> None:
         restating = [
             str(path)
             for path, config in self.configs
-            if config["experiment"].get("name") == Path(path).stem
+            if config["experiment"].get("name") == inferred_name(REPO_ROOT / path)
         ]
         self.assertEqual(
             restating,
             [],
-            f"these set experiment.name to their own filename stem: {restating}. "
-            "load_config already does that; writing it again is a second copy "
+            f"these set experiment.name to the name their path gives: {restating}. "
+            "load_config already infers it; writing it again is a second copy "
             "that can drift from the first.",
         )
 
@@ -121,7 +123,7 @@ class ExperimentHeaderConventionTest(unittest.TestCase):
                 self.assertNotEqual(
                     preceding,
                     [],
-                    "a config whose recorded name differs from its filename "
+                    "a config whose recorded name differs from the inferred one "
                     "must say why, in the comment directly above the line "
                     "that sets it",
                 )

@@ -91,12 +91,14 @@ def _client_split_counts(path: str) -> list[dict[str, int | None]] | None:
     where it is built, and preflight's data check.
     """
 
+    from fedbrew.core.inferred import read_manifest
     from fedbrew.core.paths import resolve_data_path
 
-    manifest_path = resolve_data_path(path)
+    manifest = read_manifest(path)
+    if manifest is None:
+        return None
     try:
-        manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
-        clients_path = Path(manifest_path).parent / str(manifest["clients_file"])
+        clients_path = Path(resolve_data_path(path)).parent / str(manifest["clients_file"])
         records = [
             json.loads(line)
             for line in clients_path.read_text(encoding="utf-8").splitlines()

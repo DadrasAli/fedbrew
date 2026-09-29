@@ -33,7 +33,7 @@ class TorchAdamWClient(TorchSGDClient[TaskAdapter]):
         beta2: float,
         epsilon: float,
         learning_rate_schedule: str,
-        min_learning_rate: float,
+        min_learning_rate: float | None,
         total_rounds: int,
         eval_batch_size: int | None = None,
         device: str = "cpu",
@@ -66,7 +66,8 @@ class TorchAdamWClient(TorchSGDClient[TaskAdapter]):
             epsilon: Denominator floor, in gradient units. Positive.
             learning_rate_schedule: ``"constant"`` or ``"cosine"``, decaying
                 across rounds rather than within them.
-            min_learning_rate: Schedule floor, in [0, learning_rate].
+            min_learning_rate: Schedule floor, in [0, learning_rate]; None under a
+                constant schedule, which reads none.
             total_rounds: Total rounds in the run, used to place the current
                 round on the cosine curve.
             eval_batch_size: As :class:`TorchSGDClient`. Declared here because

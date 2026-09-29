@@ -448,6 +448,8 @@ _NOT_CONFIGURATION = frozenset(
         "experiment.tags",
         "experiment.notes",
         "experiment.output_dir",
+        # Where a value came from, not what it is: the value is compared.
+        "inferred",
         "runtime.extra.quiet",
         "runtime.extra.verbose",
         "runtime.extra.no_rich",
@@ -868,6 +870,12 @@ def apply_cli_overrides(
         runtime_extra["no_rich"] = True
     runtime_extra = _set_print_every(runtime_extra, getattr(args, "print_every", None))
 
+    # A value the command line set is the command line's, not an inference.
+    inferred = {
+        key: source
+        for key, source in config.inferred.items()
+        if not (key == "experiment.output_dir" and output_dir is not None)
+    }
     effective_config = replace(
         config,
         experiment=experiment,
@@ -875,6 +883,7 @@ def apply_cli_overrides(
         client=client,
         runtime=replace(runtime, extra=runtime_extra),
         evaluation=evaluation,
+        inferred=inferred,
     )
     validate_config(effective_config)
     return effective_config

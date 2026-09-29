@@ -412,6 +412,16 @@ class FullConfig:
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     client_statistics: ClientStatisticsConfig = field(default_factory=ClientStatisticsConfig)
     divergence: DivergenceConfig = field(default_factory=DivergenceConfig)
+    #: The keys the loader inferred because the config left them out, each
+    #: with where from: ``model.input_dim`` and ``model.num_classes`` from the
+    #: manifest, ``experiment.output_dir`` and ``experiment.name`` from the
+    #: config's path (fedbrew/core/inferred.py). Resolved at load, never
+    #: written in a config.
+    inferred: dict[str, str] = field(default_factory=dict)
+
+
+#: ``FullConfig`` fields the loader fills and a config may not write.
+RESOLVED_ONLY_FIELDS: frozenset[str] = frozenset({"inferred"})
 
 
 def load_yaml(path: str | Path) -> dict[str, Any]:
@@ -456,12 +466,18 @@ def load_config(common_path: str | Path) -> FullConfig:
     # Imported here: registry pulls in the client/server packages, which import
     # this module for its config types.
     from fedbrew.core.extensions import load_extensions
+    from fedbrew.core.inferred import infer_experiment, infer_model_shape
     from fedbrew.core.registry import task_for_model
 
-    experiment = _build_experiment_config(common["experiment"])
-    if not experiment.name:
-        # The config file already names the experiment; restating it invites drift.
-        experiment.name = common_config_path.stem
+    experiment_values = common.get("experiment")
+    if not isinstance(experiment_values, Mapping):
+        raise RunRefused("config missing required mapping: experiment")
+    experiment_values = dict(experiment_values)
+    inferred: dict[str, str] = {}
+    # The config file already names the experiment and its place; restating
+    # either invites drift.
+    infer_experiment(experiment_values, common_config_path, inferred)
+    experiment = _build_experiment_config(experiment_values)
     # Before anything is looked up by name: the extensions are where an
     # out-of-tree model, task, strategy, rule or backend gets its name.
     _validate_extensions(experiment.extensions)
@@ -482,6 +498,7 @@ def load_config(common_path: str | Path) -> FullConfig:
         evaluation=_build_evaluation_config(common.get("evaluation", {})),
         client_statistics=_build_client_statistics_config(common.get("client_statistics", {})),
         divergence=_build_divergence_config(common.get("divergence", {})),
+        inferred=inferred,
     )
     # Before validate_config, so the checks that read a split's schedule
     # (save_best on val, a divergence metric) see the one the run will keep.
@@ -489,6 +506,7 @@ def load_config(common_path: str | Path) -> FullConfig:
 
     evaluation = common.get("evaluation", {})
     resolve_evaluated_splits(config, evaluation if isinstance(evaluation, Mapping) else {})
+    infer_model_shape(config, common["model"])
     validate_config(config)
     return config
 
@@ -562,8 +580,9 @@ UPDATE_MODE_CLIENT_RULES = set(UPDATE_MODES_BY_CLIENT_RULE)
 UPDATE_MODE_OPTIONAL_CLIENT_RULES = {*OWN_LOOP_CLIENT_RULES}
 #: Rules that state ``frozen_gradient_weighting``: those that can run
 #: ``frozen_batch_gradients``, the one mode that reads it. A rule without that
-#: mode has nothing for the key to decide. Such a rule states it under every
-#: mode, which is FINDINGS.csv POST-F18, open by decision.
+#: mode has nothing for the key to decide. Such a rule must state it only
+#: under ``frozen_batch_gradients``; stated under another mode it is accepted
+#: and checked, which is what keeps FINDINGS.csv POST-F18 open.
 FROZEN_WEIGHTING_CLIENT_RULES = {
     rule for rule, modes in UPDATE_MODES_BY_CLIENT_RULE.items() if "frozen_batch_gradients" in modes
 }
@@ -1187,6 +1206,7 @@ def root_config_keys() -> frozenset[str]:
     """
 
     stored = {field.name for field in fields(FullConfig)} - set(_REMOVED_BLOCKS)
+    stored -= RESOLVED_ONLY_FIELDS
     return frozenset(stored | _LOAD_TIME_BLOCKS | _COMPONENT_PATH_KEYS)
 
 
@@ -2191,7 +2211,16 @@ def _validate_local_sgd_options(config: FullConfig) -> None:
 
     _validate_learning_rate_schedule(config)
 
-    nesterov = _required_extra(extra, "client", "nesterov")
+    # Required only where it acts: with no momentum there is no velocity for
+    # Nesterov's look-ahead to read, and torch refuses nesterov=True at 0.
+    if "nesterov" not in extra:
+        if float(momentum) > 0.0:
+            raise RunRefused(
+                "client.nesterov must be configured: with client.momentum > 0 it chooses "
+                "between heavy-ball (false) and Nesterov (true) momentum"
+            )
+        return
+    nesterov = extra["nesterov"]
     if not isinstance(nesterov, bool):
         raise RunRefused("client.nesterov must be a bool")
     if nesterov and float(momentum) <= 0.0:
@@ -2213,7 +2242,12 @@ def _validate_update_mode_options(config: FullConfig) -> None:
         return
 
     checked = [("update_mode", UPDATE_MODES_BY_CLIENT_RULE[rule])]
-    if rule in FROZEN_WEIGHTING_CLIENT_RULES:
+    # Required only under the one mode that reads it; stated under another it
+    # is still checked, as any value a config writes is.
+    if rule in FROZEN_WEIGHTING_CLIENT_RULES and (
+        config.client.extra.get("update_mode") == "frozen_batch_gradients"
+        or "frozen_gradient_weighting" in config.client.extra
+    ):
         checked.append(("frozen_gradient_weighting", frozenset(FROZEN_GRADIENT_WEIGHTINGS)))
     for name, allowed in checked:
         value = _required_extra(config.client.extra, "client", name)
@@ -2683,6 +2717,9 @@ def _validate_learning_rate_schedule(config: FullConfig) -> None:
     schedule = _required_extra(extra, "client", "learning_rate_schedule")
     if not isinstance(schedule, str) or schedule not in {"constant", "cosine"}:
         raise RunRefused("client.learning_rate_schedule must be constant or cosine")
+    # Required only where it acts: a constant schedule never reads its floor.
+    if schedule == "constant" and "min_learning_rate" not in extra:
+        return
     min_learning_rate = _required_extra(extra, "client", "min_learning_rate")
     if (
         isinstance(min_learning_rate, bool)

@@ -146,7 +146,7 @@ class TheGapThatWasClosedTest(unittest.TestCase):
         self.config = load_config("configs/femnist/fedavg_ft.yaml")
 
     def test_a_missing_option_the_factory_would_pass_is_refused(self) -> None:
-        for key in ("momentum", "weight_decay", "nesterov", "learning_rate_schedule"):
+        for key in ("momentum", "weight_decay", "learning_rate_schedule"):
             with self.subTest(key=key):
                 broken = copy.deepcopy(self.config)
                 self.assertIn(key, broken.client.extra, "the shipped config sets it")
@@ -155,14 +155,48 @@ class TheGapThatWasClosedTest(unittest.TestCase):
                     validate_config(broken)
                 self.assertIn(key, str(caught.exception))
 
-    def test_a_missing_update_mode_option_is_refused(self) -> None:
-        for key in ("update_mode", "frozen_gradient_weighting"):
-            with self.subTest(key=key):
+    def test_a_missing_update_mode_is_refused(self) -> None:
+        broken = copy.deepcopy(self.config)
+        broken.client.extra.pop("update_mode")
+        with self.assertRaises(ValueError) as caught:
+            validate_config(broken)
+        self.assertIn("update_mode", str(caught.exception))
+
+    def test_three_options_are_required_only_where_they_act(self) -> None:
+        """Required where the rule reads them, optional where nothing does.
+
+        ``nesterov`` chooses a momentum variant, so it acts only with momentum;
+        ``min_learning_rate`` is a schedule's floor, which a constant schedule
+        never reaches; ``frozen_gradient_weighting`` combines the frozen batch
+        gradients of the one mode that has them.
+        """
+
+        cases = (
+            ("nesterov", {"momentum": 0.9}, {"momentum": 0.0}),
+            (
+                "min_learning_rate",
+                {"learning_rate_schedule": "cosine"},
+                {"learning_rate_schedule": "constant"},
+            ),
+            (
+                "frozen_gradient_weighting",
+                {"update_mode": "frozen_batch_gradients"},
+                {"update_mode": "sequential_epoch"},
+            ),
+        )
+        for key, acts, inert in cases:
+            with self.subTest(key=key, where="it acts"):
                 broken = copy.deepcopy(self.config)
+                broken.client.extra.update(acts)
                 broken.client.extra.pop(key)
                 with self.assertRaises(ValueError) as caught:
                     validate_config(broken)
-                self.assertIn(key, str(caught.exception))
+                self.assertIn(f"client.{key} must be configured", str(caught.exception))
+            with self.subTest(key=key, where="nothing reads it"):
+                config = copy.deepcopy(self.config)
+                config.client.extra.update(inert)
+                config.client.extra.pop(key)
+                validate_config(config)
 
     def test_the_narrow_set_would_have_accepted_them(self) -> None:
         """The contrast, so the test above is not passing for another reason."""

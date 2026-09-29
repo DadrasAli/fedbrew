@@ -60,7 +60,7 @@ class FedAvgClient(TorchSGDClient):
         self,
         *args: Any,
         update_mode: str,
-        frozen_gradient_weighting: str,
+        frozen_gradient_weighting: str | None,
         max_grad_norm: float | None = None,
         **kwargs: Any,
     ) -> None:
@@ -78,7 +78,8 @@ class FedAvgClient(TorchSGDClient):
             frozen_gradient_weighting: How those frozen batch gradients combine
                 -- ``examples`` (weight by batch size), ``uniform`` (weight
                 each batch equally) or ``sum`` (add them). Only consulted for
-                ``frozen_batch_gradients``; ``full_gradient`` reads none.
+                ``frozen_batch_gradients``, which requires it; None under any
+                other mode, which reads none.
             max_grad_norm: Gradient-norm clipping threshold, in gradient-norm
                 units. Positive when set; None disables clipping.
             **kwargs: Forwarded to :class:`TorchSGDClient` by keyword.
@@ -94,11 +95,11 @@ class FedAvgClient(TorchSGDClient):
             SUPPORTED_UPDATE_MODES,
             "update_mode",
         )
-        self.frozen_gradient_weighting = normalize_choice(
-            frozen_gradient_weighting,
-            SUPPORTED_FROZEN_WEIGHTING,
-            "frozen_gradient_weighting",
-        )
+        self.frozen_gradient_weighting = _weighting(frozen_gradient_weighting)
+        if self.update_mode == "frozen_batch_gradients" and self.frozen_gradient_weighting is None:
+            raise ValueError(
+                "update_mode frozen_batch_gradients requires frozen_gradient_weighting"
+            )
 
         # The shared engine currently implements plain SGD. Reject options that
         # would otherwise be silently ignored and make the comparison unfair.
@@ -246,13 +247,14 @@ class FedAvgClient(TorchSGDClient):
             SUPPORTED_UPDATE_MODES,
             "update_mode",
         )
-        self.frozen_gradient_weighting = normalize_choice(
-            str(
-                state.get(
-                    "frozen_gradient_weighting",
-                    self.frozen_gradient_weighting,
-                )
-            ),
-            SUPPORTED_FROZEN_WEIGHTING,
-            "frozen_gradient_weighting",
+        self.frozen_gradient_weighting = _weighting(
+            state.get("frozen_gradient_weighting", self.frozen_gradient_weighting)
         )
+
+
+def _weighting(value: object) -> str | None:
+    """A frozen-gradient weighting, normalised; None when there is none."""
+
+    if value is None:
+        return None
+    return normalize_choice(str(value), SUPPORTED_FROZEN_WEIGHTING, "frozen_gradient_weighting")

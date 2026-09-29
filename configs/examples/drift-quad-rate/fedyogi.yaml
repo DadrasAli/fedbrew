@@ -10,10 +10,6 @@
 # scored on central_test_loss at the final round, re-tuned for these dials.
 
 experiment:
-  # Set rather than left to the filename stem, which is the convention's
-  # exception: three dial settings ship the same eight arm names, so the stem
-  # alone would put "fedavg" in runs_index.jsonl three times over.
-  name: drift-quad-rate-fedyogi
   seed: 42
   output_dir: outputs/examples/drift-quad-rate/fedyogi
   use_run_subdir: false

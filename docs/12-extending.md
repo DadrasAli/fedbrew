@@ -240,7 +240,9 @@ def register() -> None:
     registry.tasks.register(
         TASK_NAME, lambda **kwargs: DriftQuadTask(**kwargs), metrics=DriftQuadTask.METRICS
     )
-    registry.models.register(MODEL_NAME, build_quad_vector, task=TASK_NAME)
+    registry.models.register(
+        MODEL_NAME, build_quad_vector, task=TASK_NAME, shape_keys=("input_dim",)
+    )
 ```
 
 Its generator config names the file, so `fedbrew generate` can find the
@@ -484,7 +486,13 @@ Smaller than the other two.
    registered without its task.
 4. Nothing else pairs them: a config does not restate the task. `experiment.task`
    used to, and is now refused by name with a message pointing at `model.name`.
-5. Add its key table to chapter 06 if it is in the package. The guard diffs it
+5. If the builder is sized by `input_dim` or `num_classes`, name them in
+   `shape_keys=`. A config may then leave them out, and the loader fills them
+   from the manifest and marks them inferred (chapter 04 §6.1); a stated value
+   that disagrees with the manifest is refused at load. Every builder is handed
+   both keys, so one that ignores a key cannot say so itself: pl-1d's manifest
+   states `input_dim: 1` and its scalar model reads none, and declares nothing.
+6. Add its key table to chapter 06 if it is in the package. The guard diffs it
    against `_KNOWN_KEYS` per built-in builder, so a missing or invented key fails.
 
 If it changes **what gets federated** — as `hf_causal_lm_lora` does — set

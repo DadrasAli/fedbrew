@@ -13,10 +13,6 @@
 # still finishes. This example's README says so at length.
 
 experiment:
-  # Set rather than left to the filename stem, which is the convention's
-  # exception: the examples ship the same arm names, so the stem alone would
-  # put "fedavg" in runs_index.jsonl once per example and dial setting.
-  name: nonconvex-simplex-fedavg
   seed: 42
   output_dir: outputs/examples/nonconvex-simplex/fedavg
   use_run_subdir: false

@@ -13,10 +13,6 @@
 # scored on it would select for the defect.
 
 experiment:
-  # Set rather than left to the filename stem, which is the convention's
-  # exception: the examples ship the same arm names, so the stem alone would
-  # put "fedyogi" in runs_index.jsonl once per example and dial setting.
-  name: simplex-lsq-fedyogi
   seed: 42
   output_dir: outputs/examples/simplex-lsq/fedyogi
   use_run_subdir: false

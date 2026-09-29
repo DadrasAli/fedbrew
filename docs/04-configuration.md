@@ -18,7 +18,9 @@ release, and `run.json` records the resolved config a run actually used.
 configs/<arm>.yaml
   -> yaml.safe_load
   -> _reject_restated_keys        removed keys fail by name, with the reason
+  -> infer_experiment            output_dir and name from the config path, if unset
   -> dataclass split (_split_extra)  named fields bind; everything else -> extra
+  -> infer_model_shape           model dimensions from the manifest, if unset (§6.1)
   -> _validate_known_keys         a key in extra that no reader consumes fails
   -> validate_config              types, ranges, enums, and cross-key rules
   -> apply_cli_overrides          --lr, --rounds, ... then validate_config again
@@ -167,8 +169,8 @@ refused (§10), and so is a checkpoint whose client states carry
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `seed` | int | **required** | Chapter 10 covers what it does and does not fix. |
-| `output_dir` | str | **required** | Artifacts are written here. Empty or whitespace-only is refused at load: `Path("")` is `Path(".")`, so the run would write wherever it was started. `"."` is accepted — that is a choice. |
-| `name` | str | `""` | Free text. |
+| `output_dir` | str | inferred | Artifacts are written here. Unset, it is `outputs/<the config's path under configs/, without .yaml>` (§6.1), and required of a config outside a `configs/` directory. Empty or whitespace-only is refused at load: `Path("")` is `Path(".")`, so the run would write wherever it was started. `"."` is accepted — that is a choice. |
+| `name` | str | inferred | Unset, `<directory>-<file stem>` for a config in a directory under `configs/`, the file stem otherwise (§6.1). Set it only to record a different name. |
 | `run_id` | str \| null | `null` | Generated when unset. |
 | `use_run_subdir` | bool | `false` | Write under `output_dir/run_id` instead. |
 | `tags` | list[str] | `[]` | Echoed into `run.json`. |
@@ -258,11 +260,11 @@ Read by `local_sgd`, `fedavg` and `centralized`, and partly by the others.
 | `eval_batch_size` | int \| null | `max(batch_size, 256)` for classification; `batch_size` for causal_lm | `_eval_batch_size` (`fedbrew/core/factory.py`) |
 | `momentum` | float | — | required for the rules that read it |
 | `weight_decay` | float | — | same |
-| `nesterov` | bool | — | requires positive `momentum` |
+| `nesterov` | bool | `false` | required with positive `momentum`, which it needs to be `true`; nothing reads it without |
 | `learning_rate_schedule` | `constant` \| … | — | `_training_client_kwargs` (`fedbrew/core/factory.py`) |
-| `min_learning_rate` | float | — | floor for the schedule |
+| `min_learning_rate` | float | — | the floor of `cosine`, required there; a `constant` schedule reads none |
 | `update_mode` | `sequential_epoch` \| `single_batch` \| `frozen_batch_gradients` \| `full_gradient` | — | required for `fedavg`, `centralized` and `fedavg_ft`; `delta_sgd` takes all four and runs `sequential_epoch` when unset; `fedprox`, `scaffold`, `fedlalr`, `local_sgd` and `local_adamw` take `sequential_epoch` (also when unset) or `full_gradient`; `frozen_batch_gradients` is refused on `causal_lm` (§2.1) |
-| `frozen_gradient_weighting` | `examples` \| `uniform` \| `sum` | — | same |
+| `frozen_gradient_weighting` | `examples` \| `uniform` \| `sum` | — | required under `update_mode: frozen_batch_gradients`, the one mode that reads it; checked when stated under another |
 | `max_local_steps` | int \| null | `null` | caps steps per round |
 | `max_grad_norm` | float \| null | **`null` — no clipping** | `_training_client_kwargs` (`fedbrew/core/factory.py`); bounds a different quantity per `update_mode` — chapter 07 §4.1 |
 
@@ -339,7 +341,7 @@ stating `momentum`, `weight_decay`, `nesterov` and a schedule. They are two
 sets now, each built from `FEDAVG_ENGINE_CLIENT_RULES` (the three rules above),
 with `UPDATE_MODES_BY_CLIENT_RULE` saying which modes each rule takes and
 `frozen_gradient_weighting` required of the rules that can run
-`frozen_batch_gradients`. No rule's settings changed.
+`frozen_batch_gradients`, under that mode. No rule's settings changed.
 
 ## 6. `task`, `data`, `model`
 
@@ -353,7 +355,7 @@ with `UPDATE_MODES_BY_CLIENT_RULE` saying which modes each rule takes and
 | `data.input_dim` | int \| null | `null` | same |
 | `data.num_classes` | int \| null | `null` | same |
 | `model.name` | str | **required** | One of eight builders. |
-| `model.input_dim` / `hidden_dim` / `num_classes` | int \| null | `null` | Injected into every builder. |
+| `model.input_dim` / `hidden_dim` / `num_classes` | int \| null | `null` | Injected into every builder. `input_dim` and `num_classes` are inferred from the manifest where the model is sized by them (§6.1). |
 
 `input_dim` and `num_classes` appear in both blocks, and they are the same
 word for two different jobs: `data.*` sizes the in-memory
@@ -377,6 +379,25 @@ A strategy, update rule or dataset backend loaded through
 (`Registry.register(..., config_keys=)`). They are accepted in its block only
 while that component is the one the config selects, so a key declared for one
 strategy does not load clean under another.
+
+### 6.1 Values the loader infers
+
+Four keys may be left out, because the loader can find them out
+(`fedbrew/core/inferred.py`):
+
+| Key | Inferred from | When stated |
+| --- | --- | --- |
+| `model.input_dim`, `model.num_classes` | the manifest's own `input_dim` and `num_classes`, for a model registered as sized by that key (`models.register(..., shape_keys=)`: `mlp` both, `cnn`, `small_cnn`, `femnist_resnet18` and `openimage_shufflenet` `num_classes`, the four vector examples `input_dim`) | checked against the manifest at load, and refused if they disagree |
+| `experiment.output_dir` | `outputs/<the config's path under its nearest configs/ directory, without .yaml>`; required outside a `configs/` directory | kept: 13 shipped configs write to a directory of their own |
+| `experiment.name` | `<directory>-<file stem>` for a config in a directory under `configs/`, the file stem otherwise | kept; `tests/test_shipped_config_explicitness.py` refuses a stated name equal to the inferred one |
+
+An inferred value is written into the resolved config like a stated one, so
+`run.json` records it, and `config.inferred` there names each inferred key and
+where from; the plan header prints `(inferred from ...)` beside it. Only a
+manifest that can be read at load is used: where it cannot, nothing is
+inferred from it, and an unset dimension is filled where the model is built,
+from the same metadata. A `--output-dir` on the command line is the command
+line's, and is not marked inferred.
 
 ## 7. `runtime`
 
@@ -780,6 +801,8 @@ python -m pytest tests/test_unknown_config_keys.py \
 | `tests/test_unknown_config_keys.py` | An unread key fails at load, in every block and at the root, through `load_config`, `fedbrew run` and `--validate-only`. |
 | `tests/test_preflight_runs_only_under_validate_only.py` | §1: an ordinary `fedbrew run` calls `validate_config` and never the ten-area preflight; `--validate-only` calls both and trains nothing; the ten areas are the ones §1 names. |
 | `tests/test_shipped_config_explicitness.py` | `matmul_precision` and `deterministic` are stated by every shipped config. |
+| `tests/test_shipped_configs_resolve_as_recorded.py` | Every shipped run config resolves to the `FullConfig` and planned columns recorded before the config was reshaped, except for keys marked inferred. |
+| `tests/test_inferred_config_values.py` | §6.1: each inferred key is filled, marked, and checked when stated; §5.1: `nesterov`, `min_learning_rate` and `frozen_gradient_weighting` are required only where they act. |
 | `tests/test_evaluation_schedule.py` | The `every` grammar, including `final` and `never`. |
 | `tests/test_evaluation_config.py` | Split roles and client-scope parsing. |
 | `tests/test_evaluation_cadence.py` | §8: `fit.every` and the split schedules at *c* leave the training trajectory bit-identical and the evaluated cells the every-round run's; a skipped pass counts without evaluating; a blow-up is caught within *c* rounds. |

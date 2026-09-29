@@ -133,7 +133,12 @@ class ExtraKeyCoverageTest(unittest.TestCase):
 
         import dataclasses
 
-        from fedbrew.core.config import _LOAD_TIME_BLOCKS, _REMOVED_BLOCKS, FullConfig
+        from fedbrew.core.config import (
+            _LOAD_TIME_BLOCKS,
+            _REMOVED_BLOCKS,
+            RESOLVED_ONLY_FIELDS,
+            FullConfig,
+        )
 
         table = table_after(_chapter_text(), "## 2. The blocks")
         listed = {
@@ -143,8 +148,12 @@ class ExtraKeyCoverageTest(unittest.TestCase):
         }
         listed.discard("")
         self.assertTrue(listed, "no blocks parsed from section 2's table")
+        # FullConfig.inferred is the loader's record, not a block: a config
+        # writing it is refused as an unknown key.
         writable = (
-            {field.name for field in dataclasses.fields(FullConfig)} - set(_REMOVED_BLOCKS)
+            {field.name for field in dataclasses.fields(FullConfig)}
+            - set(_REMOVED_BLOCKS)
+            - RESOLVED_ONLY_FIELDS
         ) | set(_LOAD_TIME_BLOCKS)
         self.assertEqual(
             writable - listed,
