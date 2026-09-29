@@ -422,10 +422,16 @@ write each round into slots of shared memory made once, at the start, so only
 a few numbers cross the queue per round (handing a round's tensors over one
 by one, each through a file descriptor, cost about 6 ms of the loop's round
 on an A100 node, measured 2026-09-29); on a CPU run, whose training
-occupies those cores, the loop plans each round itself. A worker that dies,
+occupies those cores, the loop plans each round itself. A worker is a
+spawned process that imports torch before it can plan, which took 3.4 to
+4.2 s of the first round's wait on an A100 node (measured 2026-09-29), so
+until one has said it started the loop plans each round it asks for itself,
+with the same function, and does not wait; the workers take over from the
+round after the first one asked for once one has. A worker that dies,
 raises or does not answer within two minutes leaves the planning to the
 loop, with the same function. `run.json` records `executor.planner`: `used`,
-`workers`, the seconds the loop waited on them (`waited_sec`), and any
+`workers`, the rounds the loop planned itself rather than a worker
+(`in_process`), the seconds it waited on them (`waited_sec`), and any
 `fallback` or `mismatch`; `used: off` names why a run's rounds could not be
 planned ahead (another sampler, a rule that plans its update its own way, a
 task without a loader order). A settings group plans its rounds together

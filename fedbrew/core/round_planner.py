@@ -20,8 +20,11 @@ the functions the round itself calls, in the same order, on the same values:
 the round's own by construction, and ``tests/test_round_planner.py`` holds
 them to ``plan_round``'s, tensor for tensor.
 
-A worker that cannot start, dies or raises leaves the planning to this
-process, with the same function; the run records it and says so once.
+Until a worker has started -- a spawned process imports torch, a few
+seconds -- the loop plans each round it asks for itself, with the same
+function, rather than wait for one. A worker that cannot start, dies or
+raises leaves the planning to this process, with the same function; the run
+records it and says so once.
 """
 
 from __future__ import annotations
@@ -51,6 +54,10 @@ MAX_WORKERS = 4
 
 #: How long the loop waits on a worker's round before planning it itself.
 WORKER_TIMEOUT_SEC = 120.0
+
+#: How long the loop waits for a worker to start before planning a round
+#: itself: not at all, since the round it plans is the workers' to the bit.
+READY_WAIT_SEC = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +239,7 @@ def _worker(roster: RosterPlan, ring: _Ring, tasks: Any, results: Any) -> None:
     """A planner process: plan each round it is handed into its slot, until it is handed None."""
 
     torch.set_num_threads(1)
+    results.put(("ready",))
     while True:
         task = tasks.get()
         if task is None:
@@ -247,11 +255,14 @@ class RoundPlanner:
     """Hands out each round's :class:`PlannedRound`, planned ahead by worker processes.
 
     ``workers`` 0 plans every round in this process when it is asked for.
-    Otherwise the rounds from the first one asked for on are handed to the
-    workers ``ahead`` at a time; a round already planned is taken as it is,
-    and one still being planned is waited for. The record (run.json's
-    ``executor.planner``) says how many workers ran, how long the loop waited
-    on them, and, if planning fell back to this process, why.
+    Otherwise every round asked for before a worker has started is planned
+    in this process, and so is the first one after; the rounds after that
+    are handed to the workers ``ahead`` at a time, and a round already planned
+    is taken as it is, one still being planned waited for. The record
+    (run.json's ``executor.planner``) says how many workers ran, how many
+    rounds the loop planned itself rather than a worker (``in_process``),
+    how long it waited on them, and, if planning fell back to this process,
+    why.
     """
 
     def __init__(
@@ -275,6 +286,8 @@ class RoundPlanner:
         self._ring: _Ring | None = None
         self._free: list[int] = []
         self._structures: tuple[list[Any], list[Any]] = ([], [])
+        #: Whether a worker has said it started.
+        self._ready = False
         if workers > 0:
             self._start(workers)
 
@@ -286,12 +299,40 @@ class RoundPlanner:
         if not self._processes:
             return plan_roster_round(self.roster, round_id)
         if self._next_task is None:
-            self._next_task = round_id
+            # No round handed out yet: this one is planned here, whether or
+            # not a worker has started, and once one has, the workers take the
+            # rounds after it.
+            if self.workers_ready(READY_WAIT_SEC):
+                self._next_task = round_id + 1
+                self._submit(round_id)
+            self.record["in_process"] += 1
+            return plan_roster_round(self.roster, round_id)
         self._submit(round_id)
         planned = self._received.pop(round_id, None)
         if planned is None:
             planned = self._wait(round_id)
         return planned
+
+    def workers_ready(self, timeout: float = 0.0) -> bool:
+        """Whether a worker has started, waiting up to ``timeout`` seconds for one to say so.
+
+        Before any round is handed out, a worker's word that it started is the
+        only message the loop can receive.
+        """
+
+        deadline = time.monotonic() + timeout
+        while not self._ready and self._processes:
+            left = deadline - time.monotonic()
+            try:
+                message = (
+                    self._results.get(timeout=left) if left > 0 else self._results.get_nowait()
+                )
+            except queue.Empty:
+                return False
+            except Exception:  # noqa: BLE001 -- a worker died mid-handover; the loop plans on
+                return False
+            self._ready = message[0] == "ready"
+        return self._ready
 
     def close(self) -> None:
         """Stop the workers; planning continues in this process if asked again."""
@@ -332,7 +373,7 @@ class RoundPlanner:
         except Exception as error:  # noqa: BLE001 -- the run plans in process instead
             self._fall_back(f"the planner workers could not start: {type(error).__name__}: {error}")
             return
-        self.record["workers"] = len(self._processes)
+        self.record.update(workers=len(self._processes), in_process=0)
 
     def _submit(self, round_id: int) -> None:
         """Hand the workers every round up to ``round_id + ahead`` not yet handed out."""
@@ -360,6 +401,8 @@ class RoundPlanner:
                         f"{type(error).__name__}: {error}",
                         round_id,
                     )
+                if message[0] == "ready":
+                    continue
                 if message[0] == "error":
                     return self._fall_back(
                         f"a planner worker raised on round {message[1]}: {message[2]}", round_id

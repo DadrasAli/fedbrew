@@ -11,6 +11,9 @@ functions the round itself calls. What holds, and is checked here:
   splits differ in size;
 - workers hand out exactly what this process computes, and a worker that dies
   leaves the planning to this process, recorded;
+- a round asked for before a worker has started is planned in this process,
+  without waiting for one, and is the same round; the workers take over from
+  the round after the first one asked for once one has started;
 - a batched run planned ahead, in this process or by workers, is bit-identical
   to one planned in the round.
 """
@@ -18,6 +21,7 @@ functions the round itself calls. What holds, and is checked here:
 from __future__ import annotations
 
 import copy
+import queue
 import tempfile
 import unittest
 from collections.abc import Iterator
@@ -164,6 +168,7 @@ class WorkersPlanWhatThisProcessPlansTest(unittest.TestCase):
             planner = RoundPlanner(roster, 8, workers=2, ahead=3)
             try:
                 self.assertEqual(planner.record["workers"], 2)
+                self.assertTrue(planner.workers_ready(timeout=120))
                 for round_id in range(1, 9):
                     got, want = planner.plan(round_id), plan_roster_round(roster, round_id)
                     self.assertEqual(got.positions, want.positions)
@@ -181,12 +186,15 @@ class WorkersPlanWhatThisProcessPlansTest(unittest.TestCase):
             finally:
                 planner.close()
             self.assertNotIn("fallback", planner.record)
+            # Round 1 was planned here; the workers planned 2 to 8.
+            self.assertEqual(planner.record["in_process"], 1)
 
     def test_a_dead_worker_leaves_the_planning_here(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             roster = self._roster(Path(directory))
             planner = RoundPlanner(roster, 8, workers=1, ahead=1)
             try:
+                self.assertTrue(planner.workers_ready(timeout=120))
                 first = planner.plan(1)
                 for process in planner._processes:
                     process.kill()
@@ -200,6 +208,59 @@ class WorkersPlanWhatThisProcessPlansTest(unittest.TestCase):
                 want = plan_roster_round(roster, planned.round_id)
                 self.assertEqual(planned.positions, want.positions)
                 self.assertTrue(torch.equal(planned.train.indices, want.train.indices))
+
+
+class _Held:
+    """A planner's results queue whose messages the loop does not see until released."""
+
+    def __init__(self, real: Any) -> None:
+        self.real = real
+        self.held = True
+
+    def get_nowait(self) -> Any:
+        if self.held:
+            raise queue.Empty
+        return self.real.get_nowait()
+
+    def get(self, timeout: float | None = None) -> Any:
+        if self.held:
+            raise queue.Empty
+        return self.real.get(timeout=timeout)
+
+
+class TheLoopDoesNotWaitForAWorkerToStartTest(WorkersPlanWhatThisProcessPlansTest):
+    """Rounds asked for before a worker has started are planned here, at once, and are the same."""
+
+    def test_rounds_before_and_after_a_worker_has_started(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            roster = self._roster(Path(directory))
+            planner = RoundPlanner(roster, 8, workers=1, ahead=2)
+            held = planner._results = _Held(planner._results)
+            try:
+                before = [planner.plan(round_id) for round_id in (1, 2, 3)]
+                self.assertEqual(planner.record["in_process"], 3)
+                self.assertEqual(planner.record["waited_sec"], 0.0)
+                # No round was handed to a worker that had not started.
+                self.assertIsNone(planner._next_task)
+                held.held = False
+                self.assertTrue(planner.workers_ready(timeout=120))
+                after = [planner.plan(round_id) for round_id in range(4, 9)]
+            finally:
+                planner.close()
+            self.assertNotIn("fallback", planner.record)
+            # Round 4, the first asked for once the worker had started, was
+            # planned here too; the worker planned 5 to 8.
+            self.assertEqual(planner.record["in_process"], 4)
+            for planned in [*before, *after]:
+                want = plan_roster_round(roster, planned.round_id)
+                self.assertEqual(planned.positions, want.positions)
+                for got, expected in (
+                    (planned.train, want.train),
+                    (planned.evaluation, want.evaluation),
+                ):
+                    self.assertEqual(got.structure, expected.structure)
+                    for name in FIELDS:
+                        self.assertTrue(torch.equal(getattr(got, name), getattr(expected, name)))
 
 
 class AScriptWithoutAMainGuardIsNotRunAgainTest(unittest.TestCase):
@@ -222,6 +283,7 @@ class AScriptWithoutAMainGuardIsNotRunAgainTest(unittest.TestCase):
                 "case = WorkersPlanWhatThisProcessPlansTest()\n"
                 "with tempfile.TemporaryDirectory() as inner:\n"
                 "    planner = RoundPlanner(case._roster(Path(inner)), 3, workers=1)\n"
+                "    assert planner.workers_ready(timeout=120)\n"
                 "    rounds = [planner.plan(r).round_id for r in (1, 2, 3)]\n"
                 "    print('planned', rounds, planner.record)\n"
                 "    planner.close()\n",
@@ -266,13 +328,19 @@ class APlannedRunIsTheRunTest(ExecutorRuns):
                 with _unplanned():
                     reference = self.run_config(config, "batched")
                 planned = self.run_config(config, "batched")
-                with mock.patch.object(batched_executor, "planner_workers", lambda model: 2):
+                with (
+                    mock.patch.object(batched_executor, "planner_workers", lambda model: 2),
+                    # The loop waits for a worker to start, so the workers
+                    # plan every round after the first.
+                    mock.patch("fedbrew.core.round_planner.READY_WAIT_SEC", 120.0),
+                ):
                     by_workers = self.run_config(config, "batched")
                 self.assertAgree(planned, reference, exact=True)
                 self.assertAgree(by_workers, reference, exact=True)
                 record = self._executor_record(by_workers)
                 self.assertEqual(record["planner"]["used"], "on")
                 self.assertEqual(record["planner"]["workers"], 2)
+                self.assertEqual(record["planner"]["in_process"], 1)
                 self.assertNotIn("fallback", record["planner"])
                 self.assertEqual(self._executor_record(reference)["planner"]["used"], "off")
 
