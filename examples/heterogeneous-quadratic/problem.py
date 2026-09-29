@@ -55,15 +55,16 @@ replacement** has ``E‖ξ‖² = σ²/b``, whatever x, the client or the member
 The noise is in the data, as ``σ z_r`` added to the row's linear term, so a
 run samples it through its own loader.
 
-This task's training loader is that oracle: a shuffled loader (a client's
-training pass) yields **one** minibatch of ``batch_size`` rows per pass,
-drawn uniformly with replacement from the loader's seeded generator. So
-``update_mode: single_batch`` takes K iid minibatches in K local iterations,
-SCAFFOLD's ``sequential_epoch`` does too (one pass is one batch), and
-minibatch SGD at batch K·b is ``local_iterations: 1`` at ``batch_size: K·b``.
-A pass without shuffling -- every evaluation -- yields every row in order.
-``update_mode: full_gradient`` has no meaning with this loader except at
-σ = 0, where every row carries the exact gradient.
+The arms sample that oracle through ``client.sampling: with_replacement``,
+fedbrew's own (``fedbrew/clients/sampling.py``): every training pass is
+**one** minibatch of ``batch_size`` rows drawn uniformly with replacement from
+the loader's seeded generator. So ``update_mode: single_batch`` takes K iid
+minibatches in K local iterations, SCAFFOLD's ``sequential_epoch`` does too
+(one pass is one batch), and minibatch SGD at batch K·b is
+``local_iterations: 1`` at ``batch_size: K·b``. The task's own loader is the
+other examples': every row, in batches of ``batch_size``, permuted once when
+shuffled -- which is every evaluation pass, and a training pass left at
+``without_replacement``.
 
 What this file registers
 ------------------------
@@ -856,41 +857,30 @@ def build_iterate(config: Mapping[str, Any] | None = None) -> IterateModel:
 class RowBatches:
     """What a loader over ``rows`` rows yields, as index tensors; re-iterable.
 
-    ``iid``: each pass is **one** batch of ``batch_size`` indices drawn
-    uniformly with replacement from a generator seeded once, so passes differ
-    and a loader rebuilt from the same seed draws the same batches
-    (``LoaderOrder.replacement``). Otherwise every row in order, in batches
-    of ``batch_size``, the last dropped when short under ``drop_last`` if
-    there is more than one (``listed_loader_order``).
+    Every row, in batches of ``batch_size``, the last dropped when short under
+    ``drop_last`` if there is more than one; shuffled, in one permutation drawn
+    when the loader is built, from ``seed`` (``listed_loader_order``).
     """
 
     def __init__(
-        self, rows: int, batch_size: int, iid: bool, seed: int | None, drop_last: bool = False
+        self, rows: int, batch_size: int, shuffle: bool, seed: int | None, drop_last: bool = False
     ) -> None:
-        self.rows, self.batch_size, self.iid = rows, max(1, batch_size), iid
-        self.drop_last = drop_last
-        self.generator: torch.Generator | None = None
-        if iid:
-            self.generator = torch.Generator()
-            if seed is None:
-                seed = int(torch.randint(0, 2**62, (1,)).item())
-            self.generator.manual_seed(int(seed))
+        self.rows, self.batch_size, self.drop_last = rows, max(1, batch_size), drop_last
+        self.order: Tensor | None = None
+        if shuffle:
+            generator = None
+            if seed is not None:
+                generator = torch.Generator()
+                generator.manual_seed(int(seed))
+            self.order = torch.randperm(rows, generator=generator)
 
     def __iter__(self) -> Iterator[Tensor]:
-        if self.iid:
-            yield torch.randint(0, self.rows, (self.batch_size,), generator=self.generator)
-            return
-        whole = self.rows // self.batch_size
-        count = math.ceil(self.rows / self.batch_size)
-        if self.drop_last and count > 1:
-            count = whole
-        for index in range(count):
+        for index in range(len(self)):
             first = index * self.batch_size
-            yield torch.arange(first, min(first + self.batch_size, self.rows))
+            batch = torch.arange(first, min(first + self.batch_size, self.rows))
+            yield batch if self.order is None else self.order[batch]
 
     def __len__(self) -> int:
-        if self.iid:
-            return 1
         count = math.ceil(self.rows / self.batch_size)
         return self.rows // self.batch_size if self.drop_last and count > 1 else count
 
@@ -1001,7 +991,7 @@ class HeterogeneousQuadraticTask(TaskAdapter):
         return model.to(self.device)
 
     def build_dataloader(self, data: Any, config: Mapping[str, Any] | bool | None = None) -> Any:
-        """A shuffled loader is the iid oracle, one batch per pass; otherwise every row in order."""
+        """Every row, in batches, permuted once when shuffled (``RowBatches``)."""
 
         features, targets = _rows_of(data)
         return _RowLoader(
@@ -1027,22 +1017,9 @@ class HeterogeneousQuadraticTask(TaskAdapter):
     def loader_order(
         self, data: Any, config: Mapping[str, Any] | bool | None = None
     ) -> LoaderOrder:
-        """What ``build_dataloader(data, config)`` yields: the iid oracle, or the rows in order."""
+        """What ``build_dataloader(data, config)`` yields, declared (``LoaderOrder``)."""
 
-        rows = len(_rows_of(data)[1])
-        values = _loader_values(config)
-        if not bool(values.get("shuffle", False)):
-            return listed_loader_order(rows, values)
-        seed = values.get("seed")
-        return LoaderOrder(
-            rows=rows,
-            batch_size=max(1, int(values.get("batch_size", rows) or rows)),
-            shuffle=True,
-            drop_last=False,
-            seed=None if seed is None else int(seed),
-            per_epoch=False,
-            replacement=True,
-        )
+        return listed_loader_order(len(_rows_of(data)[1]), _loader_values(config))
 
     def train_step(
         self, model: IterateModel, batch: Any, optimizer: optim.Optimizer | None = None

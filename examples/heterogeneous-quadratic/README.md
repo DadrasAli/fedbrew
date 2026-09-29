@@ -111,18 +111,21 @@ negatives: `Σ_r z_r = 0`, `‖z_r‖² = 1`, `Cov(z) = I/d`, exactly. So the ro
 mean is `f_i`, and a minibatch of b rows drawn **iid with replacement** has
 `E‖ξ‖² = σ²/b` whatever x, the client or the member.
 
-The task's training loader is that oracle. A shuffled loader yields **one**
-minibatch of `batch_size` rows per pass, drawn with `torch.randint` from a
-generator seeded once, and declares it (`LoaderOrder.replacement`), so the
-batched executor plans every client's draws together. Hence:
+The arms sample it with fedbrew's `client.sampling: with_replacement`
+(`fedbrew/clients/sampling.py`, docs/04 §5.1), which any task that gives its
+rows can use: every training pass is **one** minibatch of `batch_size` rows,
+drawn with `torch.randint` from a generator seeded once, and the batched
+executor plans every client's draws together from the same seed. Hence:
 
 - `update_mode: single_batch` at `local_iterations: K` takes K iid minibatches;
 - SCAFFOLD's own loop, `sequential_epoch`, does too: one pass is one batch;
 - minibatch SGD at batch K·b is `local_iterations: 1` at `batch_size: K·b`.
 
-Evaluation passes are not shuffled and read every row in order. Under
-`update_mode: full_gradient` a pass would be one minibatch, which is the exact
-gradient only at σ = 0.
+Evaluation passes are not shuffled and read every row in order, through the
+task's own loader, which is the other examples': every row in batches, permuted
+once when shuffled. `update_mode: full_gradient` is refused beside
+`with_replacement`; with the default sampling it is the exact gradient of every
+row, which at σ > 0 averages the noise rows out exactly.
 
 ## The arms
 

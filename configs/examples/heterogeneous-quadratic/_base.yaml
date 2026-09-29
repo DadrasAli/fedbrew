@@ -25,9 +25,9 @@ server:
 
 client:
   # 16 rows per minibatch, drawn iid with replacement from a client's 32 rows:
-  # the task's training loader yields one such batch per pass (README, "The
-  # stochastic oracle").
+  # every training pass is one such batch (README, "The stochastic oracle").
   batch_size: 16
+  sampling: with_replacement
 
 data:
   path: data/generated/examples/heterogeneous-quadratic/manifest.json

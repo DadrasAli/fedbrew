@@ -10470,6 +10470,7 @@
    "client.batch_size": 16,
    "client.extra.learning_rate_schedule": "constant",
    "client.extra.momentum": 0.0,
+   "client.extra.sampling": "with_replacement",
    "client.extra.update_mode": "single_batch",
    "client.extra.weight_decay": 0.0,
    "client.learning_rate": 0.01,
@@ -10577,6 +10578,7 @@
    "client.batch_size": 16,
    "client.extra.learning_rate_schedule": "constant",
    "client.extra.momentum": 0.0,
+   "client.extra.sampling": "with_replacement",
    "client.extra.update_mode": "single_batch",
    "client.extra.weight_decay": 0.0,
    "client.learning_rate": 0.01,
@@ -10684,6 +10686,7 @@
    "client.batch_size": 16,
    "client.extra.learning_rate_schedule": "constant",
    "client.extra.momentum": 0.0,
+   "client.extra.sampling": "with_replacement",
    "client.extra.update_mode": "single_batch",
    "client.extra.weight_decay": 0.0,
    "client.learning_rate": 0.01,
@@ -10791,6 +10794,7 @@
    "client.batch_size": 160,
    "client.extra.learning_rate_schedule": "constant",
    "client.extra.momentum": 0.0,
+   "client.extra.sampling": "with_replacement",
    "client.extra.update_mode": "single_batch",
    "client.extra.weight_decay": 0.0,
    "client.learning_rate": 0.1,
@@ -10898,6 +10902,7 @@
    "client.batch_size": 1600,
    "client.extra.learning_rate_schedule": "constant",
    "client.extra.momentum": 0.0,
+   "client.extra.sampling": "with_replacement",
    "client.extra.update_mode": "single_batch",
    "client.extra.weight_decay": 0.0,
    "client.learning_rate": 0.1,
@@ -11003,7 +11008,7 @@
  "configs/examples/heterogeneous-quadratic/scaffold_k1.yaml": {
   "config": {
    "client.batch_size": 16,
-   "client.extra": {},
+   "client.extra.sampling": "with_replacement",
    "client.learning_rate": 0.1,
    "client.local_iterations": 1,
    "client.update_rule": "scaffold",
@@ -11108,7 +11113,7 @@
  "configs/examples/heterogeneous-quadratic/scaffold_k10.yaml": {
   "config": {
    "client.batch_size": 16,
-   "client.extra": {},
+   "client.extra.sampling": "with_replacement",
    "client.learning_rate": 0.1,
    "client.local_iterations": 10,
    "client.update_rule": "scaffold",
@@ -11213,7 +11218,7 @@
  "configs/examples/heterogeneous-quadratic/scaffold_k100.yaml": {
   "config": {
    "client.batch_size": 16,
-   "client.extra": {},
+   "client.extra.sampling": "with_replacement",
    "client.learning_rate": 0.1,
    "client.local_iterations": 100,
    "client.update_rule": "scaffold",

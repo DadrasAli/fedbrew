@@ -47,7 +47,9 @@ their task declares, which the loader could not plan before it did.
 A config added since is recorded when it is added, written in the record's own
 schema -- each key at the place ``MOVED`` maps it back to -- so the comparison
 holds it as it holds the others. The heterogeneous-quadratic example's eight
-arms were recorded so.
+arms were recorded so, and re-recorded with ``client.sampling:
+with_replacement`` when they moved from their task's own iid loader to it,
+which draws the same rows.
 """
 
 from __future__ import annotations
