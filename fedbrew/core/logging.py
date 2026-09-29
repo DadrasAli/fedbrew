@@ -30,8 +30,8 @@ from fedbrew.core.config import (
     FullConfig,
     client_metric_names,
     resolved_checkpointing,
-    task_metric_directions,
     task_metric_glosses,
+    task_reported_metrics,
     worst_percent_label,
 )
 from fedbrew.core.console import (
@@ -645,13 +645,15 @@ def _planned_metric_names(config: FullConfig) -> list[str]:
     (``RULE_FIT_METRICS``) and the strategy's diagnostics, through
     ``reporting.fit_metrics``; `client_metric_names` over the task's loss and
     accuracy for the evaluation aggregates; and one ``central_test_<metric>``
-    per declared metric. A column listed here that the run does not write, or written
+    per declared metric -- of the ones a run of this config reports on its
+    clients and centrally, where the task narrows them (``ReportedMetrics``).
+    A column listed here that the run does not write, or written
     and not listed, would make the header worse than no header;
     tests/test_planned_columns_are_written.py runs every task to hold it.
     """
 
-    task_metrics = _task_metrics(config)
-    bases = [name for name in CLIENT_METRIC_BASES if name in task_metrics]
+    reported = task_reported_metrics(config)
+    bases = [name for name in CLIENT_METRIC_BASES if name in reported.client]
     names = list(_fit_metric_names(config))
     for split in ("train", "val", "test"):
         if not _split_is_evaluated(config, split):
@@ -661,7 +663,7 @@ def _planned_metric_names(config: FullConfig) -> list[str]:
                 sorted(client_metric_names(metric_split, config.reporting.statistics, bases))
             )
     if _central_is_evaluated(config):
-        names.extend(f"central_test_{name}" for name in task_metrics)
+        names.extend(f"central_test_{name}" for name in reported.central)
     if _grad_norm_is_measured(config):
         names.append(GRAD_NORM_COLUMN)
     return _ordered_metric_names(_deduplicate(names))
@@ -1338,7 +1340,7 @@ def _progress_metric_names(config: FullConfig | None) -> list[str]:
     if config is None:
         return _ordered_metric_names(names)
 
-    task_fit = {f"fit_{name}" for name in _task_metrics(config)}
+    task_fit = {f"fit_{name}" for name in task_reported_metrics(config).client}
     names.extend(name for name in _fit_metric_names(config) if name not in task_fit)
     if config.server.strategy == "scaffold":
         names.extend(("server_control_norm", "mean_client_control_delta_norm"))
@@ -1348,18 +1350,13 @@ def _progress_metric_names(config: FullConfig | None) -> list[str]:
     return _ordered_metric_names([name for name in _deduplicate(names) if name in planned])
 
 
-def _task_metrics(config: FullConfig) -> dict[str, str]:
-    """What the run's task reports (``TaskAdapter.METRICS``); loss and accuracy if undeclared."""
-
-    return task_metric_directions(config)
-
-
 def _fit_metric_names(config: FullConfig) -> list[str]:
     """The fit columns a round carries: the task's, the rule's and the strategy's, filtered once.
 
-    What a client emits -- ``fit_<metric>`` for each metric the task declares,
-    on a round with a post-fit pass (``evaluation.fit.every``), and the rule's
-    own columns (``RULE_FIT_METRICS``) -- and what the strategy adds
+    What a client emits -- ``fit_<metric>`` for each metric the task reports
+    on its clients' passes (``task_reported_metrics``), on a round with a
+    post-fit pass (``evaluation.fit.every``), and the rule's own columns
+    (``RULE_FIT_METRICS``) -- and what the strategy adds
     (``SERVER_DIAGNOSTIC_METRICS``) go through ``reporting.fit_metrics``,
     which the server applies once to the whole round. It keeps the listed
     names that exist, and an empty list keeps everything (``filter_metrics``).
@@ -1374,7 +1371,7 @@ def _fit_metric_names(config: FullConfig) -> list[str]:
         )
     except ValueError:
         fit_pass = True
-    task = [f"fit_{name}" for name in _task_metrics(config)] if fit_pass else []
+    task = [f"fit_{name}" for name in task_reported_metrics(config).client] if fit_pass else []
     extras = RULE_FIT_METRICS.get(rule, frozenset())
     if not fit_pass:
         extras = extras - POST_FIT_RULE_METRICS

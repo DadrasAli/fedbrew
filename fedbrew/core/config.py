@@ -7,7 +7,7 @@ import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from fedbrew.core.refusal import RunRefused, yaml_number_cause
 from fedbrew.servers.fedavg import SUPPORTED_AGGREGATION_WEIGHTING
@@ -16,6 +16,9 @@ from fedbrew.servers.fedopt import (
     fedopt_bound_violation,
     unread_fedopt_hyperparameters,
 )
+
+if TYPE_CHECKING:
+    from fedbrew.tasks.base import ReportedMetrics
 
 try:
     import yaml as yaml_loader  # type: ignore[import-untyped]
@@ -2240,6 +2243,38 @@ def task_metric_directions(config: FullConfig) -> dict[str, str]:
         # problem, reported there, not a reason to refuse here.
         declared = None
     return dict(declared) if declared else {"loss": "min", "accuracy": "max"}
+
+
+def task_reported_metrics(config: FullConfig) -> ReportedMetrics:
+    """Which declared metrics a run of ``config`` reports, on its clients and centrally.
+
+    Every name ``task_metric_directions`` gives, on both, unless the task
+    registered a function of the config that narrows them
+    (``registry.tasks.register(..., reported=...)``, ``ReportedMetrics``): a
+    task whose columns depend on the problem its model block poses, or whose
+    central pass measures what a client's cannot. What that function names
+    must be declared.
+    """
+
+    from fedbrew.core.registry import tasks
+    from fedbrew.tasks.base import ReportedMetrics
+
+    declared = tuple(task_metric_directions(config))
+    try:
+        narrowing = tasks.reported(config.task.name)
+    except Exception:  # noqa: BLE001 - as task_metric_directions.
+        narrowing = None
+    reported = None if narrowing is None else narrowing(config)
+    if reported is None:
+        return ReportedMetrics(client=declared, central=declared)
+    for where, names in (("client", reported.client), ("central", reported.central)):
+        undeclared = [name for name in names if name not in declared]
+        if undeclared:
+            raise ValueError(
+                f"task {config.task.name!r} says its {where} passes report {undeclared}, "
+                f"which it does not declare (METRICS: {list(declared)})"
+            )
+    return reported
 
 
 def task_metric_glosses(config: FullConfig) -> dict[str, str]:

@@ -287,6 +287,7 @@ class TaskRegistry(Registry[TaskFactory]):
         self._metrics: dict[str, Mapping[str, str] | Callable[[], Mapping[str, str] | None]] = {}
         self._glosses: dict[str, Mapping[str, str] | Callable[[], Mapping[str, str] | None]] = {}
         self._grad_norms: dict[str, str | Callable[[], str | None]] = {}
+        self._reported: dict[str, Callable[[Any], Any]] = {}
 
     def register(  # type: ignore[override]
         self,
@@ -296,6 +297,7 @@ class TaskRegistry(Registry[TaskFactory]):
         metrics: Mapping[str, str] | Callable[[], Mapping[str, str] | None] | None = None,
         glosses: Mapping[str, str] | Callable[[], Mapping[str, str] | None] | None = None,
         grad_norm: str | Callable[[], str | None] | None = None,
+        reported: Callable[[Any], Any] | None = None,
         origin: str | None = None,
         config_keys: Iterable[str] = (),
     ) -> None:
@@ -317,6 +319,12 @@ class TaskRegistry(Registry[TaskFactory]):
                 ``grad_norm_sq`` measures -- or a function returning it. None
                 for a task that cannot take its objective's gradient, which
                 ``evaluation.grad_norm`` is then refused for.
+            reported: For a task whose columns depend on the run, a function of
+                the resolved ``FullConfig`` returning the ``ReportedMetrics`` a
+                run of it reports -- which of ``metrics`` its clients' passes
+                and its central pass write -- or None where it cannot tell, and
+                every declared name then stands. None for a task that reports
+                every declared name on both.
             origin, config_keys: As for ``Registry.register``.
         """
 
@@ -333,6 +341,15 @@ class TaskRegistry(Registry[TaskFactory]):
             self._glosses[name] = glosses
         if grad_norm is not None:
             self._grad_norms[name] = grad_norm
+        if reported is not None:
+            self._reported[name] = reported
+
+    def reported(self, name: str) -> Callable[[Any], Any] | None:
+        """A registered task's function of the config narrowing its metrics per run, if any."""
+
+        if name not in self._items:
+            raise KeyError(f"Object is not registered: {name}")
+        return self._reported.get(name)
 
     def grad_norm(self, name: str) -> str | None:
         """What a registered task's ``grad_norm_sq`` measures, or None if it cannot report one."""

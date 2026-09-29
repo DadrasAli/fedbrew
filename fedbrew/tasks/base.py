@@ -254,6 +254,24 @@ def batch_example_count(batch: Any) -> float:
 METRIC_DIRECTIONS = frozenset({"min", "max", "none"})
 
 
+@dataclass(frozen=True, slots=True)
+class ReportedMetrics:
+    """The declared metrics one run reports, on its clients' passes and on its central pass.
+
+    For a task whose columns depend on the run -- on the problem its model
+    block poses, or on what its data carries -- or whose central pass measures
+    what a client's cannot: a function of the resolved config returning this is
+    registered beside ``METRICS`` (``registry.tasks.register(..., reported=...)``),
+    and the plan header lists ``fit_<name>`` and the client splits' aggregates
+    of ``client``, and ``central_test_<name>`` of ``central``. Both are names
+    from ``METRICS``. A task that registers no such function reports every
+    declared name on both.
+    """
+
+    client: tuple[str, ...]
+    central: tuple[str, ...]
+
+
 class TaskAdapter(ABC):
     """Task-specific bridge used by generic FL orchestration code."""
 

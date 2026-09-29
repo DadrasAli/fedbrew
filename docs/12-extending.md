@@ -553,6 +553,17 @@ validation loss) and the side the divergence monitor treats as better
 (chapter 08 §11 and §12). A task registered without it is planned as
 reporting loss and accuracy, as a classification task does.
 
+`METRICS` is one mapping per task. If which of them a run writes depends on
+the run -- an optimality gap only where the problem its model block poses has
+a certified F\*, a column only on data that carries what it measures -- or if
+the central pass measures one a client's pass cannot, also register a
+function of the resolved config, `registry.tasks.register(...,
+reported=my_reported)`, returning a `ReportedMetrics(client=..., central=...)`
+of declared names: the header then lists `fit_<name>` and the client
+aggregates of `client`, and `central_test_<name>` of `central`. It may return
+None where it cannot tell -- the data not generated yet -- and every declared
+name then stands on both.
+
 Say what each metric measures as `METRIC_GLOSSES`, a noun phrase per name that
 reads mid-sentence (`"cross-entropy"`, `"client objective ½xᵀAx − b_iᵀx"`),
 and pass it as `registry.tasks.register(..., glosses=MyTask.METRIC_GLOSSES)`.
