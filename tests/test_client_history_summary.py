@@ -232,10 +232,11 @@ def _write_config(directory: Path) -> Path:
               input_dim: 4
               hidden_dim: 4
               num_classes: 2
-            runtime:
+            numerics:
               deterministic: true
-              device: cpu
               use_amp: false
+            runtime:
+              device: cpu
             evaluation:
               train:
                 every: 1

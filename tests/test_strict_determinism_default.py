@@ -83,15 +83,9 @@ class LibraryDefaultTests(unittest.TestCase):
 @pytest.mark.fast
 class RunnerDefaultTests(unittest.TestCase):
     def test_a_config_that_is_silent_gets_strict_determinism(self) -> None:
-        from fedbrew.core.runner import _runtime_extra_bool
+        from fedbrew.core.config import NumericsConfig
 
-        class _Runtime:
-            extra: dict[str, Any] = {"deterministic": True}
-
-        class _Config:
-            runtime = _Runtime()
-
-        self.assertIs(_runtime_extra_bool(_Config(), "deterministic_warn_only", False), False)
+        self.assertIs(NumericsConfig(deterministic=True).deterministic_warn_only, False)
 
 
 @pytest.mark.fast
@@ -99,32 +93,31 @@ class ShippedConfigTests(unittest.TestCase):
     def test_only_attention_models_may_downgrade_to_a_warning(self) -> None:
         seen = 0
         for path, config in _run_configs():
-            runtime = config.get("runtime") or {}
-            if "deterministic_warn_only" not in runtime:
+            numerics = config.get("numerics") or {}
+            if "deterministic_warn_only" not in numerics:
                 continue
             seen += 1
             model = (config.get("model") or {}).get("name")
             with self.subTest(config=str(path.relative_to(CONFIG_ROOT))):
-                if runtime["deterministic_warn_only"]:
+                if numerics["deterministic_warn_only"]:
                     # An opt-out is a throughput decision. It has to be one the
                     # model actually forces, not one inherited by copy-paste.
                     self.assertIn(model, ATTENTION_MODELS)
                 else:
                     self.assertNotIn(model, ATTENTION_MODELS)
-        # 26 dataset arms, plus the 69 examples/ arms: drift-quad's three
-        # dial settings of eight, pl-1d's seven, fed-lasso's nine in each of
-        # its two full settings plus the one-arm null control, simplex-lsq's
-        # eight plus three, and nonconvex-simplex's eight. The count is
-        # pinned so a config cannot quietly stop stating its strictness.
-        self.assertEqual(seen, 95)
+        # Every run config: the numerics block states it in full, so the two
+        # dev configs that ran non-deterministic without saying how strict
+        # say so too. The count is pinned so a config cannot quietly stop
+        # stating its strictness.
+        self.assertEqual(seen, 97)
 
     def test_every_config_that_sets_determinism_states_its_strictness(self) -> None:
         for path, config in _run_configs():
-            runtime = config.get("runtime") or {}
-            if not runtime.get("deterministic"):
+            numerics = config.get("numerics") or {}
+            if not numerics.get("deterministic"):
                 continue
             with self.subTest(config=str(path.relative_to(CONFIG_ROOT))):
-                self.assertIn("deterministic_warn_only", runtime)
+                self.assertIn("deterministic_warn_only", numerics)
 
 
 class VisionModelsSurviveStrictDeterminismTests(unittest.TestCase):

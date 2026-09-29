@@ -42,7 +42,9 @@ model:
   n_head: 2
   dropout: 0.0
 
-runtime:
+# Every key here changes the numbers a run produces, and arms compared
+# against each other must agree on all of them (docs/04 section 7.5).
+numerics:
   deterministic: true
   # Opt-out, deliberate: scaled_dot_product_attention's flash and
   # memory-efficient backends have no deterministic implementation, so
@@ -52,8 +54,20 @@ runtime:
   # 2026). Set to false, and pin the math backend, when a run has to be
   # reproducible.
   deterministic_warn_only: true
-  device: cpu
+  # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
+  # mantissa bits, where "high" drops them to TF32's 10 or a bfloat16 pair's
+  # ~16. torch's own default, written out rather than left implicit --
+  # absent and "highest" are the same run but not the same document, and the
+  # FEMNIST and OpenImage arms set "high", so a config started by copying
+  # this one would otherwise change the arithmetic silently. Keep it
+  # identical across every arm of a comparison.
+  matmul_precision: highest
+  cudnn_benchmark: false
+  precision: reference
   use_amp: false
+
+runtime:
+  device: cpu
   checkpointing:
     enabled: true
     interval: 1
@@ -62,17 +76,6 @@ runtime:
     best_metric: val_loss_sample_weighted_avg
     keep_last: 1
     save_every_round: true
-  performance:
-    # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
-    # mantissa bits, where "high" drops them to TF32's 10 or a bfloat16 pair's
-    # ~16. torch's own default, written out rather than left implicit --
-    # absent and "highest" are the same run but not the same document, and the
-    # FEMNIST and OpenImage arms set "high", so a config started by copying
-    # this one would otherwise change the arithmetic silently. Keep it
-    # identical across every arm of a comparison.
-    matmul_precision: highest
-    cudnn_benchmark: false
-    precision: reference
 
 evaluation:
   # One block per split. `every` is in rounds and always pins both endpoints:

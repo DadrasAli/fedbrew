@@ -41,13 +41,28 @@ model:
   hidden_dim: 16
   num_classes: 2
 
-runtime:
-  device: cpu
-  use_amp: false
+# Every key here changes the numbers a run produces, and arms compared
+# against each other must agree on all of them (docs/04 section 7.5).
+numerics:
   # This config predates the strict-determinism default and does not opt into
   # it. Written out so "not deterministic" is a statement rather than an
   # omission.
   deterministic: false
+  deterministic_warn_only: false
+  # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
+  # mantissa bits, where "high" drops them to TF32's 10 or a bfloat16 pair's
+  # ~16. torch's own default, written out rather than left implicit --
+  # absent and "highest" are the same run but not the same document, and the
+  # FEMNIST and OpenImage arms set "high", so a config started by copying
+  # this one would otherwise change the arithmetic silently. Keep it
+  # identical across every arm of a comparison.
+  matmul_precision: highest
+  cudnn_benchmark: false
+  precision: reference
+  use_amp: false
+
+runtime:
+  device: cpu
   checkpointing:
     # The values an absent block resolves to, which is what this config has
     # always run under -- and the inverse of the per-key defaults that apply
@@ -58,17 +73,6 @@ runtime:
     save_best: false
     save_every_round: true
     keep_last: null
-  performance:
-    # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
-    # mantissa bits, where "high" drops them to TF32's 10 or a bfloat16 pair's
-    # ~16. torch's own default, written out rather than left implicit --
-    # absent and "highest" are the same run but not the same document, and the
-    # FEMNIST and OpenImage arms set "high", so a config started by copying
-    # this one would otherwise change the arithmetic silently. Keep it
-    # identical across every arm of a comparison.
-    matmul_precision: highest
-    cudnn_benchmark: false
-    precision: reference
 
 defaults:
   global_rounds: 3

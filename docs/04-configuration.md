@@ -74,16 +74,18 @@ cheapest way to check a new config, and worth running before any long job.
 | `client` | yes | update rule, local optimisation, metric filter |
 | `data` | yes | which dataset, and where |
 | `model` | yes | architecture and its per-builder keys — chapter 06 |
-| `runtime` | yes | device, determinism, performance, checkpointing, staging |
+| `runtime` | yes | device, throughput, checkpointing, staging |
+| `numerics` | no | every setting that changes the numbers a run produces — §7.5 |
 | `evaluation` | no | per-split schedules and client scope |
 | `client_statistics` | no | which cross-client columns are written |
 | `divergence` | no | when to stop a run that is not learning |
 
-The last three have complete dataclass defaults, so a config may omit them
-entirely. The first six have required fields and cannot be omitted.
+`numerics` and the last three have complete dataclass defaults, so a config
+may omit them entirely -- though every shipped config states `numerics` in
+full (§7.5). The first seven have required fields and cannot be omitted.
 
 The root is closed like every block. A top-level key that is none of these
-ten, and not `extends` (§2.2) or `server_config` or `client_config` below, is
+eleven, and not `extends` (§2.2) or `server_config` or `client_config` below, is
 refused at load,
 before anything is built: the message names the key, suggests the closest
 block, and lists every key the root accepts (`root_config_keys`,
@@ -136,7 +138,7 @@ task's loss is a mean over (`TaskAdapter.train_loss_denominator`, chapter 12
 §6): examples for classification and the shipped examples, active target
 tokens for the causal-LM task. That is what makes it exact on both.
 `client.drop_last: true` is refused under it, since it would leave samples out,
-and so is `runtime.use_amp: true`.
+and so is `numerics.use_amp: true`.
 
 `frozen_batch_gradients` weights by examples, equally or by sum whatever the
 task, so it is refused on a task whose loss averages over anything else: at
@@ -443,9 +445,6 @@ line's, and is not marked inferred.
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `device` | `cpu` \| `cuda` \| `auto` | **required** | `auto` resolves to `cuda` only when a CUDA allocation succeeds. A node that *has* a GPU and cannot hand one out warns and says why; one with no CUDA at all falls back in silence, because there is nothing surprising to report. `run.json` records both `requested_device` and `resolved_device` either way. |
-| `use_amp` | bool | **required** | Refused as `true` on a task with no autocast path (`causal_lm`, any extension task), and wherever the local step passes a gradient collector with no `param_groups`: `delta_sgd`, `fedlalr`, `update_mode: frozen_batch_gradients` and `update_mode: full_gradient`. Everything else accepts it. Chapters 06 §3 and 07 §4.4. |
-| `deterministic` | bool | **`false`** | Now written into every shipped run config. Chapter 10. |
-| `deterministic_warn_only` | bool | `false` | `true` warns instead of failing on a nondeterministic op. |
 | `resume_from` | path \| null | `null` | Written by `--resume-from`. |
 | `resume_latest` | bool | `false` | Written by `--resume-latest`. |
 | `quiet`, `verbose`, `no_rich` | bool | `false` | Written by the matching flags. `verbose` expands the plan header to every column and reports every round; `quiet` wins if both are set. |
@@ -456,9 +455,7 @@ line's, and is not marked inferred.
 
 | Key | Type | Default | Effect |
 | --- | --- | --- | --- |
-| `matmul_precision` | `highest` \| `high` \| `medium` | **absent → torch's `highest`** | **Changes the numbers.** See below. |
 | `torch_num_threads` | int ≥ 1 \| null | `null` → **torch decides** | CPU thread count. Undocumented as "unset means torch's own default" until now. `0` is refused: it is not a way to say "let torch decide" — omit the key. |
-| `cudnn_benchmark` | bool \| null | `null` → torch's `false` | **Ignored when `deterministic: true`** — `configure_runtime` (`fedbrew/core/runtime_setup.py`). Must be a real bool: it is read through `bool()`, which takes `"false"` as true. |
 | `reuse_model` | bool | `true` | One cached model instance per architecture. |
 | `fast_batching` | bool | `true` | Classification only. |
 | `shard_cache_bytes` | int | `4294967296` (4 GiB) | Forced to `0` for the centralized strategy, whose pooled view would only hold a second copy. |
@@ -466,10 +463,15 @@ line's, and is not marked inferred.
 | `executor_chunk_bytes` | int > 0 \| `auto` | `1073741824` (1 GiB) | The memory one chunk of batched clients may take. `auto` takes half the free memory of the model's device at the start of the run (on the host, the smaller of `MemAvailable` and any memory cgroup's headroom), and `run.json` records it. Chapter 11 §9. |
 | `compile` | `on` \| `off` | `off` | `on` compiles the batched executor's training step with `torch.compile`, which changes its rounding as the executor's summation order does. A step that does not compile runs eagerly, and stderr and `run.json` say so. Needs `executor: batched`. Chapter 11 §11. |
 | `cuda_graphs` | `on` \| `off` | `off` | `on` records a resident round's training as a CUDA graph once per round shape and replays it: the same kernels on the same inputs, so the results are the eager round's bit for bit. A round that cannot be recorded runs eagerly, and stderr and `run.json` say so. Needs `executor: batched`, a resident run and CUDA. Chapter 11 §9.1. |
-| `precision` | `reference` \| `f32_f64` \| `tf32` \| `bf16` | `reference` | **Changes the numbers.** The batched executor's training step at a lower precision: `f32_f64` steps a float64 model in float32, `tf32` lets CUDA's float32 matmuls use TensorFloat32, `bf16` runs the loss under bfloat16 autocast. Every evaluation stays at the model's precision. A mode that does not apply to the model or device runs the reference, and the plan header and `run.json` say why. Needs `executor: batched`. Chapter 11 §11. |
 | `dataloader` | mapping | — | Four keys, below. |
 
-These three are checked by `validate_config` and then **applied**, not
+Every key here is throughput-only: it may change how long a round takes and
+must not change what the round produces. The keys that do change it are the
+`numerics` block (§7.5); `matmul_precision`, `cudnn_benchmark` and `precision`
+sat in this table until then.
+
+`torch_num_threads` here, and `cudnn_benchmark` and `matmul_precision` in
+`numerics`, are checked by `validate_config` and then **applied**, not
 attempted. `configure_runtime` used to wrap the torch import, the CUDA probe
 and all three settings in one `try` under a bare `except Exception` that
 returned early, so a `torch_num_threads` value `int()` could not read left
@@ -479,19 +481,6 @@ another, and the only trace was a `run.json` key nothing reads. A value the
 runtime cannot apply is now refused at load; past that, a setting that fails is
 a fault and stops the run. Only the torch import, which is optional, is still
 caught and recorded as `runtime_setup_error`.
-
-**`matmul_precision` is the one key here that changes results.** `high` puts
-fp32 matmuls on TensorFloat32 (10 stored mantissa bits) or a bfloat16 pair
-(~16), and `medium` on bfloat16 (8 mantissa bits), against 24 for `highest`.
-Absent means `highest`, not
-"unset" — so a config that omits it and one that sets `high` are not running
-the same arithmetic. Every shipped run config states it explicitly, and
-`tests/test_shipped_config_explicitness.py` keeps it that way.
-
-A typo is rejected at load rather than passed to torch:
-`torch.set_float32_matmul_precision` does not raise on an unknown value — it
-emits a `UserWarning` and leaves the setting untouched — so a typo would have
-run at `highest` while `run.json` recorded the typo as though it applied.
 
 ### 7.2 `runtime.performance.dataloader`
 
@@ -561,6 +550,41 @@ usable scratch root, so nothing is staged rather than a literal
 `$FL_LOCAL_SCRATCH` directory being created
 — `resolve_staging_root` (`fedbrew/core/data_staging.py`). Chapter 11 covers
 when staging is worth it.
+
+### 7.5 `numerics`
+
+Every setting that changes the numbers a run produces, and nothing else
+(`NumericsConfig`, `fedbrew/core/config.py`). Two runs are like-for-like only
+if they agree on the whole block. It is its own block because the six keys
+were spread over `runtime` and `runtime.performance`, beside settings that
+change only how long a round takes: the code knew which changed results and
+the file did not show it. Each moved key is refused at its old place, naming
+this one (§10). Every default is what the key's reader took when a config left
+it out, so a config without the block runs as it did; every shipped config
+states the block in full all the same, in the file or in the family base it
+extends (`tests/test_shipped_config_explicitness.py`).
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `deterministic` | bool | `false` | `torch.use_deterministic_algorithms` and the cuDNN flags with it. Chapter 10. |
+| `deterministic_warn_only` | bool | `false` | `true` warns instead of failing on a nondeterministic op. |
+| `matmul_precision` | `highest` \| `high` \| `medium` \| null | `null` → torch's `highest` | See below. |
+| `cudnn_benchmark` | bool \| null | `null` → torch's `false` | **Ignored when `deterministic: true`** — `configure_runtime` (`fedbrew/core/runtime_setup.py`). Must be a real bool: it is read through `bool()`, which takes `"false"` as true. |
+| `precision` | `reference` \| `f32_f64` \| `tf32` \| `bf16` | `reference` | **Changes the numbers.** The batched executor's training step at a lower precision: `f32_f64` steps a float64 model in float32, `tf32` lets CUDA's float32 matmuls use TensorFloat32, `bf16` runs the loss under bfloat16 autocast. Every evaluation stays at the model's precision. A mode that does not apply to the model or device runs the reference, and the plan header and `run.json` say why. Needs `runtime.performance.executor: batched`. Chapter 11 §11. |
+| `use_amp` | bool | `false` | Refused as `true` on a task with no autocast path (`causal_lm`, any extension task), and wherever the local step passes a gradient collector with no `param_groups`: `delta_sgd`, `fedlalr`, `update_mode: frozen_batch_gradients` and `update_mode: full_gradient`. Everything else accepts it. Chapters 06 §3 and 07 §4.4. |
+
+**`matmul_precision`.** `high` puts
+fp32 matmuls on TensorFloat32 (10 stored mantissa bits) or a bfloat16 pair
+(~16), and `medium` on bfloat16 (8 mantissa bits), against 24 for `highest`.
+Absent means `highest`, not
+"unset" — so a config that omits it and one that sets `high` are not running
+the same arithmetic. Every shipped run config states it explicitly, and
+`tests/test_shipped_config_explicitness.py` keeps it that way.
+
+A typo is rejected at load rather than passed to torch:
+`torch.set_float32_matmul_precision` does not raise on an unknown value — it
+emits a `UserWarning` and leaves the setting untouched — so a typo would have
+run at `highest` while `run.json` recorded the typo as though it applied.
 
 ## 8. `evaluation`
 
@@ -712,6 +736,8 @@ and ignored — `_REMOVED_KEYS` (`fedbrew/core/config.py`).
 | `client.local_iterations` | **relocated**, not deleted: set `defaults.local_iterations` — §2.1 |
 | `defaults.local_epochs` | **renamed**: set `defaults.local_iterations` — §2.1. A config that writes it predates the rename |
 | `client.local_epochs` | **renamed and relocated**: set `defaults.local_iterations` — §2.1. A config that writes it predates the rename |
+| `runtime.deterministic`, `runtime.deterministic_warn_only`, `runtime.use_amp` | **relocated**: set them in `numerics` — §7.5 |
+| `runtime.performance.matmul_precision`, `runtime.performance.cudnn_benchmark`, `runtime.performance.precision` | **relocated**: set them in `numerics` — §7.5 |
 | `experiment.task` | the task is recorded by the model's registration (`models.register(..., task=)`) and read from `model.name`; a model cannot be registered without it, so there is nothing left to override |
 | the top-level `task` block | the task is inferred from `model.name` through the model's registration |
 
@@ -769,8 +795,8 @@ Collected, because a reader of a config cannot see any of them.
 | `runtime.checkpointing.*` with the block absent | the **opposite** of the per-key defaults | §7.3 |
 
 Two more were implicit and are now written into every shipped config rather
-than documented: `runtime.performance.matmul_precision` and
-`runtime.deterministic`. Both change results, and
+than documented: `numerics.matmul_precision` and
+`numerics.deterministic`. Both change results, and
 `tests/test_shipped_config_explicitness.py` fails if a new config omits either.
 
 ## For agents
@@ -825,9 +851,9 @@ python -m pytest tests/test_unknown_config_keys.py \
    The reason is shown to whoever still has it in a config.
 4. **The absent-block checkpoint defaults are the opposite of the per-key
    ones.** Any change to one set must state what happens to the other.
-5. **`matmul_precision` and `deterministic` must be explicit in every shipped
-   config, resolved.** Written in the config or in the family base it extends
-   (§2.2). Guarded; a new config omitting either fails.
+5. **The `numerics` block must be stated in full in every shipped config,
+   resolved.** Written in the config or in the family base it extends (§2.2),
+   all six keys. Guarded; a new config omitting one fails.
 6. **`cudnn_benchmark` is ignored under `deterministic: true`.** Do not
    document it as an unconditional switch.
 7. **Validation runs twice** — before and after CLI overrides — so an override
@@ -840,7 +866,8 @@ python -m pytest tests/test_unknown_config_keys.py \
 | `tests/test_docs_config_keys.py` | Every key table here matches `_KNOWN_EXTRA_KEYS`, the dataclass fields and their defaults, `_REMOVED_KEYS`, and the registry names. |
 | `tests/test_unknown_config_keys.py` | An unread key fails at load, in every block and at the root, through `load_config`, `fedbrew run` and `--validate-only`. |
 | `tests/test_preflight_runs_only_under_validate_only.py` | §1: an ordinary `fedbrew run` calls `validate_config` and never the ten-area preflight; `--validate-only` calls both and trains nothing; the ten areas are the ones §1 names. |
-| `tests/test_shipped_config_explicitness.py` | `matmul_precision` and `deterministic` are stated by every shipped config. |
+| `tests/test_shipped_config_explicitness.py` | Every shipped config states the whole `numerics` block, resolved, and no numerics key is left in `runtime`. |
+| `tests/test_numerics_block.py` | §7.5: each old place of a numerics key is refused naming the new one, the defaults are the old readers', the block is validated, and a run recorded before it is still compared on it when resumed. |
 | `tests/test_config_extends.py` | §2.2: how `extends` merges, what it refuses, that a family base is not a run config, and that `fedbrew config show` prints a config that loads to the same run. |
 | `tests/test_shipped_configs_resolve_as_recorded.py` | Every shipped run config resolves to the `FullConfig` and planned columns recorded before the config was reshaped, except for keys marked inferred. |
 | `tests/test_inferred_config_values.py` | §6.1: each inferred key is filled, marked, and checked when stated; §5.1: `nesterov`, `min_learning_rate` and `frozen_gradient_weighting` are required only where they act. |

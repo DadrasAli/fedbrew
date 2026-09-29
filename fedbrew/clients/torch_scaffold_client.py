@@ -125,7 +125,7 @@ class TorchScaffoldClient(TorchSGDClient[TaskAdapter]):
             self._client_control = zeros_like_model_state(global_state)
         old_client_control = clone_model_state(self._client_control)
 
-        # Composes with runtime.use_amp: GradScaler.step unscales .grad before
+        # Composes with numerics.use_amp: GradScaler.step unscales .grad before
         # delegating to a wrapped optimizer, so _ScaffoldCorrectingOptimizer.step
         # corrects true-scale gradients. This used to raise here and at config
         # load; both went when it was measured, and

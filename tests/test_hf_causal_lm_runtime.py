@@ -313,11 +313,12 @@ model:
   sequence_length: 4
   local_files_only: true
   trust_remote_code: false
-runtime:
+numerics:
   deterministic: true
   deterministic_warn_only: true
-  device: cpu
   use_amp: false
+runtime:
+  device: cpu
 evaluation:
   train:
     every: 1

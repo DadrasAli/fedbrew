@@ -372,7 +372,7 @@ again, so the clip engages far sooner.
 behaviour is coherent — one clip per applied update either way.
 
 **`frozen_batch_gradients` and `full_gradient` do not run under
-`runtime.use_amp: true`**, refused at config load and at preflight
+`numerics.use_amp: true`**, refused at config load and at preflight
 (`algorithm.sgd_engine_amp_unsupported`). This refusal is per setting, not per
 rule: `fedavg` under AMP is fine until it is asked to combine its gradients by
 hand.
@@ -424,7 +424,7 @@ instead of reimplementing forward/loss/backward against two of the task's
 own private attributes. `local_update_modes.py`'s `_ClippingOptimizer` does
 the same thing for gradient clipping.
 
-**Composes with `runtime.use_amp: true`**, and did not until the composition
+**Composes with `numerics.use_amp: true`**, and did not until the composition
 was measured. `GradScaler.step` unscales `.grad` before delegating to a wrapped
 optimizer, so the proximal term is added to true-scale gradients. §4.4 carries
 the measurement for both this rule and SCAFFOLD.
@@ -444,7 +444,7 @@ upload volume.
 
 Emits `control_delta_norm`, `client_control_norm`, `local_steps`.
 
-**Composes with `runtime.use_amp: true`**, on the same mechanism as FedProx
+**Composes with `numerics.use_amp: true`**, on the same mechanism as FedProx
 in §4.3. Both refused it until now, in three layers, for a reason that read
 "standard AMP usage and should work, but nothing in this repository has
 measured it".
@@ -514,7 +514,7 @@ The step-size trace is the algorithm, so it is emitted every round:
 `undefined_curvature_fraction`. A run whose mean step never leaves `eta_0` is
 one where the auto-tuner did nothing.
 
-**Incompatible with `runtime.use_amp: true`** and refused at load: the rule
+**Incompatible with `numerics.use_amp: true`** and refused at load: the rule
 reads the raw gradient off `.grad`, which the AMP path consumes inside
 `GradScaler.step` instead of leaving there.
 
@@ -725,7 +725,7 @@ fedbrew run --config configs/femnist/scaffold.yaml --validate-only
 | `tests/test_aggregation_weight_is_the_train_split_size.py` | §3.1: a classification client's weight, as the server receives it, is its train split's size under `single_batch`, a capped `local_adamw` and a two-pass `drop_last` `sequential_epoch`, none of which reads that many rows. |
 | `tests/test_fedopt_server.py` | The four update rules and the `tau^2` initialisation. |
 | `tests/test_scaffold_fedprox_communication_cost.py` | SCAFFOLD 2×, FedProx 1×. |
-| `tests/test_amp_composes_with_wrapped_optimizers.py` | §4.4: scaffold and fedprox accept `runtime.use_amp: true` in all three layers, the three rules that step through `_GradientOnlyOptimizer` still refuse it, and the chapter quotes the numbers behind both. |
+| `tests/test_amp_composes_with_wrapped_optimizers.py` | §4.4: scaffold and fedprox accept `numerics.use_amp: true` in all three layers, the three rules that step through `_GradientOnlyOptimizer` still refuse it, and the chapter quotes the numbers behind both. |
 | `tests/test_scaffold_fedprox_step_correctness.py` | What the gradient correction and the proximal term actually compute, against a closed-form prediction and a pinned trajectory. |
 | `tests/test_client_communication_cost.py` | Every rule's `communicated_bytes` equals every model-shaped state in the payload it returns, and section 5's multipliers are measured. |
 | `tests/test_communication_cost_metrics.py` | A client's cost metrics survive `client.metrics` into the CSV. |
@@ -751,7 +751,7 @@ fedbrew run --config configs/femnist/scaffold.yaml --validate-only
   servers that emit them — SCAFFOLD and FedLALR — add them after the filter,
   so they always appear. `server.metrics` selects among the aggregated
   *client* metrics only.
-- **Setting `runtime.use_amp: true` with `delta_sgd` or `fedlalr`.** Refused,
+- **Setting `numerics.use_amp: true` with `delta_sgd` or `fedlalr`.** Refused,
   per rule, at config load: both step through a wrapper with no `param_groups`
   for `GradScaler` to read. `scaffold` and `fedprox` used to be on this list
   and are not any more — §4.4.

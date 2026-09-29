@@ -90,7 +90,7 @@ def _write(root: Path, name: str, manifest: Path, rule: str, cache_bytes: int | 
     runtime["device"] = "cpu"
     runtime["checkpointing"].update({"save_every_round": True, "keep_last": None})
     if cache_bytes is not None:
-        runtime["performance"]["shard_cache_bytes"] = cache_bytes
+        runtime.setdefault("performance", {})["shard_cache_bytes"] = cache_bytes
     config["evaluation"] = {
         "train": {"every": 1, "clients": "all"},
         "val": {"every": 1, "clients": "all"},

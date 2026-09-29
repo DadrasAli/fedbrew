@@ -81,7 +81,7 @@ def _config(
         task=TaskConfig(name="classification"),
         data=DataConfig(name="synthetic_classification"),
         model=ModelConfig(name="mlp"),
-        runtime=RuntimeConfig(device="cpu", use_amp=False, extra=dict(runtime_extra or {})),
+        runtime=RuntimeConfig(device="cpu", extra=dict(runtime_extra or {})),
         client_statistics=ClientStatisticsConfig(),
         evaluation=EvaluationConfig(
             train=SplitEvaluationConfig(every=train, clients="all"),

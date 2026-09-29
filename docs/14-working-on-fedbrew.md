@@ -410,9 +410,9 @@ shape spread anyway, inside the same file.
 
 Two `--all` runs of `examples/simplex-lsq` disagreed: `central_test_feasible_gap`
 read `−8.3e-17` on one and `−2.8e-17` on the other, with
-`runtime.deterministic: true` and the same seed. A cause was written the same
+`numerics.deterministic: true` and the same seed. A cause was written the same
 day. A threaded reduction adds its pieces in whatever order the threads finish;
-`runtime.deterministic` pins the RNG and the kernel choice but not the split;
+`numerics.deterministic` pins the RNG and the kernel choice but not the split;
 so `runtime.performance.torch_num_threads: 1` is the fix. It went into all five
 `examples/*/run.py` as the comment beside the key, into a README section headed
 "`deterministic: true` is not bit-reproducibility", and into a proposal to

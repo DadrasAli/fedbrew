@@ -372,7 +372,7 @@ class RefusalsTest(unittest.TestCase):
 
     def test_amp_is_refused_under_it(self) -> None:
         config = _config_with("configs/mnist/fedavg.yaml", _mode("full_gradient"))
-        config.runtime.use_amp = True
+        config.numerics.use_amp = True
         self.assertEqual(amp_unsupported_sgd_engine_setting(config), "update_mode: full_gradient")
 
 
@@ -584,12 +584,12 @@ class OwnLoopConfigTest(unittest.TestCase):
         for rule in ("fedprox", "scaffold", "local_sgd", "local_adamw"):
             with self.subTest(rule=rule, amp=True):
                 config = _config_with(OWN_LOOP_CONFIGS[rule], _mode("full_gradient"))
-                config.runtime.use_amp = True
+                config.numerics.use_amp = True
                 self.assertEqual(
                     amp_unsupported_sgd_engine_setting(config), "update_mode: full_gradient"
                 )
                 config = _config_with(OWN_LOOP_CONFIGS[rule], _mode("sequential_epoch"))
-                config.runtime.use_amp = True
+                config.numerics.use_amp = True
                 self.assertIsNone(amp_unsupported_sgd_engine_setting(config))
 
 

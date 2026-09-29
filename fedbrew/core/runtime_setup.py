@@ -239,11 +239,11 @@ def configure_runtime(config: FullConfig, deterministic: bool) -> dict[str, obje
     if torch_num_threads is not None:
         torch.set_num_threads(int(torch_num_threads))
 
-    cudnn_benchmark = performance.get("cudnn_benchmark")
+    cudnn_benchmark = config.numerics.cudnn_benchmark
     if cudnn_benchmark is not None and not bool(deterministic) and hasattr(torch.backends, "cudnn"):
         torch.backends.cudnn.benchmark = bool(cudnn_benchmark)
 
-    matmul_precision = performance.get("matmul_precision")
+    matmul_precision = config.numerics.matmul_precision
     if matmul_precision and hasattr(torch, "set_float32_matmul_precision"):
         torch.set_float32_matmul_precision(str(matmul_precision))
         # The matmul setting reaches matmuls only. A convolution runs through

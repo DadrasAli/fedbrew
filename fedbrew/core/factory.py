@@ -239,7 +239,7 @@ def _build_task(
         kwargs["reuse_model"] = _performance_flag(performance, "reuse_model", True)
         _refuse_amp_a_task_cannot_honour(config)
         if config.task.name in AMP_AWARE_TASKS:
-            kwargs["use_amp"] = bool(config.runtime.use_amp)
+            kwargs["use_amp"] = bool(config.numerics.use_amp)
             kwargs["fast_batching"] = _performance_flag(performance, "fast_batching", True)
             kwargs["eval_batch_size"] = _eval_batch_size(config)
         return task_factory(**kwargs)
@@ -259,7 +259,7 @@ AMP_AWARE_TASKS = {"classification"}
 
 
 def _refuse_amp_a_task_cannot_honour(config: FullConfig) -> None:
-    """Refuse ``runtime.use_amp: true`` on a task that has no AMP path.
+    """Refuse ``numerics.use_amp: true`` on a task that has no AMP path.
 
     `TorchCausalLMTask.__init__` takes no ``use_amp`` and its `train_step` has
     no `autocast` or `GradScaler`, so the flag was accepted, echoed into
@@ -276,16 +276,16 @@ def _refuse_amp_a_task_cannot_honour(config: FullConfig) -> None:
     already sets ``use_amp: false``. See FINDINGS.csv P03-F07.
 
     Raises:
-        ValueError: If ``runtime.use_amp`` is true and the task is not in
+        ValueError: If ``numerics.use_amp`` is true and the task is not in
             `AMP_AWARE_TASKS`.
     """
 
-    if not config.runtime.use_amp or config.task.name in AMP_AWARE_TASKS:
+    if not config.numerics.use_amp or config.task.name in AMP_AWARE_TASKS:
         return
     raise RunRefused(
-        f"runtime.use_amp is true and task {config.task.name!r} has no mixed-precision "
+        f"numerics.use_amp is true and task {config.task.name!r} has no mixed-precision "
         f"path, so the run would execute in fp32 while run.json recorded AMP. Only "
-        f"{', '.join(sorted(AMP_AWARE_TASKS))} implements it. Set runtime.use_amp to false."
+        f"{', '.join(sorted(AMP_AWARE_TASKS))} implements it. Set numerics.use_amp to false."
     )
 
 

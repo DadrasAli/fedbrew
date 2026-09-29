@@ -763,7 +763,9 @@ settings to plan. A group is not resumed as a group.
 ## 11. Modes of the batched step
 
 Two opt-in keys change how the batched executor's training step runs
-(`StepContext`, `fedbrew/core/batched_executor.py`). Both need
+(`StepContext`, `fedbrew/core/batched_executor.py`): `runtime.performance.compile`,
+and `numerics.precision`, which is in the numerics block because it changes
+the numbers (chapter 04 §7.5). Both need
 `runtime.performance.executor: batched`, and the defaults leave the step as
 §9 describes it. They change the training step only: the update arithmetic
 stays at the model's precision, and the post-fit pass and every evaluation

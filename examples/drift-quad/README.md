@@ -507,7 +507,7 @@ shipped arm writes.
 
 **Still here**, unchanged, and the one gap from pl-1d's list that the hook did
 not touch. Delta-SGD, FedLALR, SCAFFOLD and FedProx read `task._scaler` to
-decide whether to refuse a run under `runtime.use_amp: true` — a private name
+decide whether to refuse a run under `numerics.use_amp: true` — a private name
 standing in for a question the interface has no place for. The read is
 absence-tolerant, so a task that never defines it is refused nothing;
 `DriftQuadTask` sets it to `None` explicitly only to put the answer where a

@@ -56,7 +56,9 @@ model:
     - v_proj
   bias: none
 
-runtime:
+# Every key here changes the numbers a run produces, and arms compared
+# against each other must agree on all of them (docs/04 section 7.5).
+numerics:
   deterministic: true
   # Opt-out, deliberate: scaled_dot_product_attention's flash and
   # memory-efficient backends have no deterministic implementation, so
@@ -66,8 +68,17 @@ runtime:
   # 2026). Set to false, and pin the math backend, when a run has to be
   # reproducible.
   deterministic_warn_only: true
-  device: auto
+  # NOT throughput-only: TF32 (10 stored mantissa bits) or a bfloat16 pair
+  # (~16) instead of fp32's 24, in every matmul of every pass. Keep it
+  # identical across every arm of a comparison; a run at "highest" is not
+  # like-for-like with these. See docs/10-reproducibility.md.
+  matmul_precision: high
+  cudnn_benchmark: false
+  precision: reference
   use_amp: false
+
+runtime:
+  device: auto
   checkpointing:
     enabled: true
     interval: 100000
@@ -77,13 +88,6 @@ runtime:
     keep_last: 0
     save_every_round: false
   performance:
-    # NOT throughput-only: TF32 (10 stored mantissa bits) or a bfloat16 pair
-    # (~16) instead of fp32's 24, in every matmul of every pass. Keep it
-    # identical across every arm of a comparison; a run at "highest" is not
-    # like-for-like with these. See docs/10-reproducibility.md.
-    matmul_precision: high
-    cudnn_benchmark: false
-    precision: reference
     reuse_model: true
     fast_batching: true
     shard_cache_bytes: 4294967296

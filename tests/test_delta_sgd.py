@@ -417,7 +417,7 @@ class ConfigurationTest(unittest.TestCase):
 
     def test_amp_is_rejected(self) -> None:
         config = self._config()
-        config.runtime.use_amp = True
+        config.numerics.use_amp = True
         with self.assertRaises(ValueError):
             validate_config(config)
         self.assertIn("algorithm.delta_sgd_amp_unsupported", self._preflight_errors(config))

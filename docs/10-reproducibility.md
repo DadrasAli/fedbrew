@@ -44,7 +44,7 @@ from different offsets: `Random(42 + 2)` and `Random(43 + 1)` are one
 generator. Replicates seeded 42/43/44 would then share their draws shifted by a
 round, and the "spread" across them would be an artefact.
 
-**`runtime.deterministic: true` is strict by default.**
+**`numerics.deterministic: true` is strict by default.**
 `deterministic_warn_only` defaults to `false`, so a nondeterministic kernel
 *raises* rather than warning once on stderr and carrying on. It also sets
 `CUBLAS_WORKSPACE_CONFIG=:4096:8` (only if not already set), disables
@@ -99,10 +99,14 @@ bit for bit.
 
 ### These settings **do** change numerics
 
-They are opt-in, and a run that sets one is not comparable to a run that does
-not.
+Six of them are the `numerics` block -- `deterministic`,
+`deterministic_warn_only`, `matmul_precision`, `cudnn_benchmark`, `precision`
+and `use_amp` -- which holds every key that changes the numbers and nothing
+else (chapter 04 §7.5). Every shipped config states the block in full, in the
+file or in the family base it extends, and a run that differs from another in
+any of it is not comparable to it.
 
-- **`runtime.performance.matmul_precision`.** `highest` keeps fp32 matmuls in
+- **`numerics.matmul_precision`.** `highest` keeps fp32 matmuls in
   fp32 (24 mantissa bits). `high` puts them on TensorFloat32 (10 stored
   mantissa bits) or a pair of bfloat16 values (~16); `medium` on bfloat16 — in
   every forward and backward pass, on any GPU that supports it. All FEMNIST
@@ -132,19 +136,19 @@ not.
   typo cannot leave a run training at `highest` while `run.json` claims
   otherwise.
 
-- **`runtime.performance.precision`.** `precision`'s modes `f32_f64`, `tf32`
+- **`numerics.precision`.** `precision`'s modes `f32_f64`, `tf32`
   and `bf16` train the batched executor's step at a lower precision -- float32, TensorFloat32
   matmuls, a bfloat16 loss -- and evaluate at the model's own. Each is held
   to a measured bound against `reference` (chapter 11 §11), and a run in one
   is not comparable to a run in another.
 
-- **`runtime.use_amp: true`** trains in float16 where autocast allows it.
+- **`numerics.use_amp: true`** trains in float16 where autocast allows it.
 
 - **`client.eval_batch_size`** changes floating-point summation order in metric
   aggregation. Metrics stay example-weighted, so differences are last-bit only,
   but they are not bit-identical to a run at the training batch size.
 
-- **`runtime.deterministic: false`** permits nondeterministic kernels. The
+- **`numerics.deterministic: false`** permits nondeterministic kernels. The
   difference is usually last-bit and it accumulates over rounds.
 
 ### What is not guaranteed
@@ -168,7 +172,7 @@ stack. `run.json` records the versions so a mismatch is visible, but nothing
 makes an A100 and an H100 agree bit for bit.
 
 **`cudnn_benchmark: true`** selects kernels by autotuning, which can vary run to
-run. It is ignored when `runtime.deterministic` is true, so a config setting
+run. It is ignored when `numerics.deterministic` is true, so a config setting
 both reads as though both apply when only one does.
 
 **Wall-clock timings** are not reproducible and are not meant to be.
@@ -176,7 +180,7 @@ both reads as though both apply when only one does.
 ### Before a long run
 
 1. Set `experiment.seed`.
-2. Decide `runtime.deterministic`, and state it in the config.
+2. Decide `numerics.deterministic`, and state it in the config.
 3. Run a short same-seed reproducibility check.
 4. Generate data once, up front.
 5. Validate the manifest with `inspect-data` and the config with

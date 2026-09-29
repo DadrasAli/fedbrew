@@ -209,7 +209,7 @@ def run_sgd_update_mode(
     ``update_mode`` settings are not on a common bound. Per mode the behaviour
     is coherent: one clip per applied update. FINDINGS.csv P03-F05.
 
-    Clipping composes with ``runtime.use_amp``; ``frozen_batch_gradients`` and
+    Clipping composes with ``numerics.use_amp``; ``frozen_batch_gradients`` and
     ``full_gradient`` do not. ``_ClippingOptimizer`` wraps a real optimizer and exposes its
     ``param_groups``, which is all ``GradScaler.unscale_`` needs;
     ``_GradientOnlyOptimizer`` wraps none and exposes none. Both were refused
@@ -355,7 +355,7 @@ def run_delta_sgd_update_mode(
     # inside GradScaler.step instead of leaving on .grad. Fail loudly rather
     # than silently training on scaled gradients.
     if getattr(task, "_scaler", None) is not None:
-        raise ValueError("delta_sgd does not support runtime.use_amp: true")
+        raise ValueError("delta_sgd does not support numerics.use_amp: true")
 
     stepper = _DeltaSGDStepper(
         eta_0=eta_0,

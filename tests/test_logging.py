@@ -72,7 +72,6 @@ def _make_config(
         model=ModelConfig(name="test-model"),
         runtime=RuntimeConfig(
             device="cpu",
-            use_amp=False,
             extra=dict(runtime_extra or {}),
         ),
         client_statistics=(

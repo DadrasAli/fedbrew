@@ -75,11 +75,13 @@ def _config(
             "num_classes": 2,
             "dropout": DROPOUT,
         },
-        "runtime": {
+        "numerics": {
             "deterministic": True,
             "deterministic_warn_only": False,
-            "device": "cpu",
             "use_amp": False,
+        },
+        "runtime": {
+            "device": "cpu",
         },
         # Every block every round. `every` pins round 1 and the *final* round,
         # so a 2-round run would evaluate central_test at round 2 while a

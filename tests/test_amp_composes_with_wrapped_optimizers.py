@@ -1,4 +1,4 @@
-"""SCAFFOLD and FedProx run under `runtime.use_amp: true`. Measured, not argued.
+"""SCAFFOLD and FedProx run under `numerics.use_amp: true`. Measured, not argued.
 
 Both refused it until now, at config load, at preflight, and inside `fit()`.
 The reason recorded in all three places was the same, and it was a prediction:
@@ -99,7 +99,7 @@ def _errors(config: Any) -> list[str]:
 
 def _with_amp(path: str) -> Any:
     config = copy.deepcopy(load_config(path))
-    config.runtime.use_amp = True
+    config.numerics.use_amp = True
     return config
 
 
@@ -256,7 +256,7 @@ class TheChapterSaysSoTest(unittest.TestCase):
                     self.fail(f"docs/07-algorithms.md still hedges: {phrase!r}")
 
     def test_it_says_the_two_now_compose(self) -> None:
-        if "**Composes with `runtime.use_amp: true`**" not in self.text:
+        if "**Composes with `numerics.use_amp: true`**" not in self.text:
             self.fail("docs/07-algorithms.md no longer says scaffold and fedprox compose")
 
     def test_it_gives_the_numbers_behind_that(self) -> None:

@@ -59,7 +59,6 @@ def _config(data_path: str, local_root: str) -> FullConfig:
         model=ModelConfig(name="mlp"),
         runtime=RuntimeConfig(
             device="cpu",
-            use_amp=False,
             extra={"data_staging": {"enabled": True, "local_root": local_root}},
         ),
     )

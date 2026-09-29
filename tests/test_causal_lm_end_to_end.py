@@ -89,11 +89,12 @@ class CausalLMEndToEndTests(unittest.TestCase):
                       n_layer: 1
                       n_head: 2
                       dropout: 0.0
-                    runtime:
+                    numerics:
                       deterministic: true
                       deterministic_warn_only: true
-                      device: cpu
                       use_amp: false
+                    runtime:
+                      device: cpu
                       checkpointing:
                         enabled: true
                         interval: 1

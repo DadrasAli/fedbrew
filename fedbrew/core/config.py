@@ -128,10 +128,52 @@ class ModelConfig:
 
 @dataclass
 class RuntimeConfig:
-    """Runtime execution settings."""
+    """Runtime execution settings: where a run executes and how fast, never what it computes.
+
+    Every setting that changes the numbers is in ``NumericsConfig``.
+    """
 
     device: str
-    use_amp: bool
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class NumericsConfig:
+    """Every setting that changes the numbers a run produces, in one block.
+
+    They lived in ``runtime`` (``deterministic``, ``deterministic_warn_only``,
+    ``use_amp``) and ``runtime.performance`` (``matmul_precision``,
+    ``cudnn_benchmark``, ``precision``), beside settings that only change how
+    long a round takes; the code knew which six changed results
+    (``NUMERICS_KEYS``) and the file layout did not show it. Two
+    runs are like-for-like only if they agree on this whole block, and every
+    shipped config states it in full (tests/test_shipped_config_explicitness.py).
+
+    Each default is what the key's reader took when a config left it out, so
+    a config that omits the block runs as it did.
+    """
+
+    #: torch.use_deterministic_algorithms, and the cuDNN and cuBLAS settings
+    #: that go with it (runtime_setup.seed_everything).
+    deterministic: bool = False
+    #: Under ``deterministic``: warn on a nondeterministic kernel instead of
+    #: raising.
+    deterministic_warn_only: bool = False
+    #: torch.set_float32_matmul_precision: "highest" keeps fp32 matmuls at 24
+    #: mantissa bits, "high" and "medium" drop them to TF32's 10 or a bfloat16
+    #: pair's ~16. None leaves torch's own setting, which is "highest".
+    matmul_precision: str | None = None
+    #: cuDNN picks kernels by timing them, so the choice -- and the arithmetic
+    #: -- depends on what else the machine was doing. Ignored under
+    #: ``deterministic``. None leaves torch's own setting.
+    cudnn_benchmark: bool | None = None
+    #: The batched executor's step precision (chapter 11 section 11):
+    #: "reference", or a mode only ``runtime.performance.executor: batched``
+    #: runs.
+    precision: str = "reference"
+    #: float16 autocast with a GradScaler, CUDA only, on the tasks that
+    #: implement it (factory.AMP_AWARE_TASKS).
+    use_amp: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -409,6 +451,7 @@ class FullConfig:
     data: DataConfig
     model: ModelConfig
     runtime: RuntimeConfig
+    numerics: NumericsConfig = field(default_factory=NumericsConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     client_statistics: ClientStatisticsConfig = field(default_factory=ClientStatisticsConfig)
     divergence: DivergenceConfig = field(default_factory=DivergenceConfig)
@@ -586,6 +629,7 @@ def load_config(common_path: str | Path) -> FullConfig:
         data=data,
         model=model,
         runtime=_build_runtime_config(common["runtime"]),
+        numerics=_build_numerics_config(common.get("numerics", {})),
         evaluation=_build_evaluation_config(common.get("evaluation", {})),
         client_statistics=_build_client_statistics_config(common.get("client_statistics", {})),
         divergence=_build_divergence_config(common.get("divergence", {})),
@@ -852,12 +896,12 @@ _KNOWN_EXTRA_KEYS: dict[str, frozenset[str]] = {
     # resume_from, resume_latest, quiet, verbose, no_rich, print_every and
     # data_staging are written by apply_cli_overrides, which is followed by
     # another validate_config.
+    # Every numerics key is a named NumericsConfig field.
+    "numerics": frozenset(),
     "runtime": frozenset(
         {
             "checkpointing",
             "performance",
-            "deterministic",
-            "deterministic_warn_only",
             "resume_from",
             "resume_latest",
             "quiet",
@@ -889,8 +933,6 @@ _KNOWN_EXTRA_KEYS: dict[str, frozenset[str]] = {
     "runtime.performance": frozenset(
         {
             "torch_num_threads",
-            "cudnn_benchmark",
-            "matmul_precision",
             "reuse_model",
             "fast_batching",
             "dataloader",
@@ -898,7 +940,6 @@ _KNOWN_EXTRA_KEYS: dict[str, frozenset[str]] = {
             "executor",
             "executor_chunk_bytes",
             "compile",
-            "precision",
             "cuda_graphs",
         }
     ),
@@ -914,33 +955,30 @@ _KNOWN_EXTRA_KEYS: dict[str, frozenset[str]] = {
     ),
 }
 
-#: The performance keys that change the numbers, and so make two runs
-#: incomparable. Everything else under ``runtime.performance`` is throughput
-#: only: it may change how long a round takes and must not change what the
-#: round produces.
+#: The keys that change the numbers, and so make two runs incomparable: the
+#: ``numerics`` block, ``NumericsConfig``'s fields. Everything under
+#: ``runtime.performance`` is throughput only: it may change how long a round
+#: takes and must not change what the round produces.
 #:
 #: The split lived in a table in docs/10 and nowhere else, which is how a
 #: guard for it ended up unable to fail -- there was no authority to diff a
 #: chapter against, so the check hardcoded a third copy of the list and never
-#: opened the chapter at all. The two chapters that carry the split now diff
-#: against this, the way SERVER_DIAGNOSTIC_METRICS puts the metric filter's
-#: exemptions beside the filter.
-#:
-#: ``matmul_precision`` drops fp32 matmuls to TF32's 10 mantissa bits or a
-#: bfloat16 pair's ~16; ``cudnn_benchmark`` picks kernels by timing them, so
-#: the choice -- and the arithmetic -- depends on what else the machine was
-#: doing. Adding a key here is a claim that it is safe to compare across;
-#: chapter 10 owns the argument for each.
-NUMERICS_PERFORMANCE_KEYS: frozenset[str] = frozenset(
-    {"matmul_precision", "cudnn_benchmark", "precision"}
+#: opened the chapter at all. The two chapters that carry the split diff
+#: against this and the set below. Until the numerics block existed, three of
+#: these sat in ``runtime.performance`` beside the throughput keys and three in
+#: ``runtime``, and this set was how the code told them apart; now the block
+#: boundary does. Adding a field to ``NumericsConfig`` is a claim that it
+#: changes results; chapter 10 owns the argument for each.
+NUMERICS_KEYS: frozenset[str] = frozenset(
+    item.name for item in fields(NumericsConfig) if item.name != "extra"
 )
 
-#: The complement, derived rather than restated: no key can be in both, and a
-#: new performance key is throughput-only until someone argues otherwise.
-#: ``dataloader`` is excluded because it is a block, not a setting; its own
-#: four keys are throughput-only and chapter 11 documents them.
+#: Every ``runtime.performance`` key, which is all throughput-only now that
+#: the numerics keys have their own block. ``dataloader`` is excluded because
+#: it is a block, not a setting; its own four keys are throughput-only and
+#: chapter 11 documents them.
 THROUGHPUT_ONLY_PERFORMANCE_KEYS: frozenset[str] = (
-    _KNOWN_EXTRA_KEYS["runtime.performance"] - NUMERICS_PERFORMANCE_KEYS - frozenset({"dataloader"})
+    _KNOWN_EXTRA_KEYS["runtime.performance"] - frozenset({"dataloader"})
 ) | _KNOWN_EXTRA_KEYS["runtime.performance.dataloader"]
 
 
@@ -992,59 +1030,71 @@ def _refuse_unread_keys(section: str, keys: Iterable[str], known: frozenset[str]
 
 
 def _validate_performance_values(config: FullConfig) -> None:
-    """Check the three performance values ``configure_runtime`` applies.
+    """Check the performance values ``configure_runtime`` and the executor read.
 
-    matmul_precision is the one key in this block that changes the numbers:
-    "high" and "medium" put fp32 matmuls on TensorFloat32 (10 stored mantissa
-    bits) or a bfloat16 pair (~16), against 24 for "highest". A run at "high"
-    and a run at "highest" are therefore not like-for-like, which is worth
-    failing a typo over rather than silently reverting to "highest".
-
-    The other two were unchecked, and each had its own silent path.
     `torch_num_threads` reaches `int()` and then `torch.set_num_threads`, both
     of which raise on values a config can hold -- `"not-an-int"`, `0`, `-4` --
     and `configure_runtime` caught every exception and returned early, so the
-    matmul_precision line below never ran. `cudnn_benchmark` reaches
-    `bool(...)`, which reads `"false"` as True: a config turning the
-    autotuner off turned it on. Same rule `_validate_extra_bools` applies to
-    the two determinism keys, which are the same kind of key one block up.
-    P04-F07.
+    matmul precision was never applied. P04-F07. The step modes are checked
+    here too, against the numerics block's ``precision``.
     """
 
     performance = config.runtime.extra.get("performance")
-    if not isinstance(performance, Mapping):
-        return
+    if isinstance(performance, Mapping):
+        threads = performance.get("torch_num_threads")
+        if threads is not None and (isinstance(threads, bool) or not isinstance(threads, int)):
+            raise RunRefused(
+                f"runtime.performance.torch_num_threads must be an int, got {threads!r}"
+            )
+        if isinstance(threads, int) and not isinstance(threads, bool) and threads < 1:
+            raise RunRefused(
+                "runtime.performance.torch_num_threads must be at least 1, got "
+                f"{threads!r}. torch.set_num_threads rejects it, and a thread "
+                "count is not a way to say 'let torch decide' -- omit the key."
+            )
+        _validate_executor_values(performance)
+    _validate_step_modes(
+        performance if isinstance(performance, Mapping) else {}, config.numerics.precision
+    )
 
-    threads = performance.get("torch_num_threads")
-    if threads is not None and (isinstance(threads, bool) or not isinstance(threads, int)):
-        raise RunRefused(f"runtime.performance.torch_num_threads must be an int, got {threads!r}")
-    if isinstance(threads, int) and not isinstance(threads, bool) and threads < 1:
-        raise RunRefused(
-            "runtime.performance.torch_num_threads must be at least 1, got "
-            f"{threads!r}. torch.set_num_threads rejects it, and a thread "
-            "count is not a way to say 'let torch decide' -- omit the key."
-        )
 
-    benchmark = performance.get("cudnn_benchmark")
+def _validate_numerics(numerics: NumericsConfig) -> None:
+    """Check the numerics block's values: each changes the numbers, so a typo is refused.
+
+    ``matmul_precision``: torch does not reject an unknown value -- it warns
+    and keeps its setting -- so a typo would run at "highest" while run.json
+    recorded the typo. ``cudnn_benchmark`` and the three flags are read
+    through ``bool()``, which takes any non-empty string, "false" included, as
+    true: a config turning the autotuner off turned it on.
+    """
+
+    for name in ("deterministic", "deterministic_warn_only", "use_amp"):
+        value = getattr(numerics, name)
+        if not isinstance(value, bool):
+            raise RunRefused(f"numerics.{name} must be a bool, got {value!r}")
+    benchmark = numerics.cudnn_benchmark
     if benchmark is not None and not isinstance(benchmark, bool):
         raise RunRefused(
-            f"runtime.performance.cudnn_benchmark must be a bool, got {benchmark!r}. "
+            f"numerics.cudnn_benchmark must be a bool, got {benchmark!r}. "
             "It is read through bool(), which takes any non-empty string -- "
             "including 'false' -- as true."
         )
-
-    _validate_executor_values(performance)
-
-    precision = performance.get("matmul_precision")
-    if precision is None:
-        return
-    if not isinstance(precision, str) or precision not in MATMUL_PRECISIONS:
+    precision = numerics.matmul_precision
+    if precision is not None and (
+        not isinstance(precision, str) or precision not in MATMUL_PRECISIONS
+    ):
         raise RunRefused(
-            "runtime.performance.matmul_precision must be one of "
+            "numerics.matmul_precision must be one of "
             + ", ".join(sorted(MATMUL_PRECISIONS))
             + f", got {precision!r}. torch does not reject an unknown value; "
             "it warns and keeps the current setting, so the run would train at "
             "highest while run.json recorded this."
+        )
+    if numerics.precision not in PRECISIONS:
+        raise RunRefused(
+            "numerics.precision must be one of "
+            + ", ".join(PRECISIONS)
+            + f", got {numerics.precision!r}"
         )
 
 
@@ -1053,8 +1103,8 @@ def _validate_performance_values(config: FullConfig) -> None:
 #: ``sequential``, says so in the plan header, and records why in run.json.
 EXECUTORS: frozenset[str] = frozenset({"sequential", "batched"})
 
-#: What ``runtime.performance.precision`` accepts: the reference, or a mode the
-#: batched executor trains in (chapter 11 §11).
+#: What ``numerics.precision`` accepts: the reference, or a mode the batched
+#: executor trains in (chapter 11 §11).
 PRECISIONS: tuple[str, ...] = ("reference", "f32_f64", "tf32", "bf16")
 
 
@@ -1068,7 +1118,6 @@ def _validate_executor_values(performance: Mapping[str, Any]) -> None:
             + ", ".join(sorted(EXECUTORS))
             + f", got {executor!r}"
         )
-    _validate_step_modes(performance)
     chunk_bytes = performance.get("executor_chunk_bytes")
     if chunk_bytes not in (None, "auto") and (
         isinstance(chunk_bytes, bool) or not isinstance(chunk_bytes, int) or chunk_bytes <= 0
@@ -1079,12 +1128,12 @@ def _validate_executor_values(performance: Mapping[str, Any]) -> None:
         )
 
 
-def _validate_step_modes(performance: Mapping[str, Any]) -> None:
-    """Refuse a compile or precision value the executor does not have, or one without it.
+def _validate_step_modes(performance: Mapping[str, Any], precision: object) -> None:
+    """Refuse a compile or graphs value the executor does not have, or a mode without it.
 
-    Both modes change how the batched executor's step runs, so a config that
-    asks for either without ``executor: batched`` would record a mode that
-    never ran.
+    ``compile``, ``cuda_graphs`` and ``numerics.precision`` change how the
+    batched executor's step runs, so a config that asks for one without
+    ``executor: batched`` would record a mode that never ran.
     """
 
     compiled = performance.get("compile")
@@ -1093,13 +1142,6 @@ def _validate_step_modes(performance: Mapping[str, Any]) -> None:
     graphs = performance.get("cuda_graphs")
     if graphs is not None and graphs not in (True, False, "on", "off"):
         raise RunRefused(f"runtime.performance.cuda_graphs must be on or off, got {graphs!r}")
-    precision = performance.get("precision")
-    if precision is not None and precision not in PRECISIONS:
-        raise RunRefused(
-            "runtime.performance.precision must be one of "
-            + ", ".join(PRECISIONS)
-            + f", got {precision!r}"
-        )
     asked = [
         key
         for key, value in (
@@ -1110,8 +1152,9 @@ def _validate_step_modes(performance: Mapping[str, Any]) -> None:
         if value
     ]
     if asked and performance.get("executor") != "batched":
+        place = "numerics" if asked[0] == "precision" else "runtime.performance"
         raise RunRefused(
-            f"runtime.performance.{asked[0]} is a mode of the batched executor's step; "
+            f"{place}.{asked[0]} is a mode of the batched executor's step; "
             "set runtime.performance.executor: batched"
         )
 
@@ -1126,6 +1169,7 @@ def _validate_unknown_keys(config: FullConfig) -> None:
             getattr(config, section).extra,
             declared.get(section, frozenset()),
         )
+    _validate_known_keys("numerics", config.numerics.extra)
     _validate_known_keys("evaluation", config.evaluation.extra)
     for split in ("train", "val", "test", "central_test", "fit"):
         _validate_known_keys(f"evaluation.{split}", getattr(config.evaluation, split).extra)
@@ -1248,6 +1292,20 @@ _REMOVED_KEYS: dict[tuple[str, str], str] = {
     # and under single_batch that is one optimizer step, not a pass. A config
     # written before the rename is refused rather than read under the new name,
     # so a value nobody has looked at since the rename is not taken on trust.
+    # The numerics keys, moved into a block of their own: everything that
+    # changes the numbers a run produces is in it, and nothing else is.
+    ("runtime", "deterministic"): "moved to numerics.deterministic -- every key that "
+    "changes the numbers a run produces is in the numerics block",
+    ("runtime", "deterministic_warn_only"): "moved to numerics.deterministic_warn_only "
+    "-- every key that changes the numbers a run produces is in the numerics block",
+    ("runtime", "use_amp"): "moved to numerics.use_amp -- every key that changes the "
+    "numbers a run produces is in the numerics block",
+    ("runtime.performance", "matmul_precision"): "moved to numerics.matmul_precision -- "
+    "every key that changes the numbers a run produces is in the numerics block",
+    ("runtime.performance", "cudnn_benchmark"): "moved to numerics.cudnn_benchmark -- "
+    "every key that changes the numbers a run produces is in the numerics block",
+    ("runtime.performance", "precision"): "moved to numerics.precision -- every key "
+    "that changes the numbers a run produces is in the numerics block",
     ("defaults", "local_epochs"): "renamed to defaults.local_iterations, which "
     "counts iterations of the local loop -- what one iteration is depends on "
     "update_mode, docs/04-configuration.md section 2.1. This config predates "
@@ -1337,6 +1395,7 @@ def _reject_restated_keys(
 ) -> None:
     """Fail on config keys that were removed, naming the replacement."""
 
+    runtime = common.get("runtime") or {}
     sections: dict[str, Mapping[str, Any]] = {
         "defaults": common.get("defaults") or {},
         "experiment": common.get("experiment") or {},
@@ -1344,6 +1403,10 @@ def _reject_restated_keys(
         "client": client,
         "model": common.get("model") or {},
         "data": common.get("data") or {},
+        "runtime": _mapping_or_empty(runtime),
+        "runtime.performance": _mapping_or_empty(
+            runtime.get("performance") if isinstance(runtime, Mapping) else None
+        ),
     }
     removed = [
         f"{section}.{key} has been removed ({reason})"
@@ -1357,6 +1420,10 @@ def _reject_restated_keys(
     )
     if removed:
         raise RunRefused("; ".join(removed))
+
+
+def _mapping_or_empty(value: object) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
 
 
 def _infer_data_backend(data: DataConfig) -> str:
@@ -1446,6 +1513,7 @@ def validate_config(config: FullConfig) -> None:
     _validate_unhonoured_client_options(config)
     _refuse_frozen_off_examples(config)
     _validate_unknown_keys(config)
+    _validate_numerics(config.numerics)
     _validate_performance_values(config)
     _validate_output_dir(config)
     if config.experiment.run_id is not None and not isinstance(
@@ -1460,11 +1528,6 @@ def validate_config(config: FullConfig) -> None:
     _validate_metrics("experiment.tags", config.experiment.tags)
     _validate_metrics("server.metrics", config.server.metrics)
     _validate_metrics("client.metrics", config.client.metrics)
-    _validate_extra_bools(
-        "runtime",
-        config.runtime.extra,
-        ("deterministic", "deterministic_warn_only"),
-    )
     _validate_print_every(config.runtime.extra.get("print_every"))
     _validate_flush_every(config.runtime.extra.get("flush_every"))
     _validate_extra_bools(
@@ -1523,6 +1586,13 @@ def _build_data_config(values: Mapping[str, Any]) -> DataConfig:
 def _build_model_config(values: Mapping[str, Any]) -> ModelConfig:
     known, extra = _split_extra(values, ModelConfig)
     return ModelConfig(**known, extra=extra)
+
+
+def _build_numerics_config(values: object) -> NumericsConfig:
+    if not isinstance(values, Mapping):
+        raise RunRefused("numerics must be a mapping")
+    known, extra = _split_extra(values, NumericsConfig)
+    return NumericsConfig(**known, extra=extra)
 
 
 def _build_runtime_config(values: Mapping[str, Any]) -> RuntimeConfig:
@@ -2385,7 +2455,7 @@ def amp_unsupported_sgd_engine_setting(config: FullConfig) -> str | None:
     Returns the offending `client` key, or None when the config is runnable.
     """
 
-    if not config.runtime.use_amp:
+    if not config.numerics.use_amp:
         return None
     if config.client.update_rule not in SGD_ENGINE_CLIENT_RULES:
         return None
@@ -2410,9 +2480,9 @@ def _validate_sgd_engine_amp(config: FullConfig) -> None:
         return
 
     raise RunRefused(
-        f"client.{offending} cannot run under runtime.use_amp: true -- the "
+        f"client.{offending} cannot run under numerics.use_amp: true -- the "
         "local step passes GradScaler a gradient collector with no "
-        "param_groups to unscale. Set runtime.use_amp to false, or choose "
+        "param_groups to unscale. Set numerics.use_amp to false, or choose "
         "another update_mode."
     )
 
@@ -2687,8 +2757,8 @@ def _validate_delta_sgd_options(config: FullConfig) -> None:
 
     # The rule reads the raw gradient off .grad, which the AMP path consumes
     # inside GradScaler.step instead of leaving there.
-    if config.runtime.use_amp:
-        raise RunRefused("delta_sgd is incompatible with runtime.use_amp: true")
+    if config.numerics.use_amp:
+        raise RunRefused("delta_sgd is incompatible with numerics.use_amp: true")
 
 
 def _refuse_frozen_off_examples(config: FullConfig) -> None:
@@ -2775,12 +2845,12 @@ def _validate_fedlalr_options(config: FullConfig) -> None:
 
     # The AMSGrad update reads raw gradients off .grad, which GradScaler.step
     # consumes instead of leaving there.
-    if config.runtime.use_amp:
-        raise RunRefused("fedlalr is incompatible with runtime.use_amp: true")
+    if config.numerics.use_amp:
+        raise RunRefused("fedlalr is incompatible with numerics.use_amp: true")
 
 
 # No _validate_scaffold_options / _validate_fedprox_options: both existed only
-# to refuse runtime.use_amp, and that refusal was lifted once it was measured
+# to refuse numerics.use_amp, and that refusal was lifted once it was measured
 # rather than predicted. Both rules correct .grad inside a wrapper's .step(),
 # and GradScaler.step unscales .grad before delegating to a wrapped optimizer;
 # tests/test_amp_composes_with_wrapped_optimizers.py records the measurement,

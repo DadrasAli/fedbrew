@@ -149,11 +149,12 @@ model:
   target_modules:
     - c_attn
   bias: none
-runtime:
+numerics:
   deterministic: true
   deterministic_warn_only: true
-  device: cpu
   use_amp: false
+runtime:
+  device: cpu
 {resume_line}  checkpointing:
     enabled: true
     interval: 1

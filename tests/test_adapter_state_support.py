@@ -145,11 +145,14 @@ def _config(
             "target_modules": ["c_attn"],
             "bias": "none",
         },
-        "runtime": {
+        "numerics": {
             "deterministic": True,
             "deterministic_warn_only": True,
-            "device": "cpu",
+            "matmul_precision": "highest",
             "use_amp": False,
+        },
+        "runtime": {
+            "device": "cpu",
             "checkpointing": {
                 "enabled": True,
                 "save_last": True,
@@ -157,7 +160,6 @@ def _config(
                 "save_every_round": False,
                 "keep_last": 0,
             },
-            "performance": {"matmul_precision": "highest"},
         },
         "evaluation": evaluation,
         "defaults": {"global_rounds": 1, "local_iterations": 1},

@@ -103,7 +103,7 @@ class TorchFedProxClient(TorchSGDClient[TaskAdapter]):
         if not isinstance(global_state, dict):
             raise ValueError("fit request payload must contain model_state")
 
-        # Composes with runtime.use_amp: GradScaler.step unscales .grad before
+        # Composes with numerics.use_amp: GradScaler.step unscales .grad before
         # delegating to a wrapped optimizer, so _FedProxCorrectingOptimizer.step
         # corrects true-scale gradients. This used to raise here and at config
         # load; both went when it was measured, and

@@ -188,7 +188,8 @@ class ExtensionComponentFixture(unittest.TestCase):
             },
             "data": {"name": "probe_data", "num_clients": 2, "probe_rows": 5},
             "model": {"name": "probe_model", "input_dim": 2},
-            "runtime": {"device": "cpu", "use_amp": False, "deterministic": True},
+            "numerics": {"use_amp": False, "deterministic": True},
+            "runtime": {"device": "cpu"},
             "defaults": {"global_rounds": 4, "local_iterations": 2},
         }
         for dotted, value in overrides.items():

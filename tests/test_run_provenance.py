@@ -139,12 +139,12 @@ def _write_config(directory: Path) -> Path:
               hidden_dim: 4
               num_classes: 2
 
-            runtime:
+            numerics:
               deterministic: true
-              device: cpu
+              matmul_precision: high
               use_amp: false
-              performance:
-                matmul_precision: high
+            runtime:
+              device: cpu
 
             evaluation:
               train:

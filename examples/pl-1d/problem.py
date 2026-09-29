@@ -520,7 +520,7 @@ class PL1DTask(TaskAdapter):
         # `_criterion` ignores its second argument.
         self._criterion = _mean_of_batch
         # Delta-SGD, FedLALR, SCAFFOLD and FedProx read this to decide whether
-        # to refuse `runtime.use_amp: true`. They read it with
+        # to refuse `numerics.use_amp: true`. They read it with
         # `getattr(task, "_scaler", None)`, so a task that never defines it is
         # refused nothing and this line is not required. It is here to put the
         # answer where a reader looking for it will find it.

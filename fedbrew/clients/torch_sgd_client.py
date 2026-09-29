@@ -370,7 +370,7 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
         if self.base_seed is None:
             return "experiment.seed is unset, so the loaders draw from the process-wide stream"
         if getattr(self.task, "_scaler", None) is not None:
-            return "runtime.use_amp is on, and GradScaler's loss scale is sequential state"
+            return "numerics.use_amp is on, and GradScaler's loss scale is sequential state"
         return None
 
     def batched_program(self, request: FitRequest) -> LocalProgram:

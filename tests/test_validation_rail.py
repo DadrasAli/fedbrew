@@ -79,7 +79,7 @@ def _config(
         if data_path
         else DataConfig(name="synthetic_classification", num_clients=4, input_dim=6, num_classes=3),
         model=ModelConfig(name=model, input_dim=6, hidden_dim=8, num_classes=3),
-        runtime=RuntimeConfig(device="cpu", use_amp=False),
+        runtime=RuntimeConfig(device="cpu"),
     )
 
 

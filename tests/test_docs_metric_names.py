@@ -382,7 +382,7 @@ def _minimal_config():
         task=TaskConfig(name="classification"),
         data=DataConfig(name="synthetic_classification"),
         model=ModelConfig(name="mlp"),
-        runtime=RuntimeConfig(device="cpu", use_amp=False),
+        runtime=RuntimeConfig(device="cpu"),
     )
 
 

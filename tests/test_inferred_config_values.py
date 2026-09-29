@@ -66,10 +66,11 @@ BASE = textwrap.dedent("""
       input_dim: 4
       hidden_dim: 8
       num_classes: 2
+    numerics:
+      deterministic: true
+      use_amp: false
     runtime:
       device: cpu
-      use_amp: false
-      deterministic: true
     evaluation:
       train: {every: never}
       val: {every: never}

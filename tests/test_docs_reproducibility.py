@@ -185,14 +185,14 @@ class ThroughputOnlyTest(unittest.TestCase):
         """Guards the guard: an empty numerics set would make the split vacuous."""
 
         from fedbrew.core.config import (
-            NUMERICS_PERFORMANCE_KEYS,
+            NUMERICS_KEYS,
             THROUGHPUT_ONLY_PERFORMANCE_KEYS,
         )
 
-        self.assertTrue(NUMERICS_PERFORMANCE_KEYS)
+        self.assertTrue(NUMERICS_KEYS)
         self.assertTrue(THROUGHPUT_ONLY_PERFORMANCE_KEYS)
-        self.assertEqual(NUMERICS_PERFORMANCE_KEYS & THROUGHPUT_ONLY_PERFORMANCE_KEYS, frozenset())
-        for key in NUMERICS_PERFORMANCE_KEYS:
+        self.assertEqual(NUMERICS_KEYS & THROUGHPUT_ONLY_PERFORMANCE_KEYS, frozenset())
+        for key in NUMERICS_KEYS:
             with self.subTest(key=key):
                 self.assertIn(f"`{key}`", _chapter_text())
 

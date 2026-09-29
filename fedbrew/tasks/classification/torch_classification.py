@@ -265,7 +265,7 @@ class TorchClassificationTask(TaskAdapter):
             # constructed directly. P03-F05.
             if not hasattr(optimizer, "param_groups"):
                 raise TypeError(
-                    "runtime.use_amp needs an optimizer exposing param_groups; "
+                    "numerics.use_amp needs an optimizer exposing param_groups; "
                     f"{type(optimizer).__name__} has none, so GradScaler cannot unscale it"
                 )
             with torch.autocast("cuda", dtype=torch.float16):

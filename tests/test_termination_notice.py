@@ -61,7 +61,7 @@ def _config(**runtime_extra: Any) -> FullConfig:
         task=TaskConfig(name="classification"),
         data=DataConfig(),
         model=ModelConfig(name="mlp"),
-        runtime=RuntimeConfig(device="cpu", use_amp=False, extra=runtime_extra),
+        runtime=RuntimeConfig(device="cpu", extra=runtime_extra),
     )
 
 

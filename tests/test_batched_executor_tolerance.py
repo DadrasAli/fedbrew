@@ -132,7 +132,7 @@ class ExecutorRuns(unittest.TestCase):
         config = copy.deepcopy(config)
         output = self.root / f"run{self._count}-{executor}"
         config["experiment"]["output_dir"] = str(output)
-        config["runtime"].setdefault("performance", {}).update(executor=executor, **performance)
+        set_performance(config, executor=executor, **performance)
         path = self.root / f"run{self._count}.yaml"
         path.write_text(yaml.safe_dump(config), encoding="utf-8")
         run(path, args=None)
@@ -456,6 +456,14 @@ ENGINE_OPTIONS = (
 #: (measured 2026-09-27). The float64 fixture below holds the same code to
 #: TOLERANCE.
 FLOAT32_TOLERANCE = 1e-4
+
+
+def set_performance(config: dict[str, Any], **performance: Any) -> None:
+    """Set runtime.performance keys, and the step precision where it lives, in numerics."""
+
+    if "precision" in performance:
+        config.setdefault("numerics", {})["precision"] = performance.pop("precision")
+    config["runtime"].setdefault("performance", {}).update(performance)
 
 
 def classification_config(**client: Any) -> dict[str, Any]:

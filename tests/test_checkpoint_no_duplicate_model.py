@@ -193,10 +193,11 @@ def _write_config(directory: Path, hidden: int = 512) -> Path:
               input_dim: 64
               hidden_dim: {hidden}
               num_classes: 10
-            runtime:
+            numerics:
               deterministic: true
-              device: cpu
               use_amp: false
+            runtime:
+              device: cpu
             evaluation:
               train:
                 every: 1

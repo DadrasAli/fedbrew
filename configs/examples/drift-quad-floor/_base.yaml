@@ -55,11 +55,24 @@ model:
   # regardless of kappa, and the table then measures the start.
   x_init: 1.0
 
-runtime:
-  device: cpu
-  use_amp: false
+# Every key here changes the numbers a run produces, and arms compared
+# against each other must agree on all of them (docs/04 section 7.5).
+numerics:
   deterministic: true
   deterministic_warn_only: false
+  # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
+  # mantissa bits. Irrelevant at d = 16, written out because a config that
+  # omits it is not comparable with one that sets it.
+  matmul_precision: highest
+  # Also numerics-changing, and also irrelevant here: this arm runs on the
+  # CPU and touches no cuDNN kernel. Written because "irrelevant" and
+  # "unstated" are different claims, and only the first is the intended one.
+  cudnn_benchmark: false
+  precision: reference
+  use_amp: false
+
+runtime:
+  device: cpu
   checkpointing:
     enabled: true
     interval: 100000
@@ -70,15 +83,6 @@ runtime:
     save_every_round: false
     keep_last: 0
   performance:
-    # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
-    # mantissa bits. Irrelevant at d = 16, written out because a config that
-    # omits it is not comparable with one that sets it.
-    matmul_precision: highest
-    # Also numerics-changing, and also irrelevant here: this arm runs on the
-    # CPU and touches no cuDNN kernel. Written because "irrelevant" and
-    # "unstated" are different claims, and only the first is the intended one.
-    cudnn_benchmark: false
-    precision: reference
     # One thread. These problems are 16-dimensional and torch keeps an
     # intra-op region on one thread below a grain size of 32768 elements, so
     # no reduction here is threaded at any setting. The pin states the number

@@ -276,10 +276,10 @@ class RefusedOptionTest(unittest.TestCase):
     def test_delta_sgd_still_refuses_amp(self) -> None:
         source = (REPO_ROOT / "fedbrew" / "core" / "config.py").read_text(encoding="utf-8")
         self.assertIn(
-            "delta_sgd is incompatible with runtime.use_amp: true",
+            "delta_sgd is incompatible with numerics.use_amp: true",
             source,
         )
-        self.assertIn("Incompatible with `runtime.use_amp: true`", _chapter_text())
+        self.assertIn("Incompatible with `numerics.use_amp: true`", _chapter_text())
 
 
 class CitedPathsTest(unittest.TestCase):

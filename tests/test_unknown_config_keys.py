@@ -223,6 +223,7 @@ class RootKeysTest(unittest.TestCase):
                 "data",
                 "model",
                 "runtime",
+                "numerics",
                 "evaluation",
                 "client_statistics",
                 "divergence",

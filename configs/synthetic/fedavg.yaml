@@ -64,17 +64,29 @@ model:
   hidden_dim: 32
   num_classes: 10
 
-runtime:
+# Every key here changes the numbers a run produces, and arms compared
+# against each other must agree on all of them (docs/04 section 7.5).
+numerics:
   deterministic: true
   # Strict: raise on a nondeterministic kernel rather than warn once on
   # stderr. See configs/mnist/fedavg.yaml's identical comment -- this is the
   # same MLP-on-CPU/CUDA arithmetic, so the same guarantee holds.
   deterministic_warn_only: false
+  # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
+  # mantissa bits, where "high" drops them to TF32's 10 or a bfloat16 pair's
+  # ~16. torch's own default, written out rather than left implicit --
+  # absent and "highest" are the same run but not the same document. Keep it
+  # identical across every arm of a comparison.
+  matmul_precision: highest
+  cudnn_benchmark: false
+  precision: reference
+  use_amp: false
+
+runtime:
   # Pinned rather than auto, unlike the mnist family: the README says this
   # exact command runs on CPU in about a minute, and a GPU host resolving auto to
   # cuda would pay a warm-up tax on a model this small for no benefit.
   device: cpu
-  use_amp: false
   checkpointing:
     enabled: true
     interval: 100000
@@ -84,14 +96,6 @@ runtime:
     keep_last: 0
     save_every_round: false
   performance:
-    # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
-    # mantissa bits, where "high" drops them to TF32's 10 or a bfloat16 pair's
-    # ~16. torch's own default, written out rather than left implicit --
-    # absent and "highest" are the same run but not the same document. Keep it
-    # identical across every arm of a comparison.
-    matmul_precision: highest
-    cudnn_benchmark: false
-    precision: reference
     # Absent from the mnist family, which this config otherwise mirrors --
     # added here because this one is the config every reader runs first, and
     # left unset it was not fine. This workload is the same shape as

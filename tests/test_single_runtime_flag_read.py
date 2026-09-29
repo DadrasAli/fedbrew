@@ -1,4 +1,4 @@
-"""``runtime.deterministic`` is read once and passed down.
+"""``numerics.deterministic`` is read once and passed down.
 
 It used to be read twice, in ``runner.run`` and again in
 ``runtime_setup.configure_runtime``, each supplying its own ``False``.
@@ -54,7 +54,12 @@ OWNER = "runner.py"
 
 
 def _reads_of(flag: str) -> list[str]:
-    """Every ``...extra.get("<flag>", ...)`` or ``_runtime_extra_bool`` site."""
+    """Every read site: ``....numerics.<flag>``, or the old ``extra.get``/helper shapes.
+
+    The first is how the flag is read now that it is a numerics field; the
+    other two are how it was read from ``runtime``, kept so a read in the old
+    shape is still caught.
+    """
 
     found = []
     for path in sorted(CORE.rglob("*.py")):
@@ -62,6 +67,15 @@ def _reads_of(flag: str) -> list[str]:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr == flag
+                and isinstance(node.value, ast.Attribute)
+                and node.value.attr == "numerics"
+                and isinstance(node.ctx, ast.Load)
+            ):
+                found.append(f"{path.name}:{node.lineno}")
+                continue
             if not isinstance(node, ast.Call) or not node.args:
                 continue
             first = node.args[0] if not isinstance(node.func, ast.Attribute) else None
@@ -96,7 +110,7 @@ class OneReadPerFlagTest(unittest.TestCase):
                 self.assertEqual(
                     sites,
                     [],
-                    f"runtime.{flag} is read outside {OWNER}: {sites}. It is "
+                    f"numerics.{flag} is read outside {OWNER}: {sites}. It is "
                     f"resolved in {OWNER} and passed down; a second read "
                     "carries a second default and a second idea of what the "
                     "key accepts, and the two agree only until one changes.",

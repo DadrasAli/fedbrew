@@ -986,7 +986,7 @@ class FedLassoTask(TaskAdapter):
         # `criterion(outputs, targets)`".
         self._criterion = _composite_loss
         # Read as `getattr(task, "_scaler", None)` by four client rules, to
-        # decide whether to refuse `runtime.use_amp: true`.
+        # decide whether to refuse `numerics.use_amp: true`.
         self._scaler: Any = None
 
     # -- TaskAdapter --------------------------------------------------------

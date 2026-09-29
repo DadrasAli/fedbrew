@@ -47,13 +47,13 @@ from fedbrew.core.config import (
     ExperimentConfig,
     FullConfig,
     ModelConfig,
+    NumericsConfig,
     RuntimeConfig,
     ServerConfig,
     SplitEvaluationConfig,
     TaskConfig,
     client_metric_names,
 )
-from fedbrew.core.runner import _runtime_extra_bool
 
 pytestmark = pytest.mark.fast
 
@@ -64,6 +64,7 @@ def _config(
     *,
     output_dir: str = "outputs/plan-header-test",
     runtime_extra: dict[str, object] | None = None,
+    numerics: dict[str, object] | None = None,
     strategy: str = "fedavg",
     update_rule: str = "local_sgd",
     model_scope: str = "global",
@@ -96,7 +97,8 @@ def _config(
         task=TaskConfig(name="classification"),
         data=DataConfig(name="synthetic_classification", num_clients=num_clients),
         model=ModelConfig(name="mlp"),
-        runtime=RuntimeConfig(device="cpu", use_amp=False, extra=dict(runtime_extra or {})),
+        runtime=RuntimeConfig(device="cpu", extra=dict(runtime_extra or {})),
+        numerics=NumericsConfig(**(numerics or {})),
         client_statistics=ClientStatisticsConfig(),
         evaluation=EvaluationConfig(
             train=SplitEvaluationConfig(every=10, clients="participating"),
@@ -109,16 +111,15 @@ def _config(
 
 
 def _determinism(config: FullConfig) -> dict[str, bool]:
-    """The two flags the header no longer reads, resolved the way run() does.
+    """The two flags the header no longer reads, taken where run() takes them.
 
-    Through runner's own helper rather than a literal, so a test that sets
-    them in ``runtime_extra`` still drives the header, and so the resolver
-    and the header cannot drift apart without a test noticing.
+    From the config's numerics block, as run() and --validate-only do, so a
+    test that sets them there still drives the header.
     """
 
     return {
-        "deterministic": _runtime_extra_bool(config, "deterministic", False),
-        "deterministic_warn_only": _runtime_extra_bool(config, "deterministic_warn_only", False),
+        "deterministic": config.numerics.deterministic,
+        "deterministic_warn_only": config.numerics.deterministic_warn_only,
     }
 
 
@@ -279,13 +280,13 @@ class AmberIsScarceTest(unittest.TestCase):
         with TemporaryDirectory() as empty:
             strict = _config(
                 output_dir=empty,
-                runtime_extra={"deterministic": True},
+                numerics={"deterministic": True},
             )
             self.assertEqual(_amber_lines(strict), [])
 
             warn_only = _config(
                 output_dir=empty,
-                runtime_extra={"deterministic": True, "deterministic_warn_only": True},
+                numerics={"deterministic": True, "deterministic_warn_only": True},
             )
             lines = _amber_lines(warn_only)
             self.assertEqual(len(lines), 1)
@@ -295,7 +296,7 @@ class AmberIsScarceTest(unittest.TestCase):
         with TemporaryDirectory() as empty:
             highest = _config(
                 output_dir=empty,
-                runtime_extra={"performance": {"matmul_precision": "highest"}},
+                numerics={"matmul_precision": "highest"},
             )
             self.assertEqual(
                 _amber_lines(highest),
@@ -306,7 +307,7 @@ class AmberIsScarceTest(unittest.TestCase):
 
             high = _config(
                 output_dir=empty,
-                runtime_extra={"performance": {"matmul_precision": "high"}},
+                numerics={"matmul_precision": "high"},
             )
             lines = _amber_lines(high)
             self.assertEqual(len(lines), 1)

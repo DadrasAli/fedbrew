@@ -1760,8 +1760,8 @@ def _batched_check(components: Any) -> tuple[str | None, nn.Module | None]:
     config = components.config
     if config.server.strategy == "centralized":
         return "the centralized strategy trains one client, so there is nothing to batch", None
-    if config.runtime.use_amp:
-        return "runtime.use_amp is on, and GradScaler's loss scale is sequential state", None
+    if config.numerics.use_amp:
+        return "numerics.use_amp is on, and GradScaler's loss scale is sequential state", None
     task = components.task
     if not isinstance(task, BatchableTask):
         return (
@@ -1821,7 +1821,7 @@ def select_executor(
     if performance.get("executor", "sequential") != "batched":
         return None, {"used": "sequential"}
     compile_asked = compile_mode(performance.get("compile"))
-    precision_asked = str(performance.get("precision", "reference"))
+    precision_asked = str(components.config.numerics.precision)
     reason, model = _batched_check(components)
     if reason is not None:
         record = {"used": "sequential", "fallback": reason}

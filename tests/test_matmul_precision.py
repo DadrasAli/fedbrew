@@ -1,4 +1,4 @@
-"""matmul_precision is the one performance key that changes the numbers.
+"""matmul_precision changes the numbers, and is in the numerics block for it.
 
 torch.set_float32_matmul_precision("high") puts every fp32 matmul on
 TensorFloat32 (10 stored mantissa bits) or a bfloat16 pair (~16), against 24
@@ -43,7 +43,7 @@ _CHANGES_NUMERICS_HEADING = "**do** change numerics"
 class MatmulPrecisionValueTest(unittest.TestCase):
     def _config(self, precision: object) -> object:
         config = load_config("configs/femnist/fedavg.yaml")
-        config.runtime.extra["performance"]["matmul_precision"] = precision
+        config.numerics.matmul_precision = precision
         return config
 
     def test_a_typo_is_refused_at_config_load(self) -> None:
@@ -61,7 +61,7 @@ class MatmulPrecisionValueTest(unittest.TestCase):
 
     def test_leaving_it_unset_is_still_allowed(self) -> None:
         config = load_config("configs/femnist/fedavg.yaml")
-        config.runtime.extra["performance"].pop("matmul_precision")
+        config.numerics.matmul_precision = None
         validate_config(config)
 
 
@@ -103,16 +103,11 @@ class MatmulPrecisionIsRecordedTest(unittest.TestCase):
 
     def _runtime(self, precision: str | None) -> dict[str, object]:
         config = load_config("configs/femnist/fedavg.yaml")
-        performance = config.runtime.extra["performance"]
-        if precision is None:
-            performance.pop("matmul_precision", None)
-        else:
-            performance["matmul_precision"] = precision
+        config.numerics.matmul_precision = precision
         config.runtime.device = "cpu"
         # Passed explicitly since configure_runtime stopped reading it: the
         # runner owns the one read, and this is what it would hand over.
-        deterministic = bool(config.runtime.extra.get("deterministic", False))
-        return configure_runtime(config, deterministic)
+        return configure_runtime(config, config.numerics.deterministic)
 
     def test_the_configured_value_is_the_one_reported(self) -> None:
         for precision in ("highest", "high", "medium"):

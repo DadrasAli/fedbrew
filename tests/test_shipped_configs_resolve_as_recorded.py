@@ -19,7 +19,11 @@ Two differences are allowed, both declared here rather than taken on trust:
   already were. Every other inferred value, the 79 inferred output
   directories among them, must equal the one the file used to state;
 - a key a step moved, under ``MOVED``: compared at its new place against the
-  value recorded at its old one.
+  value recorded at its old one -- or, where the record has none because the
+  config left it out, against the value its old reader took then
+  (``MOVED_FROM_ABSENT``). The numerics block's six keys moved out of
+  ``runtime`` and ``runtime.performance``; every shipped config states all
+  six now, where some left ``deterministic_warn_only`` to its default.
 """
 
 from __future__ import annotations
@@ -33,7 +37,26 @@ import pytest
 from tests.shipped_resolved_configs import RECORD, resolved, shipped_run_configs
 
 #: Resolved keys that moved, new place -> the place the record has them at.
-MOVED: dict[str, str] = {}
+MOVED: dict[str, str] = {
+    "numerics.deterministic": "runtime.extra.deterministic",
+    "numerics.deterministic_warn_only": "runtime.extra.deterministic_warn_only",
+    "numerics.matmul_precision": "runtime.extra.performance.matmul_precision",
+    "numerics.cudnn_benchmark": "runtime.extra.performance.cudnn_benchmark",
+    "numerics.precision": "runtime.extra.performance.precision",
+    "numerics.use_amp": "runtime.use_amp",
+    # The new block's own record of unknown keys, empty in every config.
+    "numerics.extra": "numerics.extra",
+}
+
+#: A moved key's old place -> what its reader took when a config left it out.
+MOVED_FROM_ABSENT: dict[str, Any] = {
+    "runtime.extra.deterministic": False,
+    "runtime.extra.deterministic_warn_only": False,
+    "runtime.extra.performance.matmul_precision": None,
+    "runtime.extra.performance.cudnn_benchmark": None,
+    "runtime.extra.performance.precision": "reference",
+    "numerics.extra": {},
+}
 
 #: Inferred keys whose inferred value may differ from the recorded one.
 INFERRED_AND_CHANGED = frozenset({"experiment.name"})
@@ -51,6 +74,8 @@ def _differences(before: dict[str, Any], now: dict[str, Any]) -> list[str]:
         if key not in moved_back:
             differences.append(f"{key}: {before[key]!r} -> (gone)")
         elif key not in before:
+            if key in MOVED_FROM_ABSENT and moved_back[key] == MOVED_FROM_ABSENT[key]:
+                continue
             differences.append(f"{key}: (new) -> {moved_back[key]!r}")
         elif before[key] != moved_back[key]:
             differences.append(f"{key}: {before[key]!r} -> {moved_back[key]!r}")

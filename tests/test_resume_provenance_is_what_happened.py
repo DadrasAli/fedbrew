@@ -80,10 +80,11 @@ model:
   input_dim: 8
   hidden_dim: 16
   num_classes: 4
-runtime:
+numerics:
   deterministic: true
-  device: cpu
   use_amp: false
+runtime:
+  device: cpu
   checkpointing: {{enabled: true, interval: 1, save_last: true, save_best: false}}
 evaluation:
   train: {{every: 1, clients: all}}

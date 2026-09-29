@@ -179,10 +179,9 @@ def _write_config(root: Path, *, seed: int = 42, rounds: int = 3, **participatio
         },
         "data": {"num_clients": 2, "samples_per_client": 8, "input_dim": 4, "num_classes": 2},
         "model": {"name": "mlp", "input_dim": 4, "hidden_dim": 4, "num_classes": 2},
+        "numerics": {"deterministic": True, "use_amp": False},
         "runtime": {
-            "deterministic": True,
             "device": "cpu",
-            "use_amp": False,
             "checkpointing": {
                 "enabled": True,
                 "save_last": False,

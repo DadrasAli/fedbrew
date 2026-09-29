@@ -90,11 +90,13 @@ client:
     - communicated_parameters
     - communicated_bytes
 
-runtime:
+numerics:
   # Must stay false. The step-size rule reads the raw gradient off .grad,
   # which GradScaler.step consumes instead of leaving there; validation
   # rejects the combination rather than training on scaled gradients.
   use_amp: false
+
+runtime:
   checkpointing:
     best_metric: val_accuracy_sample_weighted_avg
   performance:

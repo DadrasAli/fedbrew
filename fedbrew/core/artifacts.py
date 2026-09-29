@@ -829,7 +829,7 @@ def save_run_json(
         if isinstance(value, Mapping) and value:
             reproducibility[key] = dict(value)
     # seed_everything reads torch's flags at seeding time, which is before
-    # configure_runtime applies the performance block: its matmul_precision
+    # configure_runtime applies numerics.matmul_precision: its matmul_precision
     # says "highest" on a run that trains at "high". Keeping both would put a
     # stale value beside the effective one for the single key that changes
     # every fp32 matmul. The runtime record is the effective one, so seeding

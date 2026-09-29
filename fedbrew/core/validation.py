@@ -530,14 +530,14 @@ def _validate_task(config: FullConfig, issues: list[ValidationIssue]) -> None:
     # config was accepted, echoed into run.json, and ignored -- the task takes
     # no such argument and its train_step has no autocast. `factory` raises on
     # it; this is the same fact said before anything is built. P03-F07.
-    if config.runtime.use_amp and task.name not in AMP_AWARE_TASKS:
+    if config.numerics.use_amp and task.name not in AMP_AWARE_TASKS:
         _add(
             issues,
             "error",
             "task.amp_unsupported",
-            f"task {task.name!r} has no mixed-precision path, so runtime.use_amp "
+            f"task {task.name!r} has no mixed-precision path, so numerics.use_amp "
             "would be recorded in run.json and ignored",
-            "Set runtime.use_amp to false.",
+            "Set numerics.use_amp to false.",
         )
 
 
@@ -1081,9 +1081,9 @@ def _validate_shipped_algorithm_compatibility(
             issues,
             "error",
             "algorithm.sgd_engine_amp_unsupported",
-            f"client.{sgd_engine_setting} cannot run under runtime.use_amp: "
+            f"client.{sgd_engine_setting} cannot run under numerics.use_amp: "
             "GradScaler has no param_groups to unscale",
-            "Set runtime.use_amp to false, or choose another update_mode.",
+            "Set numerics.use_amp to false, or choose another update_mode.",
         )
     if server_is_scaffold:
         _add_scaffold_notices(config, issues)
@@ -1247,13 +1247,13 @@ def _validate_fedlalr(
             "It is the floor on v_hat, so 1/sqrt(v_hat) stays bounded by 1/epsilon.",
         )
 
-    if config.runtime.use_amp:
+    if config.numerics.use_amp:
         _add(
             issues,
             "error",
             "algorithm.fedlalr_amp_unsupported",
-            "fedlalr reads raw gradients and cannot run under runtime.use_amp",
-            "Set runtime.use_amp to false.",
+            "fedlalr reads raw gradients and cannot run under numerics.use_amp",
+            "Set numerics.use_amp to false.",
         )
 
     if config.server.extra.get("aggregation_weighting") != "uniform":
@@ -1322,13 +1322,13 @@ def _validate_delta_sgd(
                 f"Choose one of: {', '.join(sorted(allowed))}.",
             )
 
-    if config.runtime.use_amp:
+    if config.numerics.use_amp:
         _add(
             issues,
             "error",
             "algorithm.delta_sgd_amp_unsupported",
-            "delta_sgd reads raw gradients and cannot run under runtime.use_amp",
-            "Set runtime.use_amp to false.",
+            "delta_sgd reads raw gradients and cannot run under numerics.use_amp",
+            "Set numerics.use_amp to false.",
         )
 
     if config.server.extra.get("aggregation_weighting") != "uniform":

@@ -235,7 +235,7 @@ reproduced from its record starts from a clean checkout.
 
 **`seeding` and `runtime` are deduplicated, and `runtime` wins.**
 `seed_everything` reads torch's flags at seeding time, which is *before*
-`configure_runtime` applies the performance block — so its `matmul_precision`
+`configure_runtime` applies `numerics.matmul_precision` — so its `matmul_precision`
 says `highest` on a run that trains at `high`. Keeping both would put a stale
 value beside the effective one for the single key that changes every fp32
 matmul. Any key present in both is removed from `seeding`

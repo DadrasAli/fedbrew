@@ -711,7 +711,7 @@ class DriftQuadTask(TaskAdapter):
         _check_model_against_reference(model_config or {}, self.reference)
         self._criterion = _mean_of_batch
         # Read as `getattr(task, "_scaler", None)` by four client rules, to
-        # decide whether to refuse `runtime.use_amp: true`. Set explicitly so
+        # decide whether to refuse `numerics.use_amp: true`. Set explicitly so
         # the answer is where a reader will look for it.
         self._scaler: Any = None
 

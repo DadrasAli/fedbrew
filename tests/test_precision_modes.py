@@ -1,4 +1,4 @@
-"""``runtime.performance.precision`` trains in lower precision, within its measured bound.
+"""``numerics.precision`` trains in lower precision, within its measured bound.
 
 Each mode changes only the batched executor's training step; the update
 arithmetic and every evaluation stay at the model's precision (chapter 11
@@ -42,6 +42,7 @@ from tests.test_batched_executor_tolerance import (
     ExecutorRuns,
     classification_rule_config,
     example_config,
+    set_performance,
 )
 from tests.test_fed_lasso_evaluates_on_its_device import _cuda_usable
 from tests.test_reproducibility import TIMING
@@ -112,9 +113,7 @@ class F32F64Test(ModeRuns):
 
     def test_a_group_steps_each_setting_as_alone(self) -> None:
         base = copy.deepcopy(example_config("fed-lasso-l2"))
-        base["runtime"].setdefault("performance", {}).update(
-            executor="batched", precision="f32_f64"
-        )
+        set_performance(base, executor="batched", precision="f32_f64")
         configs = []
         for rate in (0.004, 0.008):
             config = copy.deepcopy(base)
@@ -173,7 +172,7 @@ class AModeThatDoesNotApplyRunsTheReferenceTest(ModeRuns):
 class ConfigTest(unittest.TestCase):
     def _load(self, **performance: Any) -> None:
         config = example_config("fed-lasso")
-        config["runtime"].setdefault("performance", {}).update(performance)
+        set_performance(config, **performance)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.yaml"
             path.write_text(yaml.safe_dump(config), encoding="utf-8")

@@ -155,11 +155,13 @@ def _config(
             "num_classes": 2,
             "dropout": DROPOUT,
         },
-        "runtime": {
+        "numerics": {
             "deterministic": True,
             "deterministic_warn_only": False,
-            "device": "cpu",
             "use_amp": False,
+        },
+        "runtime": {
+            "device": "cpu",
             "checkpointing": {
                 "enabled": True,
                 "save_last": True,

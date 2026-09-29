@@ -63,10 +63,11 @@ BASE = textwrap.dedent("""
       input_dim: 4
       hidden_dim: 8
       num_classes: 2
+    numerics:
+      deterministic: true
+      use_amp: false
     runtime:
       device: cpu
-      use_amp: false
-      deterministic: true
     defaults:
       global_rounds: 3
       local_iterations: 1
@@ -268,7 +269,7 @@ class AShippedArmShownTest(unittest.TestCase):
         text = out.getvalue()
         printed = yaml.safe_load(text)
         self.assertEqual(printed["client"]["update_rule"], "fedavg")
-        self.assertEqual(printed["runtime"]["performance"]["matmul_precision"], "highest")
+        self.assertEqual(printed["numerics"]["matmul_precision"], "highest")
         self.assertIn(
             "  output_dir: outputs/examples/drift-quad/fedavg  # inferred from the config path",
             text,

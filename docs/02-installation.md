@@ -148,7 +148,7 @@ None are required. All are read, never written — the one exception is
 | `FL_CACHE_ROOT` | `check-hpc` | Downloaded/raw dataset cache. |
 | `FL_LOCAL_SCRATCH` | `check-hpc` | Node-local scratch, for job-local staging only. |
 | `COMMON_DATASETS` | `list-common-datasets`, CIFAR-10 root resolution in `fedbrew/data/generate.py` | Optional site-wide read-only dataset directory. |
-| `CUBLAS_WORKSPACE_CONFIG` | `fedbrew/core/runtime_setup.py` | **Set** to `:4096:8` when `runtime.deterministic` is true, and only if not already set. Required for deterministic CUDA matmuls. |
+| `CUBLAS_WORKSPACE_CONFIG` | `fedbrew/core/runtime_setup.py` | **Set** to `:4096:8` when `numerics.deterministic` is true, and only if not already set. Required for deterministic CUDA matmuls. |
 | `HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE` | `fedbrew/core/run_metadata.py` | Not written by the package — read and recorded in `run.json`. |
 
 Config paths run through `os.path.expandvars` and `os.path.expanduser`
@@ -248,7 +248,7 @@ python -m pytest
    `tests/test_cli_commands_exist.py`, and its flags by
    `tests/test_cli_flags_exist.py`.
 2. **`CUBLAS_WORKSPACE_CONFIG` is the only variable the package writes**, only under
-   `runtime.deterministic: true`, and only when not already set. Everything
+   `numerics.deterministic: true`, and only when not already set. Everything
    else is read.
 3. **An unexpanded `$NAME` in a path means unset.** Never let a literal
    `$VARIABLE` become a directory name.

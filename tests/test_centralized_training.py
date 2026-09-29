@@ -95,11 +95,12 @@ def _write_config(
               hidden_dim: 4
               num_classes: 2
 
-            runtime:
+            numerics:
               deterministic: true
               deterministic_warn_only: true
-              device: cpu
               use_amp: false
+            runtime:
+              device: cpu
 
             evaluation:
               train:

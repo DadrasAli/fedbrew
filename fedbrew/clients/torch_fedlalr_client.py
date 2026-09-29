@@ -135,7 +135,7 @@ class TorchFedLALRClient(TorchSGDClient):
         # The rule reads raw gradients off .grad, which GradScaler.step
         # consumes instead of leaving there.
         if getattr(self.task, "_scaler", None) is not None:
-            raise ValueError("fedlalr does not support runtime.use_amp: true")
+            raise ValueError("fedlalr does not support numerics.use_amp: true")
 
         device = self.task.device
         momentum = _broadcast_state(request.payload, "momentum_state", device)

@@ -194,7 +194,7 @@ what leaves the client.
 
 Chapter 08 §2 gives both formulas, and chapter 11 §9 the batched executor.
 
-**`runtime.use_amp: true` on `causal_lm` is refused, not ignored.**
+**`numerics.use_amp: true` on `causal_lm` is refused, not ignored.**
 `TorchCausalLMTask` takes no `use_amp` and its `train_step` has no `autocast`
 or `GradScaler`, and the factory passed the flag to the classification task
 only. So an LLM config could set it, pass validation, be echoed into

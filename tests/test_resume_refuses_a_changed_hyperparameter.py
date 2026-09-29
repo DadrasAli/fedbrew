@@ -652,10 +652,11 @@ model:
   input_dim: 8
   hidden_dim: 16
   num_classes: 4
-runtime:
+numerics:
   deterministic: true
-  device: cpu
   use_amp: false
+runtime:
+  device: cpu
   checkpointing:
     enabled: true
     interval: 1
@@ -890,10 +891,11 @@ model:
   input_dim: 8
   hidden_dim: 16
   num_classes: 4
-runtime:
+numerics:
   deterministic: true
-  device: cpu
   use_amp: false
+runtime:
+  device: cpu
   checkpointing:
     enabled: true
     interval: 1

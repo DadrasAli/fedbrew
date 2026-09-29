@@ -590,10 +590,7 @@ def _resolved_device(device: str) -> str:
 
 
 def _matmul_precision(config: FullConfig) -> str | None:
-    performance = config.runtime.extra.get("performance")
-    if not isinstance(performance, Mapping):
-        return None
-    precision = performance.get("matmul_precision")
+    precision = config.numerics.matmul_precision
     return None if precision is None else str(precision)
 
 

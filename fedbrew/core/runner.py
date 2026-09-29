@@ -100,16 +100,12 @@ def run(
     config = load_config(common_path)
     if args is not None:
         config = apply_cli_overrides(config, args)
-    deterministic = _runtime_extra_bool(config, "deterministic", False)
+    deterministic = config.numerics.deterministic
     # Strict by default: a config that says deterministic: true and does not
     # say otherwise gets determinism, not a warning about the lack of it.
     # An arm that cannot afford the deterministic kernel opts out in its own
     # config, where the cost is visible.
-    deterministic_warn_only = _runtime_extra_bool(
-        config,
-        "deterministic_warn_only",
-        False,
-    )
+    deterministic_warn_only = config.numerics.deterministic_warn_only
     configure_deterministic_environment(deterministic)
     config, run_metadata, index_root = resolve_run_metadata(config)
     # Both of these return what they actually did -- the seeds they set, the
@@ -478,7 +474,7 @@ def config_differences(
     """
 
     current = _as_written(asdict(config))
-    before = _as_written(recorded)
+    before = _with_numerics_moved(_as_written(recorded))
     skipped = set(_NOT_CONFIGURATION)
     staging = config.runtime.extra.get("data_staging")
     if isinstance(staging, Mapping) and staging.get("enabled"):
@@ -498,6 +494,39 @@ def config_differences(
 
     walk(before, current, "")
     return differences
+
+
+def _with_numerics_moved(recorded: Mapping[str, Any]) -> dict[str, Any]:
+    """A run.json config from before the numerics block, with its six keys where they are now.
+
+    Such a record holds them under ``runtime`` (``use_amp``, and
+    ``deterministic`` and ``deterministic_warn_only`` in its ``extra``) and
+    ``runtime.extra.performance``. Compared as recorded, they would be keys
+    present on one side only, and a resume that changed the arithmetic would
+    not be refused.
+    """
+
+    before = dict(recorded)
+    if "numerics" in before or not isinstance(before.get("runtime"), Mapping):
+        return before
+    runtime = dict(before["runtime"])
+    extra = dict(runtime.get("extra") or {})
+    performance = dict(extra.get("performance") or {})
+    numerics: dict[str, Any] = {}
+    if "use_amp" in runtime:
+        numerics["use_amp"] = runtime.pop("use_amp")
+    for name in ("deterministic", "deterministic_warn_only"):
+        if name in extra:
+            numerics[name] = extra.pop(name)
+    for name in ("matmul_precision", "cudnn_benchmark", "precision"):
+        if name in performance:
+            numerics[name] = performance.pop(name)
+    if "performance" in extra:
+        extra["performance"] = performance
+    runtime["extra"] = extra
+    before["runtime"] = runtime
+    before["numerics"] = numerics
+    return before
 
 
 def _as_written(value: Any) -> Any:
@@ -1146,8 +1175,8 @@ def _run_preflight(args: argparse.Namespace) -> bool:
         # rather than its own reading of the same two keys.
         print_plan_header(
             config,
-            deterministic=_runtime_extra_bool(config, "deterministic", False),
-            deterministic_warn_only=_runtime_extra_bool(config, "deterministic_warn_only", False),
+            deterministic=config.numerics.deterministic,
+            deterministic_warn_only=config.numerics.deterministic_warn_only,
             surface=surface,
         )
     print_validation_verdict(report, surface)

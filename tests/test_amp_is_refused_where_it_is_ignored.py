@@ -1,4 +1,4 @@
-"""`runtime.use_amp: true` on a task with no AMP path is refused, not ignored.
+"""`numerics.use_amp: true` on a task with no AMP path is refused, not ignored.
 
 `TorchCausalLMTask.__init__` takes no `use_amp` and its `train_step` has no
 `autocast` or `GradScaler`. The factory passed the flag only to the
@@ -134,12 +134,12 @@ class TheFactoryRefusesTest(unittest.TestCase):
         self.config = _load_without_data(LLM_CONFIG)
 
     def test_the_shipped_setting_is_accepted(self) -> None:
-        self.assertFalse(self.config.runtime.use_amp)
+        self.assertFalse(self.config.numerics.use_amp)
         _refuse_amp_a_task_cannot_honour(self.config)
 
     def test_turning_it_on_is_refused(self) -> None:
         config = copy.deepcopy(self.config)
-        config.runtime.use_amp = True
+        config.numerics.use_amp = True
         with self.assertRaises(ValueError) as caught:
             _refuse_amp_a_task_cannot_honour(config)
         message = str(caught.exception)
@@ -153,7 +153,7 @@ class TheFactoryRefusesTest(unittest.TestCase):
         for use_amp in (True, False):
             with self.subTest(use_amp=use_amp):
                 candidate = copy.deepcopy(config)
-                candidate.runtime.use_amp = use_amp
+                candidate.numerics.use_amp = use_amp
                 _refuse_amp_a_task_cannot_honour(candidate)
 
     def test_an_unknown_task_with_amp_off_is_left_to_the_task_check(self) -> None:
@@ -207,10 +207,11 @@ class TheFactoryActuallyCallsItTest(unittest.TestCase):
               input_dim: 4
               hidden_dim: 8
               num_classes: 2
-            runtime:
+            numerics:
               deterministic: true
-              device: cpu
               use_amp: {str(use_amp).lower()}
+            runtime:
+              device: cpu
             evaluation:
               train: {{every: 1, clients: all}}
             defaults:
@@ -249,7 +250,7 @@ class PreflightSaysItTooTest(unittest.TestCase):
     @pytest.mark.fast
     def test_it_is_an_error_not_a_warning(self) -> None:
         config = copy.deepcopy(self.config)
-        config.runtime.use_amp = True
+        config.numerics.use_amp = True
         self.assertEqual(_amp_issues(config), [("error", "task.amp_unsupported")])
 
     @pytest.mark.fast
@@ -261,7 +262,7 @@ class PreflightSaysItTooTest(unittest.TestCase):
         for use_amp in (True, False):
             with self.subTest(use_amp=use_amp):
                 candidate = copy.deepcopy(config)
-                candidate.runtime.use_amp = use_amp
+                candidate.numerics.use_amp = use_amp
                 self.assertEqual(_amp_issues(candidate), [])
 
     @pytest.mark.fast
@@ -270,7 +271,7 @@ class PreflightSaysItTooTest(unittest.TestCase):
 
         config = copy.deepcopy(self.config)
         config.task.name = "not_a_task"
-        config.runtime.use_amp = True
+        config.numerics.use_amp = True
         codes = [issue.code for issue in validate_full_config(config).issues]
         self.assertIn("task.name_unknown", codes)
         self.assertNotIn("task.amp_unsupported", codes)
@@ -288,7 +289,7 @@ class TheShippedConfigsTest(unittest.TestCase):
             except Exception:
                 continue
             checked += 1
-            if config.runtime.use_amp and config.task.name not in AMP_AWARE_TASKS:
+            if config.numerics.use_amp and config.task.name not in AMP_AWARE_TASKS:
                 offenders.append(path)
         self.assertGreater(checked, 0, "no config loaded; the sweep found nothing")
         self.assertEqual(offenders, [])

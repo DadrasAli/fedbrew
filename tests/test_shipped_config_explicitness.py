@@ -1,22 +1,24 @@
 """Settings that change the numbers must be written down, not defaulted into.
 
-Two of them were left implicit across the shipped configs, and both defaults
-are invisible unless you read source:
+They are the ``numerics`` block, which every shipped config states in full,
+resolved. Two of them were once left implicit across the shipped configs, and
+both defaults are invisible unless you read source:
 
-``runtime.performance.matmul_precision`` was set to "high" by 20 configs and
+``numerics.matmul_precision`` was set to "high" by 20 configs and
 omitted by 10. Absent means torch's own default, "highest" -- full fp32
 matmuls, where "high" puts them on TensorFloat32. So the two groups were not
 running the same arithmetic, and a new arm started by copying a dev or MNIST
 config would silently not be comparable with the FEMNIST baselines.
 
-``runtime.deterministic`` was set by 28 and omitted by 2, where absent means
+``numerics.deterministic`` was set by 28 and omitted by 2, where absent means
 false. A run that is not deterministic should say so.
 
 This walks the shipped tree rather than a hand-kept list, so a new config
 cannot quietly reintroduce either gap. It reads each config resolved -- its
 ``extends`` chain merged (``load_config_mapping``), which is what the run
 gets -- so a setting stated once in a family base counts for every arm that
-extends it, and a family base is not itself a config it checks. It also pins the three Delta-SGD
+extends it, and a family base is not itself a config it checks. It also pins
+the three Delta-SGD
 constants that were written into their config in the same pass, against the
 drift that omitting them was meant to avoid.
 """
@@ -37,7 +39,7 @@ from fedbrew.clients.torch_delta_sgd_client import (
 )
 from fedbrew.core.config import (
     MATMUL_PRECISIONS,
-    NUMERICS_PERFORMANCE_KEYS,
+    NUMERICS_KEYS,
     is_family_base,
     load_config_mapping,
 )
@@ -149,34 +151,43 @@ class ExperimentHeaderConventionTest(unittest.TestCase):
 
 
 class ExplicitNumericSettingsTest(unittest.TestCase):
+    """Every resolved config states the numerics block, and states it in full.
+
+    The block is ``NumericsConfig``: every key that changes the numbers a run
+    produces, and nothing else. One assertion covers all of them, and a key
+    added to the block is covered by the commit that adds it. The keys used
+    to be three in ``runtime.performance`` -- checked from a declared set --
+    and two in ``runtime`` checked one at a time, while ``use_amp`` was
+    required by the loader instead.
+    """
+
     def setUp(self) -> None:
         self.configs = _run_configs()
         self.assertGreaterEqual(len(self.configs), 30, "expected 30 run configs")
 
-    def test_every_config_states_every_numerics_changing_key(self) -> None:
-        """Derived from NUMERICS_PERFORMANCE_KEYS, not from a list here.
+    def test_every_config_states_the_whole_numerics_block(self) -> None:
+        self.assertTrue(NUMERICS_KEYS, "the block has no keys")
+        for path, config in self.configs:
+            with self.subTest(config=str(path)):
+                numerics = config.get("numerics")
+                self.assertIsInstance(
+                    numerics, dict, "a run config states the numerics block, resolved"
+                )
+                self.assertEqual(
+                    sorted(NUMERICS_KEYS - set(numerics)),
+                    [],
+                    "every numerics key changes the numbers, so a config that "
+                    "omits one is not comparable with one that sets it and the "
+                    "difference is invisible in the file. See "
+                    "docs/10-reproducibility.md",
+                )
 
-        This test was written for ``matmul_precision`` and named it, and
-        ``cudnn_benchmark`` sat in the same declared set at the same 20-of-30
-        split the test exists to prevent -- one instance of a plural thing,
-        fixed one instance at a time. Reading the set means the third key is
-        covered by the commit that declares it, not by someone remembering
-        this file.
-        """
-
-        self.assertTrue(NUMERICS_PERFORMANCE_KEYS, "the declared set is empty")
-        for key in sorted(NUMERICS_PERFORMANCE_KEYS):
-            for path, config in self.configs:
-                with self.subTest(key=key, config=str(path)):
-                    performance = config["runtime"].get("performance") or {}
-                    self.assertIn(
-                        key,
-                        performance,
-                        f"runtime.performance.{key} changes the numbers, so a "
-                        "config that omits it is not comparable with one that "
-                        "sets it and the difference is invisible in the file. "
-                        "See docs/10-reproducibility.md",
-                    )
+    def test_no_numerics_key_is_left_in_runtime(self) -> None:
+        for path, config in self.configs:
+            runtime = config.get("runtime") or {}
+            stray = (set(runtime) | set(runtime.get("performance") or {})) & NUMERICS_KEYS
+            with self.subTest(config=str(path)):
+                self.assertEqual(stray, set())
 
     def test_the_matmul_precision_written_is_one_torch_accepts(self) -> None:
         """Value validity, which is per-key rather than per-set.
@@ -188,29 +199,13 @@ class ExplicitNumericSettingsTest(unittest.TestCase):
 
         for path, config in self.configs:
             with self.subTest(config=str(path)):
-                performance = config["runtime"].get("performance") or {}
-                self.assertIn(performance.get("matmul_precision"), MATMUL_PRECISIONS)
+                self.assertIn(config["numerics"]["matmul_precision"], MATMUL_PRECISIONS)
 
-    def test_every_config_states_whether_it_is_deterministic(self) -> None:
+    def test_the_three_switches_are_bools(self) -> None:
         for path, config in self.configs:
-            with self.subTest(config=str(path)):
-                self.assertIn(
-                    "deterministic",
-                    config["runtime"],
-                    "absent means false; say so rather than omitting it",
-                )
-                self.assertIsInstance(config["runtime"]["deterministic"], bool)
-
-    def test_a_deterministic_config_states_how_strict_it_is(self) -> None:
-        """warn_only is only meaningful under deterministic: true, where it is
-        the difference between a guarantee and a warning nobody reads."""
-
-        for path, config in self.configs:
-            runtime = config["runtime"]
-            if not runtime.get("deterministic"):
-                continue
-            with self.subTest(config=str(path)):
-                self.assertIn("deterministic_warn_only", runtime)
+            for key in ("deterministic", "deterministic_warn_only", "use_amp"):
+                with self.subTest(config=str(path), key=key):
+                    self.assertIsInstance(config["numerics"][key], bool)
 
 
 class DeltaSgdConstantsTest(unittest.TestCase):

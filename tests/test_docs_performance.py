@@ -117,11 +117,11 @@ class TunableKeyTest(unittest.TestCase):
                 self.assertIn(f"`{key}`", self.text)
 
     def test_the_numerics_keys_are_documented_in_chapter_ten(self) -> None:
-        from fedbrew.core.config import NUMERICS_PERFORMANCE_KEYS
+        from fedbrew.core.config import NUMERICS_KEYS
 
         chapter_ten = (REPO_ROOT / "docs" / "10-reproducibility.md").read_text(encoding="utf-8")
-        self.assertTrue(NUMERICS_PERFORMANCE_KEYS, "no numerics keys classified")
-        for key in NUMERICS_PERFORMANCE_KEYS:
+        self.assertTrue(NUMERICS_KEYS, "no numerics keys classified")
+        for key in NUMERICS_KEYS:
             with self.subTest(key=key):
                 self.assertIn(f"`{key}`", chapter_ten)
 
@@ -136,11 +136,11 @@ class TunableKeyTest(unittest.TestCase):
         reader tuning throughput would take it as safe to change.
         """
 
-        from fedbrew.core.config import NUMERICS_PERFORMANCE_KEYS
+        from fedbrew.core.config import NUMERICS_KEYS
 
-        self.assertTrue(NUMERICS_PERFORMANCE_KEYS, "no numerics keys classified")
+        self.assertTrue(NUMERICS_KEYS, "no numerics keys classified")
         section = section_of(self.text, "## 4. The settings that change cost")
-        for key in NUMERICS_PERFORMANCE_KEYS:
+        for key in NUMERICS_KEYS:
             with self.subTest(key=key):
                 self.assertNotIn(
                     key,

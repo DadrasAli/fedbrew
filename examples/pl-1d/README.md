@@ -196,7 +196,7 @@ tensor nothing reads, but that is now this example's own choice and could be
 dropped, rather than a shape every rule imposes by destructuring into two.
 
 **Still here.** Four rules — delta-SGD, FedLALR, SCAFFOLD and FedProx — read
-`task._scaler` to decide whether to refuse a run under `runtime.use_amp: true`.
+`task._scaler` to decide whether to refuse a run under `numerics.use_amp: true`.
 That is a private name standing in for a question the interface has no place
 for: whether a task supports mixed precision. The read is absence-tolerant
 (`getattr(task, "_scaler", None)`), so a task that never defines it is refused

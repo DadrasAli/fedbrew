@@ -266,7 +266,7 @@ class OnlyOneWrapperCannotBeScaledTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         for phrase in (
             'hasattr(optimizer, "param_groups")',
-            "runtime.use_amp needs an optimizer exposing param_groups",
+            "numerics.use_amp needs an optimizer exposing param_groups",
         ):
             if phrase not in source:
                 self.fail(f"torch_classification.py no longer contains {phrase!r}")
@@ -300,7 +300,7 @@ class RefusedAtConfigLoadTest(unittest.TestCase):
 
     def test_the_frozen_mode_is_refused(self) -> None:
         config = self._config()
-        config.runtime.use_amp = True
+        config.numerics.use_amp = True
         config.client.extra["update_mode"] = "frozen_batch_gradients"
         with self.assertRaisesRegex(ValueError, "update_mode: frozen_batch_gradients"):
             validate_config(config)
@@ -319,7 +319,7 @@ class RefusedAtConfigLoadTest(unittest.TestCase):
         for update_mode in ("single_batch", "sequential_epoch"):
             with self.subTest(update_mode=update_mode):
                 config = self._config()
-                config.runtime.use_amp = True
+                config.numerics.use_amp = True
                 config.client.extra["update_mode"] = update_mode
                 config.client.extra["max_grad_norm"] = 1.0
                 validate_config(config)
@@ -330,7 +330,7 @@ class RefusedAtConfigLoadTest(unittest.TestCase):
         """With both set, the message must send the reader to the right key."""
 
         config = self._config()
-        config.runtime.use_amp = True
+        config.numerics.use_amp = True
         config.client.extra["update_mode"] = "frozen_batch_gradients"
         config.client.extra["max_grad_norm"] = 1.0
         with self.assertRaises(ValueError) as caught:
@@ -343,7 +343,7 @@ class RefusedAtConfigLoadTest(unittest.TestCase):
         """The refusal is per setting, not per rule: plain AMP still runs."""
 
         config = self._config()
-        config.runtime.use_amp = True
+        config.numerics.use_amp = True
         validate_config(config)
         self.assertNotIn("algorithm.sgd_engine_amp_unsupported", self._preflight_errors(config))
 

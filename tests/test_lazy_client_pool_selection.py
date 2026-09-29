@@ -58,7 +58,7 @@ def _config(data_name: str, **client_extra: Any) -> FullConfig:
         task=TaskConfig(name="classification"),
         data=DataConfig(name=data_name),
         model=ModelConfig(name="mlp"),
-        runtime=RuntimeConfig(device="cpu", use_amp=False),
+        runtime=RuntimeConfig(device="cpu"),
     )
 
 

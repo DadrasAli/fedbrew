@@ -9,7 +9,9 @@ another. The only trace was `runtime_setup_error`, a `run.json` key nothing
 reads. Separately, `device: auto` on a node whose GPU is busy fell back to the
 CPU without a word. P04-F07.
 
-Three claims are guarded: the three settings a config can hold are refused by
+Three claims are guarded: the three settings -- `torch_num_threads` in
+`runtime.performance`, `cudnn_benchmark` and `matmul_precision` in `numerics`
+-- are refused by
 `validate_config` before `configure_runtime` sees them; a setting that is
 accepted is actually applied, `matmul_precision` included, whatever else is in
 the block; and the `auto` fallback says why when there is a GPU it could not
@@ -27,7 +29,7 @@ from unittest import mock
 import pytest
 import torch
 
-from fedbrew.core.config import load_config, validate_config
+from fedbrew.core.config import NUMERICS_KEYS, load_config, validate_config
 from fedbrew.core.runtime_setup import configure_runtime
 from fedbrew.core.torch_utils import resolve_torch_device
 
@@ -51,10 +53,17 @@ ACCEPTED: dict[str, tuple[Any, ...]] = {
 }
 
 
-def _config(performance: dict[str, Any]) -> Any:
+def _config(settings: dict[str, Any]) -> Any:
+    """The smoke config with these settings: a numerics key in numerics, the rest in performance."""
+
     config = load_config(BASE)
     config.runtime.extra = dict(config.runtime.extra)
-    config.runtime.extra["performance"] = performance
+    config.runtime.extra["performance"] = {
+        name: value for name, value in settings.items() if name not in NUMERICS_KEYS
+    }
+    for name, value in settings.items():
+        if name in NUMERICS_KEYS:
+            setattr(config.numerics, name, value)
     return config
 
 

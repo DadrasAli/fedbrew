@@ -61,7 +61,7 @@ def _config(data_path: str | None, **staging: Any) -> FullConfig:
         task=TaskConfig(name="classification"),
         data=DataConfig(name="manifest_dataset", path=data_path),
         model=ModelConfig(name="mlp"),
-        runtime=RuntimeConfig(device="cpu", use_amp=False, extra={"data_staging": dict(staging)}),
+        runtime=RuntimeConfig(device="cpu", extra={"data_staging": dict(staging)}),
     )
 
 
