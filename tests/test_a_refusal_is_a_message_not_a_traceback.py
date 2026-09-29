@@ -108,8 +108,10 @@ NOT_REFUSALS = frozenset(
         ("fedbrew/core/registry.py", "_config_key_set"),
         ("fedbrew/core/registry.py", "_frozen_key_set"),
         ("fedbrew/core/registry.py", "registering_from"),
-        # A task's declared metrics (TaskAdapter.METRICS), checked at registration.
+        # A task's declared metrics (TaskAdapter.METRICS) and their glosses
+        # (METRIC_GLOSSES), checked at registration.
         ("fedbrew/core/registry.py", "_check_task_metrics"),
+        ("fedbrew/core/registry.py", "_check_task_glosses"),
         # Also the duplicate-name refusal, which is both: two configured
         # extensions claiming one name is input, while a built-in or one extension
         # registering a name twice is a bug. The message names both origins, so

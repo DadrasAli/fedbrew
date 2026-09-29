@@ -31,6 +31,7 @@ from fedbrew.core.config import (
     client_metric_names,
     resolved_checkpointing,
     task_metric_directions,
+    task_metric_glosses,
     worst_percent_label,
 )
 from fedbrew.core.console import (
@@ -458,7 +459,8 @@ def _metrics_rows(config: FullConfig, *, verbose: bool) -> list[Row]:
             else f"{len(names)} of {len(planned)} listed; --verbose lists them all",
         )
     )
-    rows.extend(Row(name, _metric_definition(name, config), tone=None) for name in names)
+    glosses = task_metric_glosses(config)
+    rows.extend(Row(name, _metric_definition(name, config, glosses), tone=None) for name in names)
     return rows
 
 
@@ -1206,8 +1208,9 @@ def _progress_definitions(
 ) -> list[tuple[str, str]]:
     definitions = list(_CONTEXT_DEFINITIONS)
     definitions.extend(_DATA_SPLIT_DEFINITIONS)
+    glosses = None if config is None else task_metric_glosses(config)
     definitions.extend(
-        (name, _metric_definition(name, config)) for name in _progress_metric_names(config)
+        (name, _metric_definition(name, config, glosses)) for name in _progress_metric_names(config)
     )
     return definitions
 
@@ -1512,14 +1515,17 @@ def _personalized(qualifier: str, personal: bool) -> str:
     return "personal" if qualifier == "—" else f"personal {qualifier}"
 
 
-def _metric_definition(name: str, config: FullConfig | None) -> str:
+def _metric_definition(
+    name: str, config: FullConfig | None, glosses: Mapping[str, str] | None = None
+) -> str:
     """The gloss for one column, under this config.
 
     The text itself lives in fedbrew.core.metrics, composed from the base
     metric and the suffix rather than written out per column -- 72 columns at
     `model_scope: both`, of which 71 would repeat the same six sentences. All
-    that is decided here is the one thing the column name cannot carry: which
-    clients a split was measured on.
+    that is decided here is what the column name cannot carry: which clients a
+    split was measured on, and -- through `glosses`, the task's
+    (`config.task_metric_glosses`) -- what its metrics measure.
     """
 
     split_glosses = dict(SPLIT_GLOSSES)
@@ -1527,7 +1533,7 @@ def _metric_definition(name: str, config: FullConfig | None) -> str:
         # Not every client: this round's trainers. A gloss saying otherwise
         # would describe a measurement the run does not perform.
         split_glosses["train"] = "the selected clients' train data"
-    return metric_gloss(name, split_glosses=split_glosses)
+    return metric_gloss(name, split_glosses=split_glosses, metric_glosses=glosses)
 
 
 def _deduplicate(names: list[str]) -> list[str]:

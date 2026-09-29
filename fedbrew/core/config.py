@@ -402,10 +402,13 @@ class DivergenceConfig:
     improving, and conflating them would misreport the sweep.
     """
 
-    #: The metric to watch. Must be produced every round: fit_loss is the local
-    #: training loss and is free, whereas train_loss_sample_weighted_avg only
-    #: exists on evaluation.train's schedule (default: every 10 rounds), so
-    #: watching it would burn up to 10 rounds on an already-dead run.
+    #: The metric to watch. Must be produced every round: fit_loss comes from
+    #: the post-fit pass, a separate forward over each training client's train
+    #: split after its update (evaluation.fit, every round by default, and not
+    #: free -- FitEvaluationConfig), whereas train_loss_sample_weighted_avg
+    #: only exists on evaluation.train's schedule (default: every 10 rounds),
+    #: so watching it would burn up to 10 rounds on an already-dead run. Which
+    #: side is better comes from the task (divergence_direction).
     metric: str = "fit_loss"
 
     #: NaN or Inf. Nothing is recoverable from it, so this fires on the round
@@ -2155,6 +2158,31 @@ def task_metric_directions(config: FullConfig) -> dict[str, str]:
         # problem, reported there, not a reason to refuse here.
         declared = None
     return dict(declared) if declared else {"loss": "min", "accuracy": "max"}
+
+
+def task_metric_glosses(config: FullConfig) -> dict[str, str]:
+    """What each metric the run's task reports measures, for the plan header's glosses.
+
+    ``TaskAdapter.METRIC_GLOSSES`` read off the task registry, over each
+    declared name's own words; a task that declares no metrics is taken to be
+    classification-shaped (``METRIC_BASE_GLOSSES``), as every consumer does.
+    """
+
+    from fedbrew.core.metrics import METRIC_BASE_GLOSSES
+    from fedbrew.core.registry import register_builtin_components, tasks
+
+    try:
+        register_builtin_components()
+        reports = tasks.metrics(config.task.name)
+        declared = tasks.glosses(config.task.name)
+    except Exception:  # noqa: BLE001 - as task_metric_directions.
+        reports, declared = None, None
+    if reports is None:
+        glosses = dict(METRIC_BASE_GLOSSES)
+    else:
+        glosses = {name: name.replace("_", " ") for name in reports}
+    glosses.update(declared or {})
+    return glosses
 
 
 def default_selection_metric(config: FullConfig) -> str:

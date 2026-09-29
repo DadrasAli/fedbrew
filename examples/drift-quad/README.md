@@ -80,6 +80,11 @@ python examples/drift-quad/run.py --setting drift-quad-rate
 python examples/drift-quad/run.py --table-only           # re-table what is on disk
 ```
 
+The tables in this README are `run.py`'s comparison table edited for reading, not pasted:
+column labels are renamed, `run.py`'s `status` column is dropped, and some
+columns and precisions were added by hand from the same `round_metrics.csv`
+files.
+
 Each arm writes `outputs/examples/<setting>/<arm>/` with the usual four
 artifacts, and each one starts a fresh interpreter that imports torch — the
 honest cost of every arm being a real `fedbrew run` rather than a loop inside

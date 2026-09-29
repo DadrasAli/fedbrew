@@ -44,7 +44,9 @@ it is called:
 def register() -> None:
     from fedbrew.core import registry
 
-    registry.tasks.register("my_task", MyTask, metrics=MyTask.METRICS)
+    registry.tasks.register(
+        "my_task", MyTask, metrics=MyTask.METRICS, glosses=MyTask.METRIC_GLOSSES
+    )
 ```
 
 Four rules, and the loader (`fedbrew/core/extensions.py`) enforces them:
@@ -238,7 +240,10 @@ def register() -> None:
         sections={"problem": {"dim", "condition_number", "dissimilarity"}},
     )
     registry.tasks.register(
-        TASK_NAME, lambda **kwargs: DriftQuadTask(**kwargs), metrics=DriftQuadTask.METRICS
+        TASK_NAME,
+        lambda **kwargs: DriftQuadTask(**kwargs),
+        metrics=DriftQuadTask.METRICS,
+        glosses=DriftQuadTask.METRIC_GLOSSES,
     )
     registry.models.register(
         MODEL_NAME, build_quad_vector, task=TASK_NAME, shape_keys=("input_dim",)
@@ -543,6 +548,14 @@ default checkpoint-selection metric (validation accuracy if declared, else
 validation loss) and the side the divergence monitor treats as better
 (chapter 08 §11 and §12). A task registered without it is planned as
 reporting loss and accuracy, as a classification task does.
+
+Say what each metric measures as `METRIC_GLOSSES`, a noun phrase per name that
+reads mid-sentence (`"cross-entropy"`, `"client objective ½xᵀAx − b_iᵀx"`),
+and pass it as `registry.tasks.register(..., glosses=MyTask.METRIC_GLOSSES)`.
+The plan header composes every column's gloss from it — `fit_loss`, the
+client aggregates of `loss`, `central_test_<name>` — where it used to call
+every task's `loss` a cross-entropy. A name left out is glossed by its own
+words.
 
 Implement `evaluate_model(model, data)` as well unless you want no central test
 set. It is not abstract — `eval_step` is per batch and required, this scores a

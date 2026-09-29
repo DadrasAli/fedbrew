@@ -29,5 +29,7 @@ server:
 client:
   update_rule: fedlalr
   # alpha. Local AMSGrad normalises the step by sqrt(v_hat), so this is not on
-  # the same scale as the SGD arms' learning_rate. Reads no update_mode.
+  # the same scale as the SGD arms' learning_rate. update_mode is
+  # left unset, so it runs sequential_epoch, its default; it also takes
+  # full_gradient.
   learning_rate: 0.003

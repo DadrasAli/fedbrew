@@ -40,11 +40,11 @@ client:
   update_rule: scaffold
   batch_size: 16
   learning_rate: 0.2
-  # NOTE: like the FedProx client, this one always runs `local_iterations` full
-  # passes with plain SGD, so update_mode / momentum / weight_decay /
-  # nesterov / learning_rate_schedule are intentionally absent - it would
-  # ignore them. The comparable FedAvg baseline is update_mode:
-  # sequential_epoch.
+  # NOTE: like the FedProx client, this one runs `local_iterations` full passes
+  # with plain SGD (update_mode left unset is sequential_epoch; it also takes
+  # full_gradient), so momentum / weight_decay / nesterov /
+  # learning_rate_schedule are intentionally absent - it would refuse them. The
+  # comparable FedAvg baseline is update_mode: sequential_epoch.
 
 runtime:
   checkpointing:

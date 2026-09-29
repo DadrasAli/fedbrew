@@ -35,9 +35,10 @@ client:
   batch_size: 16
   learning_rate: 0.01
 
-  # NOTE: this client always runs `local_iterations` full passes with plain SGD, so
-  # update_mode / momentum / weight_decay / nesterov / learning_rate_schedule
-  # are intentionally absent -- it would ignore them. fedavg.yaml in this
+  # NOTE: this client runs `local_iterations` full passes with plain SGD
+  # (update_mode left unset is sequential_epoch; it also takes full_gradient), so
+  # momentum / weight_decay / nesterov / learning_rate_schedule are
+  # intentionally absent -- it would refuse them. fedavg.yaml in this
   # directory runs update_mode: single_batch, one batch per round, so the two
   # arms do not consume the same data per round and are not like-for-like at a
   # fixed round count. The comparable FedAvg baseline is update_mode:

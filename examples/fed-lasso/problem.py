@@ -918,6 +918,17 @@ class FedLassoTask(TaskAdapter):
         "exact_zeros": "none",
     }
 
+    #: What each metric measures, for the plan header's glosses (TaskAdapter.METRIC_GLOSSES).
+    METRIC_GLOSSES = {
+        "loss": "client objective (1/2m)‖Hx − y_i‖² + penalty",
+        "optimality_gap": "optimality gap F(x) − F*",
+        "distance_to_optimum": "distance ‖x − x*‖₂ to the global optimum",
+        "distance_to_truth": "distance ‖x − x_true‖₂ to the planted vector",
+        "support_size": "count of coordinates with |x_j| above model.support_tolerance",
+        "support_f1": "F1 of the support above model.support_tolerance against the planted one",
+        "exact_zeros": "count of coordinates exactly 0.0",
+    }
+
     #: The batched executor's form of a stacked step's gradients: one backward
     #: through the per-client losses' sum, which is faster for this problem's
     #: few, tiny parameters than vmap(grad) -- 5.98 against 7.82 ms a round
@@ -1368,7 +1379,10 @@ def register() -> None:
         },
     )
     registry.tasks.register(
-        TASK_NAME, lambda **kwargs: FedLassoTask(**kwargs), metrics=FedLassoTask.METRICS
+        TASK_NAME,
+        lambda **kwargs: FedLassoTask(**kwargs),
+        metrics=FedLassoTask.METRICS,
+        glosses=FedLassoTask.METRIC_GLOSSES,
     )
     registry.models.register(
         MODEL_NAME, build_lasso_vector, task=TASK_NAME, shape_keys=("input_dim",)

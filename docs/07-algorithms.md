@@ -510,10 +510,12 @@ The server is plain FedAvg, so the whole method is client-side.
 It takes all four `update_mode`s (chapter 04 §2.1), and runs `sequential_epoch`
 when `update_mode` is unset.
 
-The step-size trace is the algorithm, so it is emitted every round:
+The step-size trace is the algorithm, so the client reports it every round:
 `client_step_size_{mean,min,max,final}`, `step_size_clamp_fraction`,
-`undefined_curvature_fraction`. A run whose mean step never leaves `eta_0` is
-one where the auto-tuner did nothing.
+`undefined_curvature_fraction`. They reach `round_metrics.csv` when
+`reporting.fit_metrics` names them or is empty, like every fit column
+(chapter 08 §4.3). A run whose mean step never leaves `eta_0` is one where the
+auto-tuner did nothing.
 
 **Incompatible with `numerics.use_amp: true`** and refused at load: the rule
 reads the raw gradient off `.grad`, which the AMP path consumes inside
@@ -521,8 +523,11 @@ reads the raw gradient off `.grad`, which the AMP path consumes inside
 
 ### 4.6 `fedlalr`
 
-The client half of §3.4. Requires `beta1`, `beta2`, `epsilon`. Uploads model,
-momentum and second moment.
+The client half of §3.4. Requires `client.learning_rate` (alpha); `beta1`,
+`beta2` and `epsilon` are optional, defaulting to `0.9`, `0.999` and `1e-8`
+(`DEFAULT_BETA1`, `DEFAULT_BETA2`, `DEFAULT_EPSILON`,
+`fedbrew/clients/torch_fedlalr_client.py`, which says which are the paper's).
+Uploads model, momentum and second moment.
 
 Emits `effective_learning_rate_coordinate_{mean,min,max}` — statistics of the
 per-coordinate rate `alpha / sqrt(v_hat)` **within** one client. The server

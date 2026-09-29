@@ -267,6 +267,15 @@ class TaskAdapter(ABC):
     #: takes to report loss and accuracy.
     METRICS: ClassVar[Mapping[str, str] | None] = None
 
+    #: What each name in ``METRICS`` measures, as a noun phrase that reads in
+    #: the middle of a sentence ("cross-entropy", "the client objective
+    #: ½xᵀAx − b_iᵀx"). Registered beside ``METRICS``
+    #: (``registry.tasks.register(..., glosses=...)``) and read by the plan
+    #: header's column glosses, which described every ``loss`` as a
+    #: cross-entropy before a task could say what its own is. A name left out
+    #: is glossed by its own words.
+    METRIC_GLOSSES: ClassVar[Mapping[str, str] | None] = None
+
     @abstractmethod
     def build_model(self, config: Mapping[str, Any]) -> Any:
         """Build a task-specific model object."""

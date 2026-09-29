@@ -70,6 +70,11 @@ python examples/nonconvex-simplex/run.py --arm fedavgm
 python examples/nonconvex-simplex/run.py --table-only  # re-table what is on disk
 ```
 
+The tables in this README are `run.py`'s comparison table edited for reading, not pasted:
+column labels are renamed, `run.py`'s `status` column is dropped, and some
+columns and precisions were added by hand from the same `round_metrics.csv`
+files.
+
 Each arm writes `outputs/examples/nonconvex-simplex/<arm>/` with the usual four
 artifacts, and each one starts a fresh interpreter that imports torch.
 

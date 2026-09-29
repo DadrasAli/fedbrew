@@ -237,7 +237,7 @@ class ProgressDefinitionTests(unittest.TestCase):
         by_name = dict(definitions)
         self.assertIn("client train data", by_name["train_loss_sample_weighted_avg"])
         self.assertIn("complete global test set", by_name["central_test_loss"])
-        self.assertIn("total correct predictions", by_name["central_test_accuracy"])
+        self.assertIn("Top-1 accuracy", by_name["central_test_accuracy"])
         # The pair the glosses exist to separate. Same column name but for one
         # token; different numbers on any non-uniform split.
         self.assertIn("pooled over examples", by_name["test_accuracy_sample_weighted_avg"])

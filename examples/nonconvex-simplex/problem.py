@@ -637,6 +637,18 @@ class NonconvexSimplexTask(TaskAdapter):
         "mass_on_clique": "none",
     }
 
+    #: What each metric measures, for the plan header's glosses (TaskAdapter.METRIC_GLOSSES).
+    METRIC_GLOSSES = {
+        "loss": "client objective −½xᵀA_i x",
+        "optimality_gap": "optimality gap F(x) − F*",
+        "feasible_gap": "gap F(Π_Δ(x)) − F* after projecting onto the simplex",
+        "distance_to_optimum": "distance ‖x − x*‖₂ to the global optimum",
+        "constraint_violation": "distance ‖x − Π_Δ(x)‖₂ to the simplex",
+        "simplex_sum": "coordinate sum Σ_j x_j",
+        "iterate_norm": "norm ‖x‖₂ of the iterate",
+        "mass_on_clique": "mass of Π_Δ(x) on the maximum clique",
+    }
+
     #: The batched executor's form of a stacked step's gradients: one backward
     #: through the per-client losses' sum, which is faster for this problem's
     #: few, tiny parameters than vmap(grad) -- 3.84 against 4.53 ms a round
@@ -855,12 +867,17 @@ class NonconvexSimplexTask(TaskAdapter):
             projection is not a rescue here, and this is the column that says so.
 
         ``iterate_norm`` / ``constraint_violation`` / ``simplex_sum``
-            `||x||`, the distance to the simplex, and the sum. All three start at
-            about 1, 0 and 1 and end around 1e80.
+            `||x||`, the distance to the simplex, and the sum. From the shipped
+            `x_init: uniform` they start at 1/sqrt(31) = 0.18, 0 and 1. By
+            round 150 the FedAvg arm's norm is about 6e42 and its sum 2.5e43,
+            while the adaptive arms' norms stay between 15 and 160 (the
+            README's table).
 
         ``mass_on_clique``
             How much of the *projected* iterate sits on the maximum clique. 1.0
-            would mean the run found the answer; it goes to 0.
+            would mean the run found the answer. It falls to 0 on the arms
+            whose iterate runs off towards the hub -- FedAvg, FedProx, FedAvgM,
+            SCAFFOLD -- and ends between 0.16 and 0.24 on the adaptive ones.
         """
 
         records = [record for record in outputs if isinstance(record, Mapping)]
@@ -1001,6 +1018,7 @@ def register() -> None:
         TASK_NAME,
         lambda **kwargs: NonconvexSimplexTask(**kwargs),
         metrics=NonconvexSimplexTask.METRICS,
+        glosses=NonconvexSimplexTask.METRIC_GLOSSES,
     )
     registry.models.register(
         MODEL_NAME, build_simplex_point, task=TASK_NAME, shape_keys=("input_dim",)

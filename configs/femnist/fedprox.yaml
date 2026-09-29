@@ -23,10 +23,11 @@ client:
   # mu in (mu/2) * ||w - w_round_start||^2. mu=0 reduces exactly to FedAvg,
   # so it doubles as a sanity check. Paper grid is {0.001, 0.01, 0.1, 1}.
   proximal_mu: 0.01
-  # NOTE: the FedProx client always runs `local_iterations` full passes with plain
-  # SGD, so update_mode / momentum / weight_decay / nesterov /
-  # learning_rate_schedule are intentionally absent - it would ignore them.
-  # The comparable FedAvg baseline is update_mode: sequential_epoch.
+  # NOTE: the FedProx client runs `local_iterations` full passes with plain SGD
+  # (update_mode left unset is sequential_epoch; it also takes full_gradient),
+  # so momentum / weight_decay / nesterov / learning_rate_schedule are
+  # intentionally absent - it would refuse them. The comparable FedAvg baseline
+  # is update_mode: sequential_epoch.
 
 runtime:
   checkpointing:

@@ -655,6 +655,18 @@ class SimplexLSQTask(TaskAdapter):
         "negative_mass": "min",
     }
 
+    #: What each metric measures, for the plan header's glosses (TaskAdapter.METRIC_GLOSSES).
+    METRIC_GLOSSES = {
+        "loss": "client least-squares objective (1/2m)‖Hx − y_i‖²",
+        "optimality_gap": "optimality gap F(x) − F*",
+        "feasible_gap": "gap F(Π_Δ(x)) − F* after projecting onto the simplex",
+        "distance_to_optimum": "distance ‖x − x*‖₂ to the global optimum",
+        "constraint_violation": "distance ‖x − Π_Δ(x)‖₂ to the simplex",
+        "simplex_sum": "coordinate sum Σ_j x_j",
+        "min_coordinate": "smallest coordinate min_j x_j",
+        "negative_mass": "negative mass Σ_j max(0, −x_j)",
+    }
+
     #: The batched executor's form of a stacked step's gradients: one backward
     #: through the per-client losses' sum, which is faster for this problem's
     #: few, tiny parameters than vmap(grad) -- 5.21 against 6.81 ms a round
@@ -782,7 +794,7 @@ class SimplexLSQTask(TaskAdapter):
         return float(len(targets))
 
     def eval_step(self, model: SimplexModel, batch: Any) -> dict[str, float]:
-        """Measure the batch's objective, and six properties of the iterate."""
+        """Measure the batch's objective, and seven properties of the iterate."""
 
         model.eval()
         with torch.no_grad():
@@ -840,7 +852,7 @@ class SimplexLSQTask(TaskAdapter):
         batch: tuple[Tensor, ...],
         mask: Tensor | None = None,
     ) -> dict[str, Tensor]:
-        """The batch's objective, and six properties of the iterate, as tensors."""
+        """The batch's objective, and seven properties of the iterate, as tensors."""
 
         loss, _ = self.functional_loss(model, params, buffers, batch, mask)
         iterate = (model.x if params is None else params["x"]).detach()
@@ -1018,7 +1030,10 @@ def register() -> None:
         sections={"problem": {"dim", "infeasibility", "heterogeneity"}},
     )
     registry.tasks.register(
-        TASK_NAME, lambda **kwargs: SimplexLSQTask(**kwargs), metrics=SimplexLSQTask.METRICS
+        TASK_NAME,
+        lambda **kwargs: SimplexLSQTask(**kwargs),
+        metrics=SimplexLSQTask.METRICS,
+        glosses=SimplexLSQTask.METRIC_GLOSSES,
     )
     registry.models.register(
         MODEL_NAME, build_simplex_vector, task=TASK_NAME, shape_keys=("input_dim",)

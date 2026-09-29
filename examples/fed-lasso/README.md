@@ -97,6 +97,11 @@ python examples/fed-lasso/run.py --setting fed-lasso-smooth
 python examples/fed-lasso/run.py --table-only           # re-table what is on disk
 ```
 
+The tables in this README are `run.py`'s comparison table edited for reading, not pasted:
+column labels are renamed, `run.py`'s `status` column is dropped, and some
+columns and precisions were added by hand from the same `round_metrics.csv`
+files.
+
 Each arm writes `outputs/examples/fed-lasso/<arm>/` with the usual four
 artifacts, and each one starts a fresh interpreter that imports torch — the
 honest cost of every arm being a real `fedbrew run`. The configs also pin
@@ -247,7 +252,7 @@ this good" and not as a tuned result.
 
 **Support recovery is meaningless here, and the table says so by looking
 better.** All nine arms report `support size` 3 and `support F1` 1.00, where
-under L1 only five of nine did. Nothing was recovered. Ridge multiplies every
+under L1 only six of nine did. Nothing was recovered. Ridge multiplies every
 coordinate of `θ̄` by one factor and sets none of them to zero, so `x*` is `θ̄`
 scaled; at `noise: 0.0`, `θ̄` *is* `x_true`, and `x*` **inherits** its thirteen
 zeros rather than finding them. The reference row's `support F1` of 1.00 is the
@@ -299,7 +304,7 @@ arm, scored at seven thresholds — F1, with the support size in brackets:
 | **`x*`** | **1.00 (3)** | 1.00 (3) | 1.00 (3) | 1.00 (3) | 1.00 (3) | 1.00 (3) |
 
 Every arm scores 0.32 at τ = 0 and 1.00 at τ = 0.01. The column the shipped
-config picks — τ = 1e-3 — puts five of nine arms at a perfect score. None of
+config picks — τ = 1e-3 — puts six of nine arms at a perfect score. None of
 that is a property of an algorithm; it is a property of a number in the config,
 and the reference row is the only one whose score does not move, because `x*`
 has actual zeros. Setting `model.support_tolerance: 0.0` in an arm config and

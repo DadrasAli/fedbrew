@@ -257,7 +257,11 @@ def filter_metrics(
 # suffix, and `metric_gloss` reads the same two pieces back.
 
 
-#: What each base metric measures, as the opening noun phrase of a sentence.
+#: What each base metric measures, as a noun phrase that reads mid-sentence,
+#: for a task that declares nothing (``TaskAdapter.METRIC_GLOSSES``): such a
+#: task is taken to be classification-shaped, as every consumer does. A task
+#: that declares its metrics says what its own ``loss`` is -- a quadratic's is
+#: not a cross-entropy, which is what every loss was glossed as before.
 #:
 #: The keys must be exactly `fedbrew.core.config.CLIENT_METRIC_BASES`. That
 #: tuple is not imported here: this module is a leaf by design -- config.py
@@ -265,8 +269,8 @@ def filter_metrics(
 #: be a cycle. tests/test_metric_glosses.py diffs the two instead, which is
 #: what keeps a third base metric from arriving with no gloss.
 METRIC_BASE_GLOSSES: Mapping[str, str] = {
-    "loss": "Cross-entropy",
-    "accuracy": "Top-1 accuracy",
+    "loss": "cross-entropy",
+    "accuracy": "top-1 accuracy",
 }
 
 #: The data each evaluated split is measured on.
@@ -295,18 +299,52 @@ METRIC_SUFFIX_GLOSSES: Mapping[str, str] = {
     "worst{P}": "the mean over the worst {P}% of clients — the tail, not the average",
 }
 
-#: Columns that are not built from a split, a base and a suffix, and so cannot
-#: be composed: the fit phase's own numbers, the central pass, and each
-#: algorithm's diagnostics.
+
+def _task_metric_gloss(name: str, glosses: Mapping[str, str]) -> str | None:
+    """A task metric's own column -- ``fit_<m>``, ``central_test_<m>`` -- from what ``m`` is.
+
+    ``glosses`` says what each of the task's metrics measures; None for a
+    column that is not one of them.
+    """
+
+    if name == "fit_total_loss":
+        loss = glosses.get("loss", "loss")
+        return f"Example-weighted mean client ({loss} + proximal loss) after local training."
+    metric = name.removeprefix("fit_")
+    if metric != name and metric in glosses:
+        return (
+            f"Example-weighted mean {glosses[metric]} of selected clients' post-fit "
+            "local models on their train sets."
+        )
+    metric = name.removeprefix("central_test_")
+    if metric != name and metric in glosses:
+        return f"{_sentence(glosses[metric])} of the global model on the complete global test set."
+    return None
+
+
+def _sentence(phrase: str) -> str:
+    """A mid-sentence noun phrase at the start of one: its first letter raised."""
+
+    return phrase[:1].upper() + phrase[1:]
+
+
+#: Columns that are not built from a split, a base and a suffix: the fit
+#: phase's own numbers, the central pass, the client counts and each
+#: algorithm's diagnostics. The first five are a task metric's own columns,
+#: here as a task that declares nothing (classification) reads them;
+#: ``metric_gloss`` composes them from the run's task instead when it is
+#: given one (``_task_metric_gloss``), so the two cannot disagree.
 FIXED_METRIC_GLOSSES: Mapping[str, str] = {
-    "fit_loss": (
-        "Example-weighted mean cross-entropy of selected clients' post-fit "
-        "local models on their train sets."
-    ),
-    "fit_accuracy": (
-        "Correct predictions / examples for selected clients' post-fit local "
-        "models on their train sets."
-    ),
+    **{
+        name: str(_task_metric_gloss(name, METRIC_BASE_GLOSSES))
+        for name in (
+            "fit_loss",
+            "fit_accuracy",
+            "fit_total_loss",
+            "central_test_loss",
+            "central_test_accuracy",
+        )
+    },
     # One per split, and the personal_ twins classify through the same three:
     # classify_metric strips that prefix before looking a fixed name up.
     "train_num_clients": (
@@ -323,16 +361,8 @@ FIXED_METRIC_GLOSSES: Mapping[str, str] = {
         "Clients whose test aggregates this round is over, after dropping any "
         "reporting zero test examples."
     ),
-    "central_test_loss": "Average loss of the global model on the complete global test set.",
-    "central_test_accuracy": (
-        "Accuracy of the global model on the complete global test set. This is "
-        "computed as total correct predictions divided by total test samples."
-    ),
     "fit_proximal_loss": (
         "Example-weighted mean client (mu/2) * ||w_local - w_round_start||^2 after local training."
-    ),
-    "fit_total_loss": (
-        "Example-weighted mean client (cross-entropy + proximal loss) after local training."
     ),
     "control_delta_norm": (
         "Example-weighted mean ||c_i,new - c_i,old||_2 across selected clients (float64)."
@@ -340,7 +370,10 @@ FIXED_METRIC_GLOSSES: Mapping[str, str] = {
     "client_control_norm": (
         "Example-weighted mean ||c_i,new||_2 across selected clients (float64)."
     ),
-    "local_steps": "Example-weighted mean minibatch optimizer steps per selected client.",
+    "local_steps": (
+        "Example-weighted mean optimizer steps per selected client: one per "
+        "minibatch, or one per iteration under update_mode: full_gradient."
+    ),
     "mean_client_control_delta_norm": (
         "Unweighted mean ||c_i,new - c_i,old||_2 across selected clients (float64)."
     ),
@@ -352,7 +385,11 @@ FIXED_METRIC_GLOSSES: Mapping[str, str] = {
     # name -- which for `communicated_bytes` produced "Example-weighted mean
     # client communicated bytes after local training on client train sets",
     # a description of a cost accumulator as if it were a loss.
-    "optimizer_steps": "Minibatch optimizer steps a client actually took this round.",
+    "optimizer_steps": (
+        "Optimizer steps a client actually took this round: one per minibatch, "
+        "or one per iteration under update_mode: frozen_batch_gradients or "
+        "full_gradient."
+    ),
     "active_target_tokens": (
         "Non-padding, non-prompt target tokens a client trained on this round; 0.0 "
         "for a task whose train step reports no count (classification, the examples)."
@@ -367,6 +404,22 @@ FIXED_METRIC_GLOSSES: Mapping[str, str] = {
         "the round's value is the example-weighted mean over clients, not their total."
     ),
     "client_learning_rate": "The step size a client actually used, after any schedule.",
+    "client_alpha": "FedLALR's base learning rate alpha, as the client was configured with it.",
+    "client_eta_0": "Delta-SGD's starting step size eta_0, as the client was configured with it.",
+    "client_step_size_mean": (
+        "Mean of the step sizes Delta-SGD chose over a client's local steps this round."
+    ),
+    "client_step_size_min": "The smallest step size Delta-SGD chose over a client's local steps.",
+    "client_step_size_max": "The largest step size Delta-SGD chose over a client's local steps.",
+    "client_step_size_final": "The step size of a client's last local step this round.",
+    "step_size_clamp_fraction": (
+        "Fraction of a client's local steps where client.eta_max bound the step size "
+        "rather than the local smoothness estimate."
+    ),
+    "undefined_curvature_fraction": (
+        "Fraction of a client's local steps where the smoothness estimate was undefined "
+        "(no parameter or gradient change) and only the growth term applied."
+    ),
     "momentum_norm": (
         "||m||_2 of the server's first-moment buffer after this round's update (float64)."
     ),
@@ -403,7 +456,12 @@ FIXED_METRIC_GLOSSES: Mapping[str, str] = {
 _WORST_SUFFIX = re.compile(r"^worst([0-9p]+)$")
 
 
-def metric_gloss(name: str, *, split_glosses: Mapping[str, str] | None = None) -> str:
+def metric_gloss(
+    name: str,
+    *,
+    split_glosses: Mapping[str, str] | None = None,
+    metric_glosses: Mapping[str, str] | None = None,
+) -> str:
     """One plain-language sentence for one column name.
 
     `split_glosses` overrides which data a split is measured on. The train
@@ -411,13 +469,21 @@ def metric_gloss(name: str, *, split_glosses: Mapping[str, str] | None = None) -
     `evaluation.train.clients: participating` it is this round's trainers
     rather than every client, and a gloss that said "every client" would be
     describing a different measurement than the one the run performs.
+
+    `metric_glosses` says what each of the task's metrics measures
+    (``config.task_metric_glosses``, from ``TaskAdapter.METRIC_GLOSSES``);
+    without it, a classification task's.
     """
 
+    glosses = METRIC_BASE_GLOSSES if metric_glosses is None else metric_glosses
+    task = _task_metric_gloss(name, glosses)
+    if task is not None:
+        return task
     fixed = FIXED_METRIC_GLOSSES.get(name)
     if fixed is not None:
         return fixed
 
-    composed = _composed_gloss(name, split_glosses or SPLIT_GLOSSES)
+    composed = _composed_gloss(name, split_glosses or SPLIT_GLOSSES, glosses)
     if composed is not None:
         return composed
 
@@ -438,14 +504,17 @@ def metric_gloss(name: str, *, split_glosses: Mapping[str, str] | None = None) -
     return f"Example-weighted mean client {_titled(name).lower()} after local training."
 
 
-def _composed_gloss(name: str, split_glosses: Mapping[str, str]) -> str | None:
+def _composed_gloss(
+    name: str, split_glosses: Mapping[str, str], metric_glosses: Mapping[str, str]
+) -> str | None:
     """`{split}_{base}_{suffix}` read back as a sentence, or None."""
 
     personal = name.startswith("personal_")
     remainder = name.removeprefix("personal_") if personal else name
 
     for split, data in split_glosses.items():
-        for base, measured in METRIC_BASE_GLOSSES.items():
+        for base, default in METRIC_BASE_GLOSSES.items():
+            measured = _sentence(metric_glosses.get(base, default))
             prefix = f"{split}_{base}_"
             if not remainder.startswith(prefix):
                 continue

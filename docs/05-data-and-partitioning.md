@@ -14,8 +14,8 @@ partition reproducible independently of the run that uses it.
 
 | Name | Source | Used by |
 | --- | --- | --- |
-| `synthetic_classification` | built in memory from a seeded linear teacher | the quickstart, `configs/dev/` |
-| `manifest_dataset` | a generated manifest on disk | everything else |
+| `synthetic_classification` | built in memory from a seeded linear teacher | the `configs/dev/` configs with no `data.path`, `smoke.yaml` among them |
+| `manifest_dataset` | a generated manifest on disk | everything else, the quickstart among them (chapter 03 generates its manifest first) |
 
 `data.name` is inferred from `data.path` when unset. `manifest_dataset`
 requires `data.path`; `synthetic_classification` reads the four `data.*`
@@ -114,7 +114,7 @@ fails rather than silently generating 256-token windows.
 | | `min_size`, `max_size`, `sigma` | `quantity_skew` only |
 | `client_splits` | `train_ratio` | fraction of each client's examples used for training |
 | | `eval_ratio` | fraction held out as that client's validation split |
-| | `test_ratio` | fraction held out as that client's test split |
+| | `test_ratio` | fraction held out as that client's test split. Only `femnist` reads it; the shared writer behind the four `tensors` generators cuts train and eval slices only, and refuses a non-zero value |
 
 `dataset` and `partition` are read by all eight. `client_splits` is in this
 table because it is the split section for six of them, but it is not universal
@@ -144,8 +144,9 @@ why §4 has two answers rather than one.
 
 `partition_iid(indices, num_clients, seed)`.
 
-Shuffle every index with the seed, then split into `num_clients` nearly equal
-contiguous blocks. Sizes differ by at most one. This is the no-heterogeneity
+Shuffle every index with the seed, then deal them out round-robin: the *k*-th
+shuffled index goes to client `k mod num_clients`. Sizes differ by at most
+one. This is the no-heterogeneity
 control: any gap between an `iid` arm and a skewed one is the cost of
 heterogeneity and nothing else.
 

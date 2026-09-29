@@ -472,6 +472,13 @@ class PL1DTask(TaskAdapter):
         "distance_to_optimum": "min",
     }
 
+    #: What each metric measures, for the plan header's glosses (TaskAdapter.METRIC_GLOSSES).
+    METRIC_GLOSSES = {
+        "loss": "client objective x² + 3sin²(x) + s_i·x",
+        "optimality_gap": "optimality gap F(x) − F*",
+        "distance_to_optimum": "distance |x − x*| to the global optimum",
+    }
+
     #: The batched executor's form of a stacked step's gradients: one backward
     #: through the per-client losses' sum, which is faster for this problem's
     #: few, tiny parameters than vmap(grad) -- 4.86 against 5.90 ms a round
@@ -816,7 +823,10 @@ def register() -> None:
         sections={"problem": {"shift_scale"}},
     )
     registry.tasks.register(
-        TASK_NAME, lambda **kwargs: PL1DTask(**kwargs), metrics=PL1DTask.METRICS
+        TASK_NAME,
+        lambda **kwargs: PL1DTask(**kwargs),
+        metrics=PL1DTask.METRICS,
+        glosses=PL1DTask.METRIC_GLOSSES,
     )
     registry.models.register(MODEL_NAME, build_pl_scalar, task=TASK_NAME)
 

@@ -91,7 +91,8 @@ bases.
 `fedbrew/tasks/classification/torch_classification.py`.
 
 **loss** — mean cross-entropy, `nn.CrossEntropyLoss()` with its default
-`reduction="mean"` (line 71). Per batch *b* with logits *z* and labels *y*:
+`reduction="mean"` (`self._criterion`, built in `TorchClassificationTask.__init__`).
+Per batch *b* with logits *z* and labels *y*:
 
 ```
 L_b = -(1/n_b) * sum_i log softmax(z_i)[y_i]
@@ -99,13 +100,14 @@ n_b = targets.numel()
 ```
 
 Batches are combined by example count, not by batch count
-(`compute_metrics`, lines 258-271):
+(`TorchClassificationTask.compute_metrics`):
 
 ```
 loss = sum_b (L_b * n_b) / sum_b n_b
 ```
 
-**accuracy** — top-1 over `argmax(dim=1)` (lines 226-232):
+**accuracy** — top-1 over `argmax(dim=1)` (`TorchClassificationTask._scored`, which
+`eval_step` records per batch):
 
 ```
 correct_b  = |{ i : argmax(z_i) = y_i }|
@@ -114,7 +116,7 @@ accuracy   = sum_b correct_b / sum_b n_b
 
 ### 2.2 `causal_lm`
 
-`fedbrew/tasks/causal_lm/torch_causal_lm.py`, `_loss_and_counts` at line 461.
+`fedbrew/tasks/causal_lm/torch_causal_lm.py`, `TorchCausalLMTask._loss_and_counts`.
 
 Both metrics are computed over **active tokens only**. A token is active when
 its target is neither `ignore_index` (default `-100`) nor `pad_token_id` when
@@ -156,8 +158,8 @@ accuracy  = sum_b correct_b / sum_b total_b
 
 ### 2.3 Degenerate inputs
 
-Both tasks fall back identically (`compute_metrics`, classification
-lines 254-262, causal_lm lines 317-324):
+Both tasks fall back identically (`TorchClassificationTask.compute_metrics` and
+`TorchCausalLMTask.compute_metrics`, on the records they are handed):
 
 | Condition | `loss` | `accuracy` |
 | --- | --- | --- |
@@ -171,7 +173,7 @@ unreachable for a correctly generated dataset.
 One batch of `causal_lm` can be degenerate on its own: every target position
 inactive, so there is nothing to take a cross-entropy over. That batch's loss
 is `0.0` and its `total` is `0`, so it drops out of the token-weighted mean
-above and contributes nothing (`_loss_and_counts` line 494). The zero is built
+above and contributes nothing (the `if total:` branch of `_loss_and_counts`). The zero is built
 by summing an empty slice of the logits rather than by scaling the whole logit
 tensor to zero — it has to stay grad-connected, because the caller runs
 `backward()` and `step()` on it like any other batch, and a scaled sum turns
@@ -369,11 +371,13 @@ number of clients.
 The **Gloss** column is not written for this chapter. It is
 `METRIC_SUFFIX_GLOSSES` in `fedbrew/core/metrics.py`, quoted verbatim — the
 same sentences the plan header prints beside each column before a run starts,
-composed with the base metric's own gloss:
+composed with the base metric's own gloss — the run's task's
+(`TaskAdapter.METRIC_GLOSSES`, chapter 12 §6), or for a task that declares
+none, a classification task's (`METRIC_BASE_GLOSSES`):
 
 ```
-loss     -> Cross-entropy
-accuracy -> Top-1 accuracy
+loss     -> cross-entropy
+accuracy -> top-1 accuracy
 ```
 
 so `test_accuracy_avg` reads as "`Top-1 accuracy on client test data, averaged over clients — a 9-example client counts as much as a 900-example one.`"
@@ -447,7 +451,7 @@ round still fails if
 `accuracy` is optional, unlike `loss`: `_validate_client_evaluation` only
 requires `{split}_loss` from an evaluated client — `_validate_client_evaluation`
 (`fedbrew/core/loop.py`) — and
-`_aggregate_client_split_metrics` emits a base metric's twelve-or-fewer
+`_aggregate_client_split_metrics` emits a base metric's seven-or-fewer
 columns for a split only if **every** client counted into that split
 reported it — `_aggregate_client_split_metrics` (`fedbrew/core/loop.py`):
 
@@ -496,7 +500,7 @@ loss over examples.
 schedule grammar.
 
 The server reports these under a `global_` prefix
-(`FedAvgServer._result_weight`, `fedbrew/servers/fedavg.py`), and the loop
+(`FedAvgServer.evaluate_global`, `fedbrew/servers/fedavg.py`), and the loop
 accepts any of `central_test_{name}`,
 `global_test_{name}`, `global_{name}`, `test_{name}`, `{name}` — first match
 wins — then always writes the column as `central_test_{name}`
@@ -673,8 +677,14 @@ Two count columns sit before the metrics:
 
 ### 9.1 `round_metrics.csv`
 
-One row per round. Rewritten in full every round, atomically via a `.tmp`
-sibling and `os.replace` — `_atomic_text_writer` (`fedbrew/core/artifacts.py`).
+One row per round. **Appended** every `runtime.flush_every` rounds, and
+rewritten in full — atomically, via a `.tmp` sibling and `os.replace`
+(`_atomic_text_writer`, `fedbrew/core/artifacts.py`) — only when appending
+cannot be trusted: the first flush of an attempt, a history that shrank, a
+header that does not match, or a new metric name widening the columns
+(`flush_round_metrics_csv`, `fedbrew/core/artifacts.py`). Rewriting it every
+round made the bytes written grow with the square of the round count
+(POST-F31).
 
 Columns, in order — `save_round_metrics_csv` (`fedbrew/core/artifacts.py`):
 
@@ -813,7 +823,8 @@ when it does not, `personal_`-prefixed under `model_scope: personal` —
 a column no example problem writes. `save_best` defaults to on exactly when
 the run evaluates the validation split. Chapter 04 §7.3.
 
-**Direction is derived from the name, never configured** (lines 24-40). The
+**Direction is derived from the name, never configured**
+(`selection_mode_for_metric`). The
 name is split on `_` and the words checked against two sets:
 
 ```python
@@ -824,7 +835,7 @@ _MAXIMIZED_METRIC_WORDS = frozenset({"accuracy", "acc", "f1", "auc"})
 A name matching neither, or both, raises at config load. So `val_loss_avg`
 minimises and `val_accuracy_worst10` maximises, with nothing to configure.
 
-**Only validation metrics are accepted** (lines 45-70). The name must start with
+**Only validation metrics are accepted** (`validate_selection_metric`). The name must start with
 `val_` or `personal_val_`; selecting `best.pt` on a test metric makes the
 reported test score optimistically biased, so it is refused at config load with
 a message listing the available names.

@@ -69,7 +69,8 @@ class FedAvgFTClient(FedAvgClient):
         Args:
             *args: Forwarded to the base client positionally.
             finetune_epochs: Passes over the client's train split before
-                evaluating. 0 makes this client identical to FedAvg.
+                evaluating. A positive integer: 0 is refused at load, since
+                the arm without fine-tuning is plain FedAvg.
             finetune_learning_rate: Step size for those passes, in
                 model-parameter units per step. None reuses the training
                 ``learning_rate``.

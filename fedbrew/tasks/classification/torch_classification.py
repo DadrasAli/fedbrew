@@ -26,6 +26,7 @@ class TorchClassificationTask(TaskAdapter):
 
     #: Cross-entropy and the argmax's hit rate (``compute_metrics``).
     METRICS = {"loss": "min", "accuracy": "max"}
+    METRIC_GLOSSES = {"loss": "cross-entropy", "accuracy": "top-1 accuracy"}
 
     #: The batched executor's form of a stacked step's gradients: vmap(grad).
     #: One backward through the per-client losses' sum was slower on the CPU
@@ -71,7 +72,9 @@ class TorchClassificationTask(TaskAdapter):
 
         Batches are (features, targets): features float of shape
         (N, *feature_dims) exactly as the shards store them -- **not
-        normalised**, since the models here normalise internally -- and targets
+        normalised** here: femnist_resnet18 and openimage_shufflenet scale raw
+        pixels themselves, and mlp, cnn and small_cnn take the features as
+        stored -- and targets
         int64 of shape (N,) holding class indices in [0, num_classes).
         """
 

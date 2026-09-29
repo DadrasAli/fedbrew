@@ -4,8 +4,11 @@ LoRA initialises B to zero, so the federated model at round 0 is exactly the
 base model. The framework logs no round-0 evaluation, so this reports the
 reference point that every federated loss curve starts from.
 
-Metrics come from the experiment's own task adapter, so loss and accuracy are
-computed identically to the logged ``central_test_loss`` / ``central_test_accuracy``.
+Metrics come from the experiment's own task adapter, the ``evaluate_model`` the
+logged ``central_test_loss`` / ``central_test_accuracy`` come from. The run's
+``numerics`` settings are not applied here -- ``matmul_precision`` among them --
+so under a config that lowers the matmul precision the two differ in the last
+bits.
 """
 
 from __future__ import annotations
@@ -44,9 +47,10 @@ def main() -> None:
     LoRA initialises B to zero, so the federated model at round 0 is exactly
     the base model, and the framework logs no round-0 evaluation. The adapter
     is dropped so the base model is measured on its own, and metrics come from
-    the experiment's own task adapter -- so the numbers are computed identically
-    to the logged ``central_test_loss`` / ``central_test_accuracy`` and are
-    directly comparable to them.
+    the experiment's own task adapter -- the same ``evaluate_model`` as the
+    logged ``central_test_loss`` / ``central_test_accuracy``, so the numbers are
+    comparable to them. The run's ``numerics`` settings are not applied, so a
+    config that lowers ``matmul_precision`` differs from them in the last bits.
     """
 
     parser = argparse.ArgumentParser(description=__doc__)

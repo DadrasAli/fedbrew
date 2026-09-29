@@ -31,6 +31,10 @@ class TorchCausalLMTask(TaskAdapter):
 
     #: Token cross-entropy in nats and next-token accuracy (``compute_metrics``).
     METRICS = {"loss": "min", "accuracy": "max"}
+    METRIC_GLOSSES = {
+        "loss": "token cross-entropy in nats over active target tokens",
+        "accuracy": "next-token accuracy over active target tokens",
+    }
 
     def __init__(
         self,
@@ -48,11 +52,12 @@ class TorchCausalLMTask(TaskAdapter):
                 ``ignore_index`` and the SFT flag come from. A ``pad_token_id``
                 absent from it means the dataset declares no padding token, not
                 token 0.
-            batch_size: Mini-batch size, in sequences. Must be positive. There
-                is no separate evaluation batch size for this task: a causal-LM
-                forward produces (N, sequence_length, vocabulary) logits, which
-                reaches tens of gigabytes at the classification default, so
-                evaluation runs at the training size.
+            batch_size: Mini-batch size, in sequences. Must be positive. The
+                clients' evaluation passes run at ``client.eval_batch_size``,
+                which for this task defaults to this training size rather than
+                the classification default: a causal-LM forward produces
+                (N, sequence_length, vocabulary) logits, which reaches tens of
+                gigabytes at that default (``factory._eval_batch_size``).
             device: Torch device string; ``"auto"`` resolves to CUDA when
                 available.
             dataloader_config: DataLoader options.

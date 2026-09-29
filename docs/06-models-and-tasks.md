@@ -27,7 +27,11 @@ name  input_dim  hidden_dim  num_classes
 
 For `causal_lm`, manifest metadata is also injected under the `dataset_`
 prefix — `dataset_sequence_length`, `dataset_ignore_index` and the tokenizer
-fields. A config cannot set those; they come from the data.
+fields (`_add_causal_manifest_metadata`, `fedbrew/core/factory.py`). They
+come from the data. A config may write a `dataset_` key too — every builder
+accepts the prefix — but the manifest's value replaces it wherever the
+manifest carries that field, and one it does not carry reaches the builder as
+written.
 
 ## 2. The eight builders
 
@@ -42,7 +46,9 @@ fields. A config cannot set those; they come from the data.
 | `hf_causal_lm` | causal_lm | `fedbrew/models/hf_causal_lm.py` | 7 |
 | `hf_causal_lm_lora` | causal_lm | `fedbrew/models/hf_causal_lm_lora.py` | 13 |
 
-`cnn` and `small_cnn` share a module and a key set; they differ in width.
+`cnn` and `small_cnn` are one builder under two names: the same module, key
+set and defaults, and the same model — `small_cnn` is not a narrower one. The
+two names exist so a config can say which it means.
 
 ### 2.1 `mlp`
 
@@ -53,8 +59,9 @@ fields. A config cannot set those; they come from the data.
 | `num_classes` | `2` |
 | `dropout` | `0.0` |
 
-The three dimensions are also injected from the dataset, so a config usually
-sets none of them.
+`input_dim` and `num_classes` are inferred from the dataset manifest when a
+config leaves them out, and a stated value that disagrees with it is refused
+at load (chapter 04 §6.1); `hidden_dim` is the config's own.
 
 ### 2.2 `cnn` and `small_cnn`
 
@@ -74,7 +81,9 @@ sets none of them.
 | `group_norm_groups` | `8` | GroupNorm, not BatchNorm — see §4; honoured at every width here |
 | `dropout` | `0.1` | |
 
-`num_classes` is injected; it is `62` for FEMNIST (10 digits + 52 letters).
+`num_classes` is inferred from the manifest when left out, and checked against
+it when stated (chapter 04 §6.1); it is `62` for FEMNIST (10 digits + 52
+letters).
 
 ### 2.4 `openimage_shufflenet`
 
@@ -263,8 +272,10 @@ the shipped Qwen2.5 vocabulary — so a dataset that never padded had every id-0
 target dropped from the loss, the accuracy and the aggregation weight, and
 every id-0 input position zeroed in the attention mask, on the strength of a
 default it had not asked for. The `0` in `tiny_gpt2`'s key table above is that
-builder's own `GPT2Config` default and is unrelated; all three shipped
-generators write `padding_token_id` explicitly, so none of them changed.
+builder's own `GPT2Config` default and is unrelated; all four shipped
+generators that write causal-LM data — `tiny_causal_lm`, `hf_causal_lm_text`,
+`oasst1_sft` and `generic_sft` — write `padding_token_id` explicitly, so none
+of them changed.
 
 Both causal-LM builders take `null` for the key as well, and mean the same
 thing by it. `hf_causal_lm` always did; `tiny_gpt2` read it through `int()` and
@@ -365,8 +376,9 @@ ValueError: non-floating state tensor '1.num_batches_tracked' differs between cl
 
 Different step counts are the normal case, not the edge case: `local_iterations`
 full passes over clients of unequal size is unequal steps by construction. The
-failure is **mid-round, during aggregation** — after every participating
-client has run its local iterations — and it recurs every round.
+accumulator would raise mid-round, after every participating client had run
+its local iterations; `factory.build_components` refuses the model first, once
+per run and before the first round (§4.2).
 
 One honest qualification, because the accumulator's refusal is narrower than
 "BatchNorm does not work": **the refusal is about non-floating buffers, not
@@ -514,9 +526,9 @@ fedbrew run --config configs/dev/tiny_causal_lm.yaml --validate-only
    loss mask matches by value and would eat every end-of-document target. A
    manifest that declares none leaves the task with none — never token 0. §3.3.
 7. **GroupNorm, not BatchNorm, in the federated vision models.** Running
-   statistics averaged across non-IID clients describe no client — and
-   `num_batches_tracked` makes it a mid-round `ValueError` rather than a worse
-   number, whenever two participating clients took different step counts. §4.1.
+   statistics averaged across non-IID clients describe no client, and a model
+   with registered buffers is refused when the run's components are built,
+   before the first round, rather than averaged into a worse number. §4.1, §4.2.
 8. **A scope change is a protocol change.** `model_state_scope` must be
    reported in the metadata and is validated by the server on every result.
 
@@ -552,8 +564,9 @@ fedbrew run --config configs/dev/tiny_causal_lm.yaml --validate-only
   `hf_causal_lm_lora`; `hf_causal_lm` rejects it.
 - **Choosing an odd `stage_channels` value.** Refused. Both branches are built
   at half width.
-- **Bringing a BatchNorm model.** Aggregation raises on `num_batches_tracked`
-  mid-round, once two clients differ in step count — §4.1. Substitute
+- **Bringing a BatchNorm model.** Refused when the run's components are built,
+  before the first round: its `running_mean`, `running_var` and
+  `num_batches_tracked` are registered buffers — §4.1, §4.2. Substitute
   GroupNorm; there is no config that makes BatchNorm work.
 - **Expecting `local_files_only: false` to enable a download.** The builder
   raises. Prepare the snapshot with `fedbrew prepare-llm` instead — chapter 05.

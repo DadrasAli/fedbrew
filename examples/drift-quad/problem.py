@@ -663,6 +663,14 @@ class DriftQuadTask(TaskAdapter):
         "distance_to_client_optimum": "none",
     }
 
+    #: What each metric measures, for the plan header's glosses (TaskAdapter.METRIC_GLOSSES).
+    METRIC_GLOSSES = {
+        "loss": "client objective ½xᵀAx − b_iᵀx",
+        "optimality_gap": "optimality gap F(x) − F*",
+        "distance_to_optimum": "distance ‖x − x*‖₂ to the global optimum",
+        "distance_to_client_optimum": "distance ‖x − A⁻¹b_i‖₂ to the client's own optimum",
+    }
+
     #: The batched executor's form of a stacked step's gradients: one backward
     #: through the per-client losses' sum, which is faster for this problem's
     #: few, tiny parameters than vmap(grad) -- 8.54 against 10.66 ms a round
@@ -1033,7 +1041,10 @@ def register() -> None:
         sections={"problem": {"dim", "condition_number", "dissimilarity"}},
     )
     registry.tasks.register(
-        TASK_NAME, lambda **kwargs: DriftQuadTask(**kwargs), metrics=DriftQuadTask.METRICS
+        TASK_NAME,
+        lambda **kwargs: DriftQuadTask(**kwargs),
+        metrics=DriftQuadTask.METRICS,
+        glosses=DriftQuadTask.METRIC_GLOSSES,
     )
     registry.models.register(
         MODEL_NAME, build_quad_vector, task=TASK_NAME, shape_keys=("input_dim",)

@@ -26,6 +26,7 @@ server:
 client:
   update_rule: scaffold
   learning_rate: 0.0125
-  # SCAFFOLD reads no update_mode: it always runs local_iterations chained passes
-  # over the loader.
+  # update_mode is left unset, so SCAFFOLD runs its own loop's default,
+  # sequential_epoch: local_iterations chained passes over the loader. It also
+  # takes full_gradient.
   batch_size: 4
