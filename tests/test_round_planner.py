@@ -267,6 +267,7 @@ class AScriptWithoutAMainGuardIsNotRunAgainTest(unittest.TestCase):
     """A worker is spawned, and spawning imports the parent's main module: not this one's."""
 
     def test_the_script_runs_once(self) -> None:
+        import os
         import subprocess
         import sys
 
@@ -289,12 +290,17 @@ class AScriptWithoutAMainGuardIsNotRunAgainTest(unittest.TestCase):
                 "    planner.close()\n",
                 encoding="utf-8",
             )
+            repository = Path(__file__).resolve().parent.parent
+            # A script's own directory heads its import path, not the working
+            # directory, so the repository goes on PYTHONPATH for `tests`.
+            path = os.pathsep.join(filter(None, [str(repository), os.environ.get("PYTHONPATH")]))
             done = subprocess.run(
                 [sys.executable, str(script)],
                 capture_output=True,
                 text=True,
                 timeout=300,
-                cwd=Path(__file__).resolve().parent.parent,
+                cwd=repository,
+                env={**os.environ, "PYTHONPATH": path},
             )
             self.assertEqual(done.returncode, 0, done.stderr[-2000:])
             self.assertIn("planned [1, 2, 3]", done.stdout)
