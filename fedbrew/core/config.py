@@ -938,6 +938,7 @@ _KNOWN_EXTRA_KEYS: dict[str, frozenset[str]] = {
             "momentum",
             "nesterov",
             "proximal_mu",
+            "sampling",
             "theta_0",
             "train_shuffle",
             "update_mode",
@@ -1608,6 +1609,7 @@ def validate_config(config: FullConfig) -> None:
     )
     _validate_local_sgd_options(config)
     _validate_update_mode_options(config)
+    _validate_sampling(config)
     _validate_delta_sgd_options(config)
     _validate_fedlalr_options(config)
     _validate_fedavg_ft_options(config)
@@ -2650,6 +2652,37 @@ def _validate_update_mode_options(config: FullConfig) -> None:
             raise RunRefused(f"client.{name} must be one of: {choices}")
 
     _refuse_drop_last_under_full_gradient(config)
+
+
+def _validate_sampling(config: FullConfig) -> None:
+    """``client.sampling``: how a training pass draws its rows (fedbrew/clients/sampling.py).
+
+    ``with_replacement`` makes every pass one batch drawn with replacement, so
+    it is refused beside what assumes a pass covers the split: the exact
+    gradient of ``full_gradient``, and ``drop_last``, which has no short batch
+    to drop. A rule that trains nothing locally has no loader to sample.
+    """
+
+    from fedbrew.clients.sampling import SAMPLINGS, WITH_REPLACEMENT, WITHOUT_REPLACEMENT
+
+    extra = config.client.extra
+    sampling = extra.get("sampling", WITHOUT_REPLACEMENT)
+    if not isinstance(sampling, str) or sampling not in SAMPLINGS:
+        raise RunRefused(f"client.sampling must be one of: {', '.join(SAMPLINGS)}")
+    if sampling != WITH_REPLACEMENT:
+        return
+    if extra.get("update_mode") == FULL_GRADIENT_UPDATE_MODE:
+        raise RunRefused(
+            "client.sampling: with_replacement draws each pass as one batch with "
+            "replacement, and update_mode: full_gradient is the gradient over every "
+            "training sample. Use single_batch or sequential_epoch, or leave "
+            "client.sampling at without_replacement."
+        )
+    if extra.get("drop_last"):
+        raise RunRefused(
+            "client.drop_last: true drops a short last batch, and client.sampling: "
+            "with_replacement draws every batch full. Set client.drop_last to false."
+        )
 
 
 def _refuse_drop_last_under_full_gradient(config: FullConfig) -> None:

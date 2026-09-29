@@ -243,10 +243,7 @@ class FedAvgFTClient(FedAvgClient):
         # has taken a phase since it was written; this pass just never named
         # its own. FINDINGS.csv P09-F09.
         train_data = _get_train_data(self.client_data)
-        train_loader = self.task.build_dataloader(
-            train_data,
-            self._train_loader_config(request.round_id, phase="finetune"),
-        )
+        train_loader = self._train_loader(train_data, request.round_id, phase="finetune")
         result = run_sgd_update_mode(
             task=self.task,
             model=model,

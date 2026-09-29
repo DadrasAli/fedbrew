@@ -548,6 +548,18 @@ def _client_classes() -> dict[str, type]:
     return found
 
 
+#: Settings a client saves only where they are not their default, as key ->
+#: (the default, why), so a checkpoint written without them is what it was
+#: before they existed; absent, a checkpoint reads as the default, and a
+#: resume under another value is refused either way.
+SAVED_WHEN_SET: dict[str, tuple[Any, str]] = {
+    "train_sampling": (
+        "without_replacement",
+        "client.sampling, added after every checkpoint a run without it has written",
+    ),
+}
+
+
 def _client_builds() -> list[tuple[str, Callable[[], Any]]]:
     """One way to build each shipped client class, keyed by class.
 
@@ -593,7 +605,7 @@ class EveryClientSettingIsCheckpointedTest(unittest.TestCase):
         for name, build in _client_builds():
             with self.subTest(client=name):
                 client = build()
-                missing = _client_settings(client) - set(client.get_state())
+                missing = _client_settings(client) - set(client.get_state()) - set(SAVED_WHEN_SET)
                 self.assertEqual(missing, set(), f"{name} is built with these and never saves them")
 
     def test_a_change_to_any_saved_setting_is_refused(self) -> None:
@@ -610,6 +622,26 @@ class EveryClientSettingIsCheckpointedTest(unittest.TestCase):
                     state[key] = _changed(state[key])
                     with self.assertRaises(ValueError) as caught:
                         build().load_state(state)
+                    self.assertIn(key, str(caught.exception))
+
+    def test_a_setting_saved_only_when_set(self) -> None:
+        """Unset it is not in the state; set, it is, and a resume across the two is refused."""
+
+        for name, build in _client_builds():
+            for key, (default, _) in SAVED_WHEN_SET.items():
+                with self.subTest(client=name, key=key):
+                    unset = build()
+                    self.assertEqual(getattr(unset, key), default)
+                    self.assertNotIn(key, unset.get_state())
+                    other = build()
+                    setattr(other, key, "with_replacement")
+                    saved = other.get_state()
+                    self.assertEqual(saved[key], "with_replacement")
+                    with self.assertRaises(ValueError) as caught:
+                        build().load_state(saved)
+                    self.assertIn(key, str(caught.exception))
+                    with self.assertRaises(ValueError) as caught:
+                        other.load_state(unset.get_state())
                     self.assertIn(key, str(caught.exception))
 
     def test_every_wiring_exemption_names_a_real_parameter(self) -> None:

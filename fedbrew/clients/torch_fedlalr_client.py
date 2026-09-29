@@ -144,10 +144,7 @@ class TorchFedLALRClient(TorchSGDClient):
         second_moment_hat = _broadcast_state(request.payload, "second_moment_state", device)
         second_moment = {name: tensor.clone() for name, tensor in second_moment_hat.items()}
 
-        train_loader = self.task.build_dataloader(
-            train_data,
-            self._train_loader_config(request.round_id),
-        )
+        train_loader = self._train_loader(train_data, request.round_id)
         training_outputs: list[Mapping[str, float]] = []
         local_steps = 0
         for _ in range(self.local_iterations):

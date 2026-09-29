@@ -24,6 +24,7 @@ from fedbrew.clients.local_update_modes import (
     release_optimizer,
     reused_optimizer,
 )
+from fedbrew.clients.sampling import WITHOUT_REPLACEMENT
 from fedbrew.clients.torch_sgd_client import TorchSGDClient, _get_train_data
 from fedbrew.core.checkpointing import refuse_a_reconfigured_resume
 from fedbrew.core.federated_state import model_state_size, refuse_adapter_state
@@ -63,6 +64,7 @@ class TorchScaffoldClient(TorchSGDClient[TaskAdapter]):
         eval_shuffle: bool = False,
         drop_last: bool = False,
         update_mode: str | None = None,
+        train_sampling: str = WITHOUT_REPLACEMENT,
     ) -> None:
         """Configure local SGD with SCAFFOLD control-variate correction.
 
@@ -99,6 +101,7 @@ class TorchScaffoldClient(TorchSGDClient[TaskAdapter]):
             train_shuffle=train_shuffle,
             eval_shuffle=eval_shuffle,
             drop_last=drop_last,
+            train_sampling=train_sampling,
         )
         self._client_control: StateDict | None = None
         self.update_mode = own_loop_update_mode(update_mode)
@@ -143,10 +146,7 @@ class TorchScaffoldClient(TorchSGDClient[TaskAdapter]):
             old_client_control,
             server_control,
         )
-        train_loader = self.task.build_dataloader(
-            train_data,
-            self._train_loader_config(request.round_id),
-        )
+        train_loader = self._train_loader(train_data, request.round_id)
 
         local_steps = 0
         try:

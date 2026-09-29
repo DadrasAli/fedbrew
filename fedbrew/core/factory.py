@@ -528,6 +528,13 @@ EXTENSION_CLIENT_KEYS: tuple[str, ...] = (
 )
 
 
+def _client_sampling_kwargs(config: FullConfig) -> dict[str, Any]:
+    """``client.sampling`` as the rule's ``train_sampling``, where a config sets it."""
+
+    sampling = config.client.extra.get("sampling")
+    return {} if sampling is None else {"train_sampling": str(sampling)}
+
+
 def _extension_client_kwargs(
     config: FullConfig,
     task: TaskAdapter,
@@ -551,6 +558,9 @@ def _extension_client_kwargs(
         "train_shuffle": _client_extra_bool(config, "train_shuffle", True),
         "eval_shuffle": _client_extra_bool(config, "eval_shuffle", False),
         "drop_last": _client_extra_bool(config, "drop_last", False),
+        # Only where a config asks for it, so an extension rule built before
+        # the key existed is built as it was.
+        **_client_sampling_kwargs(config),
         # A rule that schedules anything over the run needs the horizon, and
         # no other argument carries it.
         "total_rounds": config.server.global_rounds,
@@ -588,6 +598,7 @@ def _training_client_kwargs(
         "train_shuffle": _client_extra_bool(config, "train_shuffle", True),
         "eval_shuffle": _client_extra_bool(config, "eval_shuffle", False),
         "drop_last": _client_extra_bool(config, "drop_last", False),
+        **_client_sampling_kwargs(config),
     }
     if config.client.update_rule in FIXED_LR_SGD_CLIENT_RULES:
         kwargs.update(

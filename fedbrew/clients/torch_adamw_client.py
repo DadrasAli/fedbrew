@@ -10,6 +10,7 @@ from torch import optim
 
 from fedbrew.clients.batched_update import LocalProgram, OptimizerSpec
 from fedbrew.clients.local_update_modes import FULL_GRADIENT_UPDATE_MODE, reused_optimizer
+from fedbrew.clients.sampling import WITHOUT_REPLACEMENT
 from fedbrew.clients.torch_sgd_client import TorchSGDClient
 from fedbrew.core.checkpointing import refuse_a_reconfigured_resume
 from fedbrew.core.protocol import FitRequest
@@ -44,6 +45,7 @@ class TorchAdamWClient(TorchSGDClient[TaskAdapter]):
         drop_last: bool = False,
         max_local_steps: int | None = None,
         update_mode: str | None = None,
+        train_sampling: str = WITHOUT_REPLACEMENT,
     ) -> None:
         """Configure local AdamW instead of SGD.
 
@@ -108,6 +110,7 @@ class TorchAdamWClient(TorchSGDClient[TaskAdapter]):
             total_rounds=total_rounds,
             eval_shuffle=eval_shuffle,
             drop_last=drop_last,
+            train_sampling=train_sampling,
             weight_decay=weight_decay,
             max_local_steps=max_local_steps,
             update_mode=update_mode,

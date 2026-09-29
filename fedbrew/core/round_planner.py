@@ -491,7 +491,7 @@ def roster_plan(components: Any) -> tuple[RosterPlan | None, str | None]:
 
     Planned ahead only where every round's orders are a function of the
     roster: FedAvg's own sampling, a rule whose loop and loaders are its
-    class's (``batched_loop``, ``_train_loader_config``), one configuration for
+    class's (``batched_loop``, ``train_order``), one configuration for
     every client -- the factory builds each from the run's one config -- and a
     task that declares what its loaders yield. Each client's data is read
     once, here, for its training split's row count.
@@ -508,13 +508,13 @@ def roster_plan(components: Any) -> tuple[RosterPlan | None, str | None]:
     client_ids = tuple(str(client_id) for client_id in dataset.list_clients())
     representative = clients[client_ids[0]]
     task = representative.task
-    train_config = representative._train_loader_config(1, seeded=False)
     eval_config = representative._eval_loader_config(1, seeded=False)
     loop = representative.batched_loop()
     train_orders, eval_orders = [], []
     for client_id in client_ids:
         data = _get_train_data(dataset.get_client_data(client_id))
-        train_orders.append(task.loader_order(data, train_config))
+        # The client's own declaration, which client.sampling can make iid.
+        train_orders.append(representative.train_order(data, 1))
         eval_orders.append(task.loader_order(data, eval_config))
     if any(order is None for order in (*train_orders, *eval_orders)):
         return None, "the task declares no order for a client's loader"

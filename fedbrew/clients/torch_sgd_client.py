@@ -29,6 +29,15 @@ from fedbrew.clients.local_update_modes import (
     release_optimizer,
     reused_optimizer,
 )
+from fedbrew.clients.sampling import (
+    SAMPLINGS,
+    WITH_REPLACEMENT,
+    WITHOUT_REPLACEMENT,
+    ReplacementBatches,
+    ReplacementLoader,
+    replacement_order,
+    split_row_count,
+)
 from fedbrew.core.checkpointing import (
     refuse_a_pre_rename_client_state,
     refuse_a_reconfigured_resume,
@@ -46,6 +55,7 @@ from fedbrew.core.protocol import (
     FitRequest,
     FitResult,
 )
+from fedbrew.core.refusal import RunRefused
 from fedbrew.core.runtime_setup import dataloader_seed
 from fedbrew.core.seeding import client_seed
 from fedbrew.core.stacked_results import MetricColumns, StackedFitResults
@@ -109,6 +119,7 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
         total_rounds: int | None = None,
         max_local_steps: int | None = None,
         update_mode: str | None = None,
+        train_sampling: str = WITHOUT_REPLACEMENT,
     ) -> None:
         """Configure one client's local optimizer and data loading.
 
@@ -157,9 +168,16 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
                 is one pass, one optimizer step per batch. ``full_gradient``:
                 each is one optimizer step on the exact gradient of the whole
                 train split. A subclass with modes of its own redefines it.
+            train_sampling: ``client.sampling``: ``without_replacement`` (the
+                default), the task's own loader; ``with_replacement``, every
+                training pass one batch of ``batch_size`` rows drawn with
+                replacement (``fedbrew/clients/sampling.py``), which needs a
+                task that gives its rows (``split_rows``).
 
         Raises:
             ValueError: If any of the bounds above is violated.
+            RunRefused: If ``train_sampling`` is ``with_replacement`` and the
+                task gives no rows to draw from.
 
         Not every rule honours every option, and the factory only hands each
         one to the rules that do. A config setting an option its rule would
@@ -223,6 +241,15 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
         self.train_shuffle = bool(train_shuffle)
         self.eval_shuffle = bool(eval_shuffle)
         self.drop_last = bool(drop_last)
+        if train_sampling not in SAMPLINGS:
+            raise ValueError(f"train_sampling must be one of {SAMPLINGS}, not {train_sampling!r}")
+        if train_sampling == WITH_REPLACEMENT and not callable(getattr(task, "split_rows", None)):
+            raise RunRefused(
+                "client.sampling: with_replacement draws each training batch as the task's "
+                f"rows at the drawn indices (split_rows), and task {type(task).__name__} "
+                "gives none. Leave client.sampling at without_replacement for it."
+            )
+        self.train_sampling = str(train_sampling)
         self._num_examples = _infer_num_examples(client_data)
         # The message below is about training batches, so it needs the train
         # split, not the client's total across every split.
@@ -241,10 +268,7 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
         model = self.task.build_model(self.model_config)
         self._load_federated_payload(model, request.payload, context="fit request")
         optimizer = self._build_optimizer(model, request.round_id)
-        train_loader = self.task.build_dataloader(
-            train_data,
-            self._train_loader_config(request.round_id),
-        )
+        train_loader = self._train_loader(train_data, request.round_id)
 
         training_outputs: list[Mapping[str, float]] = []
         optimizer_steps = 0
@@ -455,9 +479,7 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
 
         train_data = _get_train_data(self.client_data)
         round_id = request.round_id
-        train_order = self._loader_order(
-            train_data, self._train_loader_config(round_id, seeded=False)
-        )
+        train_order = self.train_order(train_data, round_id)
         eval_order = self._loader_order(
             train_data, self._eval_loader_config(round_id, seeded=False)
         )
@@ -465,9 +487,7 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
         if train_order is None or eval_order is None:
 
             def replay() -> tuple[list[list[Any]], list[Any]]:
-                updates = draw(
-                    self.task.row_batches(train_data, self._train_loader_config(round_id))
-                )
+                updates = draw(self._train_row_batches(train_data, round_id))
                 evaluated = list(
                     self.task.row_batches(train_data, self._eval_loader_config(round_id))
                 )
@@ -499,15 +519,20 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
         declare = getattr(self.task, "loader_order", None)
         if not callable(declare):
             return None
+        return self._kept_order(data, tuple(config.items()), lambda: declare(data, config))
+
+    def _kept_order(self, data: Any, key: Any, declare: Any) -> Any:
+        """``declare()``, kept per split and ``key`` while the split is the same, unedited."""
+
         kept = getattr(self, "_kept_orders", None)
         if kept is None:
             kept = self._kept_orders = {}
-        key = (id(data), tuple(config.items()))
+        key = (id(data), key)
         versions = data_versions(data)
         held = kept.get(key)
         if held is not None and held[0] is data and held[1] == versions:
             return held[2]
-        order = declare(data, config)
+        order = declare()
         kept[key] = (data, versions, order)
         return order
 
@@ -1019,6 +1044,13 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
             "train_shuffle": self.train_shuffle,
             "eval_shuffle": self.eval_shuffle,
             "drop_last": self.drop_last,
+            # Only where it is not the default, so a checkpoint of a run
+            # without the key is what it was before the key existed.
+            **(
+                {"train_sampling": self.train_sampling}
+                if self.train_sampling != WITHOUT_REPLACEMENT
+                else {}
+            ),
         }
 
     def load_state(self, state: Mapping[str, Any]) -> None:
@@ -1080,6 +1112,12 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
         # comparison below with that setting unchecked.
         refuse_a_pre_rename_client_state("local_sgd client", state)
         refuse_a_reconfigured_resume("local_sgd client", state, configured)
+        # Absent means the default, which a checkpoint does not write.
+        refuse_a_reconfigured_resume(
+            "local_sgd client",
+            {"train_sampling": state.get("train_sampling", WITHOUT_REPLACEMENT)},
+            {"train_sampling": self.train_sampling},
+        )
         self._num_examples = int(state.get("num_examples", self._num_examples))
         if "base_seed" in state:
             raw_seed = state["base_seed"]
@@ -1256,6 +1294,47 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
         if seed is not None:
             config["seed"] = seed
         return config
+
+    def _train_loader(self, data: Any, round_id: int, phase: str = "fit") -> Any:
+        """The loader of a training pass over ``data``: the task's, or with replacement.
+
+        Under ``client.sampling: with_replacement`` every pass is one batch of
+        the task's rows at indices drawn with replacement, from the seed the
+        task's loader would have been handed (``fedbrew/clients/sampling.py``).
+        """
+
+        if self.train_sampling == WITH_REPLACEMENT:
+            return ReplacementLoader(
+                tuple(self.task.split_rows(data)),
+                self.batch_size,
+                self._loader_seed(round_id, phase),
+            )
+        return self.task.build_dataloader(data, self._train_loader_config(round_id, phase))
+
+    def _train_row_batches(self, data: Any, round_id: int, phase: str = "fit") -> Any:
+        """``_train_loader``'s batches as row indices, from the same draws."""
+
+        if self.train_sampling == WITH_REPLACEMENT:
+            count = split_row_count(self.task, data)
+            return ReplacementBatches(count, self.batch_size, self._loader_seed(round_id, phase))
+        return self.task.row_batches(data, self._train_loader_config(round_id, phase))
+
+    def train_order(self, data: Any, round_id: int, phase: str = "fit") -> Any:
+        """What a training pass's loader yields, declared unseeded, or None to replay it.
+
+        The task's own declaration (``loader_order``); under ``client.sampling:
+        with_replacement``, the iid order of ``fedbrew/clients/sampling.py``,
+        whatever the task declares, which the batched planner draws from the
+        same seed as ``_train_loader``.
+        """
+
+        if self.train_sampling == WITH_REPLACEMENT:
+            return self._kept_order(
+                data,
+                ("sampling", self.train_sampling, self.batch_size),
+                lambda: replacement_order(split_row_count(self.task, data), self.batch_size, None),
+            )
+        return self._loader_order(data, self._train_loader_config(round_id, phase, seeded=False))
 
     def _eval_loader_config(self, round_id: int, seeded: bool = True) -> dict[str, Any]:
         config: dict[str, Any] = {

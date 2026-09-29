@@ -124,10 +124,7 @@ class FedAvgClient(TorchSGDClient):
         self._load_federated_payload(model, request.payload, context="fit request")
 
         learning_rate_used = self._round_learning_rate(request.round_id)
-        train_loader = self.task.build_dataloader(
-            train_data,
-            self._train_loader_config(request.round_id),
-        )
+        train_loader = self._train_loader(train_data, request.round_id)
         update_result = run_sgd_update_mode(
             task=self.task,
             model=model,

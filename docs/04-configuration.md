@@ -305,6 +305,7 @@ Read by `local_sgd`, `fedavg` and `centralized`, and partly by the others.
 | `train_shuffle` | bool | **`true`** | `_training_client_kwargs` (`fedbrew/core/factory.py`) |
 | `eval_shuffle` | bool | **`false`** | `_training_client_kwargs` (`fedbrew/core/factory.py`) |
 | `drop_last` | bool | **`false`** | `_training_client_kwargs` (`fedbrew/core/factory.py`) |
+| `sampling` | `without_replacement` \| `with_replacement` | **`without_replacement`** | `TorchSGDClient` (`fedbrew/clients/torch_sgd_client.py`); `with_replacement` makes every training pass one batch of `batch_size` rows drawn with replacement, the iid oracle, for any task that gives its rows (`split_rows`), in the sequential, batched and resident paths alike (`fedbrew/clients/sampling.py`); refused beside `update_mode: full_gradient` and `drop_last: true` |
 | `eval_batch_size` | int \| null | `max(batch_size, 256)` for classification; `batch_size` for causal_lm | `_eval_batch_size` (`fedbrew/core/factory.py`) |
 | `momentum` | float | — | required for the rules that read it |
 | `weight_decay` | float | — | same |
@@ -854,6 +855,7 @@ Collected, because a reader of a config cannot see any of them.
 | --- | --- | --- |
 | `client.train_shuffle` | `true` | different optimisation |
 | `client.drop_last` | `false` | `true` silently zeroes small clients' gradients |
+| `client.sampling` | `without_replacement` | each pass is an epoch of the task's loader, not an iid batch |
 | `client.eval_shuffle` | `false` | breaks client-eval state reuse |
 | `client.epsilon` (fedlalr) | `1e-8`, read by client **and** server | two consumers move together |
 | `client.finetune_learning_rate` | inherits `client.learning_rate` | the personalization LR is invisible |
