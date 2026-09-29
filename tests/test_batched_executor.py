@@ -88,6 +88,8 @@ class TheKeysAreCheckedTest(unittest.TestCase):
         self._validate(executor="sequential")
         self._validate(executor="batched", executor_chunk_bytes=1 << 20)
         self._validate(executor="batched", executor_chunk_bytes="auto")
+        self._validate(executor="batched", gradient_form="summed")
+        self._validate(executor="batched", gradient_form="vmap_grad")
 
     def test_anything_else_is_refused(self) -> None:
         for performance in (
@@ -99,6 +101,8 @@ class TheKeysAreCheckedTest(unittest.TestCase):
             {"executor_chunk_bytes": 1.5},
             {"executor_chunk_bytes": "Auto"},
             {"executor_chunk_bytes": "half"},
+            {"executor": "batched", "gradient_form": "backward"},
+            {"executor": "sequential", "gradient_form": "summed"},
         ):
             with self.subTest(**performance), self.assertRaises(RunRefused):
                 self._validate(**performance)
@@ -122,6 +126,26 @@ class SelectionIsRecordedTest(ExecutorRuns):
                 "rounds": {"used": "resident"},
             },
         )
+
+    def test_a_gradient_form_a_config_sets_is_recorded_and_taken(self) -> None:
+        """fed-lasso declares ``summed``; asked for ``vmap_grad``, its stacks take that."""
+
+        from fedbrew.core import batched_executor
+
+        taken: list[bool] = []
+        real = batched_executor._Bucket._run_summed
+
+        def summed(self: Any, *args: Any) -> Any:
+            taken.append(True)
+            return real(self, *args)
+
+        config = example_config("fed-lasso")
+        with mock.patch.object(batched_executor._Bucket, "_run_summed", summed):
+            output = self.run_config(config, "batched", gradient_form="vmap_grad")
+            self.assertEqual(self._record(output)["gradient_form"], "vmap_grad")
+            self.assertEqual(taken, [])
+            self.assertNotIn("gradient_form", self._record(self.run_config(config, "batched")))
+            self.assertTrue(taken)
 
     def test_the_sequential_default_is_recorded(self) -> None:
         output = self.run_config(example_config("fed-lasso"), "sequential")

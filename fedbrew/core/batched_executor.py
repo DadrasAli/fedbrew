@@ -71,6 +71,7 @@ from fedbrew.clients.batched_update import (
     update_weights,
 )
 from fedbrew.clients.torch_sgd_client import trainable_parameter_count
+from fedbrew.core.config import GRADIENT_FORMS
 from fedbrew.core.execution import ClientPool, FitObserver
 from fedbrew.core.protocol import FitRequest, FitResult
 from fedbrew.core.round_planner import RoundPlanner, auto_workers, planned_for, roster_plan
@@ -1171,7 +1172,11 @@ class _Bucket:
         #: declares, by measurement (``batched_gradient``); one client is
         #: never vmapped, and takes the sequential gradient either way.
         #: Compiled, the step is always vmap(grad), which compiles whole.
-        self.summed = self.stacked and gradient_form(task) == "summed" and not self.compiled
+        self.summed = (
+            self.stacked
+            and gradient_form(task, self.context.gradient_form) == "summed"
+            and not self.compiled
+        )
 
     # -- the tensors every client starts from --------------------------------
 
@@ -1638,14 +1643,15 @@ class _Bucket:
         return outputs, self.eval_counts
 
 
-#: The two forms a stacked step's gradient can be taken in (``batched_gradient``).
-GRADIENT_FORMS = ("vmap_grad", "summed")
+def gradient_form(task: Any, asked: str | None = None) -> str:
+    """The form a stack's gradients are taken in.
 
+    ``asked``, a run's ``runtime.performance.gradient_form``, where it sets one;
+    otherwise the form the task declares its stacked gradients fastest in,
+    ``vmap_grad`` by default.
+    """
 
-def gradient_form(task: Any) -> str:
-    """The form a task declares its stacked gradients are fastest in; ``vmap_grad`` by default."""
-
-    form = getattr(task, "batched_gradient", "vmap_grad")
+    form = asked if asked is not None else getattr(task, "batched_gradient", "vmap_grad")
     if form not in GRADIENT_FORMS:
         raise ValueError(f"batched_gradient must be one of {GRADIENT_FORMS}, got {form!r}")
     return form
@@ -1746,9 +1752,13 @@ class StepContext:
         compile: bool = False,
         precision: str = "reference",
         record: dict[str, Any] | None = None,
+        gradient_form: str | None = None,
     ) -> None:
         self.compiling = bool(compile)
         self.precision = precision
+        #: ``runtime.performance.gradient_form``: the form a stack's gradients
+        #: are taken in, over the task's declaration; None keeps the task's.
+        self.gradient_form = gradient_form
         #: The executor records a fallback is written to: the run's, or
         #: every setting's of a group (``fedbrew/core/settings_group.py``).
         self.records = [record if record is not None else {}]
@@ -1975,7 +1985,10 @@ def select_executor(
     precision, why = _precision_for(precision_asked, model)
     _record_modes(record, compile_asked, precision_asked, precision, why)
     chunk_bytes = chunk_budget(performance.get("executor_chunk_bytes"), model, record)
-    context = StepContext(compile_asked, precision, record)
+    form = performance.get("gradient_form")
+    if form is not None:
+        record["gradient_form"] = str(form)
+    context = StepContext(compile_asked, precision, record, gradient_form=form)
     executor = BatchedExecutor(chunk_bytes, record=record, context=context)
     executor.cuda_graphs = compile_mode(performance.get("cuda_graphs"))
     if plan_ahead:

@@ -993,6 +993,7 @@ _KNOWN_EXTRA_KEYS: dict[str, frozenset[str]] = {
             "executor_chunk_bytes",
             "compile",
             "cuda_graphs",
+            "gradient_form",
         }
     ),
     # Only the four the loader takes from the config. batch_size, shuffle,
@@ -1155,6 +1156,11 @@ def _validate_numerics(numerics: NumericsConfig) -> None:
 #: ``sequential``, says so in the plan header, and records why in run.json.
 EXECUTORS: frozenset[str] = frozenset({"sequential", "batched"})
 
+#: What ``runtime.performance.gradient_form`` accepts: how the batched
+#: executor takes a stack's gradients, in place of the form the task declares
+#: (``batched_gradient``). The two agree to the executor's tolerance.
+GRADIENT_FORMS: tuple[str, ...] = ("vmap_grad", "summed")
+
 #: What ``numerics.precision`` accepts: the reference, or a mode the batched
 #: executor trains in (chapter 11 §11).
 PRECISIONS: tuple[str, ...] = ("reference", "f32_f64", "tf32", "bf16")
@@ -1191,6 +1197,12 @@ def _validate_step_modes(performance: Mapping[str, Any], precision: object) -> N
     compiled = performance.get("compile")
     if compiled is not None and compiled not in (True, False, "on", "off"):
         raise RunRefused(f"runtime.performance.compile must be on or off, got {compiled!r}")
+    form = performance.get("gradient_form")
+    if form is not None and form not in GRADIENT_FORMS:
+        raise RunRefused(
+            f"runtime.performance.gradient_form must be one of {', '.join(GRADIENT_FORMS)}, "
+            f"got {form!r}"
+        )
     graphs = performance.get("cuda_graphs")
     if graphs is not None and graphs not in (True, False, "on", "off"):
         raise RunRefused(f"runtime.performance.cuda_graphs must be on or off, got {graphs!r}")
@@ -1200,6 +1212,7 @@ def _validate_step_modes(performance: Mapping[str, Any], precision: object) -> N
             ("compile", compiled in (True, "on")),
             ("precision", precision not in (None, "reference")),
             ("cuda_graphs", graphs in (True, "on")),
+            ("gradient_form", form is not None),
         )
         if value
     ]

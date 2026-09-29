@@ -343,6 +343,7 @@ are folded in one weighted reduction per tensor (chapter 07 §3.3).
 | `executor` | `sequential` \| `batched` | `sequential` | How a round's sampled clients are run. |
 | `executor_chunk_bytes` | int > 0 \| `auto` | `1073741824` (1 GiB) | The memory one chunk of clients may take. Read only by `batched`. `auto`: half the device's free memory at the start of the run, below. |
 | `cuda_graphs` | `on` \| `off` | `off` | Replays a resident round's training from a CUDA graph recorded once per round shape (§9.1). Read only by `batched`, on CUDA. |
+| `gradient_form` | `vmap_grad` \| `summed` | the task's | How a stack's gradients are taken, over the form the task declares (`batched_gradient`). `summed` walks the stack once forward and once back, and is the faster of the two for a small model on the CPU. Read only by `batched`. |
 
 **What it computes.** Per client, what the sequential executor computes:
 

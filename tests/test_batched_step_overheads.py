@@ -94,7 +94,7 @@ class NothingMovesTest(ExecutorRuns):
                 with (
                     self.subTest(form=form, case=label),
                     mock.patch.object(
-                        batched_executor, "gradient_form", lambda task, form=form: form
+                        batched_executor, "gradient_form", lambda task, asked=None, form=form: form
                     ),
                 ):
                     now, before = self._pair(config, data, stepwise=False, repeats=True)

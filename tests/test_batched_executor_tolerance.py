@@ -681,7 +681,7 @@ class BothGradientFormsTest(ExecutorRuns):
     def forced(self, form: str) -> Any:
         from fedbrew.core import batched_executor
 
-        return mock.patch.object(batched_executor, "gradient_form", lambda task: form)
+        return mock.patch.object(batched_executor, "gradient_form", lambda task, asked=None: form)
 
     def test_each_form_over_the_rules_and_modes(self) -> None:
         cases = [(label, rule_config(client)) for label, client in rule_arms()]
