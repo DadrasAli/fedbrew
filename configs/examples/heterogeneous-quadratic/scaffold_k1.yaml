@@ -18,7 +18,10 @@ experiment:
 
 client:
   update_rule: scaffold
-  learning_rate: 0.01
+  # Picked on this coupled centre at sigma 20 by the tuning protocol: SCAFFOLD at K 10, b 16,
+  # 300 rounds, seed 1901, the mean gap over rounds 1..300; powers of ten
+  # around 1/L_local = 1/15, every pick interior. Frozen across K.
+  learning_rate: 0.1
 
 schedule:
   rounds: 2000

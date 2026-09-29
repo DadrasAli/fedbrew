@@ -11004,7 +11004,7 @@
   "config": {
    "client.batch_size": 16,
    "client.extra": {},
-   "client.learning_rate": 0.01,
+   "client.learning_rate": 0.1,
    "client.local_iterations": 1,
    "client.update_rule": "scaffold",
    "client_statistics.extra": {},
@@ -11109,7 +11109,7 @@
   "config": {
    "client.batch_size": 16,
    "client.extra": {},
-   "client.learning_rate": 0.01,
+   "client.learning_rate": 0.1,
    "client.local_iterations": 10,
    "client.update_rule": "scaffold",
    "client_statistics.extra": {},
@@ -11214,7 +11214,7 @@
   "config": {
    "client.batch_size": 16,
    "client.extra": {},
-   "client.learning_rate": 0.01,
+   "client.learning_rate": 0.1,
    "client.local_iterations": 100,
    "client.update_rule": "scaffold",
    "client_statistics.extra": {},
