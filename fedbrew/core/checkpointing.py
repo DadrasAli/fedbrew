@@ -421,13 +421,21 @@ def _column(values: list[Any], ids: list[Any]) -> dict[str, Any]:
 _NUMBER_DTYPES = {bool: torch.bool, int: torch.int64, float: torch.float64}
 
 
-def _number_column(kind: type, values: list[Any]) -> dict[str, Any]:
-    """Python numbers of one type as one tensor; integers past int64 one entry each."""
+#: The integers an int64 column holds.
+_INT64_RANGE = (-(2**63), 2**63 - 1)
 
-    try:
-        return {kind.__name__: torch.tensor(values, dtype=_NUMBER_DTYPES[kind])}
-    except (OverflowError, RuntimeError):
+
+def _number_column(kind: type, values: list[Any]) -> dict[str, Any]:
+    """Python numbers of one type as one tensor; integers past int64 one entry each.
+
+    The range is checked here rather than left to ``torch.tensor``, whose
+    overflow is a RuntimeError up to torch 2.5 and a ValueError by 2.13.
+    """
+
+    low, high = _INT64_RANGE
+    if kind is int and not all(low <= value <= high for value in values):
         return {"values": values}
+    return {kind.__name__: torch.tensor(values, dtype=_NUMBER_DTYPES[kind])}
 
 
 def _stackable(tensors: list[torch.Tensor]) -> bool:
