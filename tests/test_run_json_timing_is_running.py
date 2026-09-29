@@ -7,9 +7,11 @@ keeps those aggregates as records arrive (RoundTimingSummary). What is pinned
 here:
 
 - every aggregate is the value the full computation gives, bit for bit, before
-  the rounding run.json applies: sum(), statistics.fmean, statistics.median,
-  min, max and the per-phase sums, over durations with duplicates, zeros and
-  magnitudes far apart, at every length from 1;
+  the rounding run.json applies: the total and the per-phase sums added left
+  to right in round order, statistics.fmean, statistics.median, min and max,
+  over durations with duplicates, zeros and magnitudes far apart, at every
+  length from 1. The sums are not sum()'s: since Python 3.12 sum() adds
+  floats with a running compensation, so it no longer adds in order;
 - the block written from the running history is the block written from the
   same records in a plain list, which is what every earlier writer did;
 - the per-round path reads the aggregates and never iterates the history.
@@ -48,6 +50,15 @@ def _timings(rng: random.Random) -> RoundTimings:
     return RoundTimings(**{timing.name: _duration(rng) for timing in fields(RoundTimings)})
 
 
+def _in_round_order(values: Any) -> float:
+    """The values added left to right, one rounding per addition: sum() before Python 3.12."""
+
+    total = 0.0
+    for value in values:
+        total += value
+    return total
+
+
 def _record(round_id: int, timings: RoundTimings | None) -> MetricRecord:
     return MetricRecord(
         round_id=round_id, metrics={}, num_clients=1, num_examples=1, timings=timings
@@ -71,7 +82,7 @@ class TheRunningAggregatesAreTheFullOnesTest(unittest.TestCase):
                 running = history.summary
                 with self.subTest(trial=trial, rounds=round_id):
                     self.assertEqual(running.timed_rounds, len(timed))
-                    self.assertEqual(running.total_sec.hex(), float(sum(durations)).hex())
+                    self.assertEqual(running.total_sec.hex(), _in_round_order(durations).hex())
                     self.assertEqual(
                         running.mean_sec().hex(), float(statistics.fmean(durations)).hex()
                     )
@@ -83,7 +94,7 @@ class TheRunningAggregatesAreTheFullOnesTest(unittest.TestCase):
                     for phase in _PHASES:
                         self.assertEqual(
                             running.phase_sec[phase].hex(),
-                            float(sum(getattr(t, phase) for t in timed)).hex(),
+                            _in_round_order(getattr(t, phase) for t in timed).hex(),
                         )
 
     def test_the_written_block_is_the_plain_lists(self) -> None:

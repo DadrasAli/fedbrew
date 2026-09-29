@@ -199,8 +199,8 @@ round, and every helper here used to re-scan the whole history each time —
 O(records so far) per round, so quadratic over a run.
 
 The `timing` block is kept the same way, by `RoundTimingSummary` on the loop's
-round history: the totals, the extremes, an exact running `fsum` for the mean
-and two heaps for the median. It used to sum, sort and scan every round's
+round history: the totals, added left to right in round order, the extremes,
+an exact running `fsum` for the mean and two heaps for the median. It used to sum, sort and scan every round's
 timings since round 1 on every write, which took the write from 1.0 to 2.3 ms
 between 200 and 2000 rounds. Every value is the one the full computation
 gives, bit for bit; `tests/test_run_json_timing_is_running.py` checks it.

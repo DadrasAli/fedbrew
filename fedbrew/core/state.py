@@ -114,8 +114,9 @@ class RoundTimingSummary:
     round 1, each time: O(rounds so far) per round, which took the per-round
     write from 1.0 to 2.3 ms between 200 and 2000 rounds. Each aggregate is
     kept here as records arrive instead, in O(log rounds), and each is the
-    value the full computation gives, bit for bit: the totals add in the same
-    order as sum(), ``partials`` holds the exact sum math.fsum -- and so
+    value the full computation gives, bit for bit: the totals add left to
+    right in round order (sum()'s order before Python 3.12, whose sum()
+    compensates as it goes), ``partials`` holds the exact sum math.fsum -- and so
     statistics.fmean -- rounds, and the two heaps hold the halves of the sorted
     durations whose middle statistics.median reads.
     """
