@@ -17,7 +17,10 @@ every one of those: an example arm on its own family's generated dataset; a
 classification config on a small generated synthetic manifest with an MLP,
 with or without a val split to match the group; a causal-LM config on the
 tiny corpus with tiny_gpt2 (when the LLM extra is installed). The planned
-columns and the written CSV header must agree in both directions.
+columns and the written CSV header must agree in both directions. A task that
+narrows its columns per run (``ReportedMetrics``) plans from its data too, so
+its stand-in may plan fewer columns than the shipped config does without its
+data, never more.
 """
 
 from __future__ import annotations
@@ -180,10 +183,20 @@ def _written(path: Path) -> set[str]:
         return set(next(csv.reader(handle))) - BOOKKEEPING
 
 
+def _needs_a_source_file(path: Path) -> bool:
+    """Whether an example arm's data is read from a file the repository does not ship."""
+
+    generator = REPO / "data" / "configs" / "examples" / f"{path.parent.name}.yaml"
+    return generator.is_file() and "source" in yaml.safe_load(generator.read_text())
+
+
 class EveryShippedConfigRoundTripsTest(unittest.TestCase):
     def _representatives(self) -> Iterator[tuple[str, Path]]:
         for paths in _shipped_groups().values():
-            yield f"{paths[0].relative_to(REPO)} (+{len(paths) - 1})", paths[0]
+            # One whose data a checkout can generate: fed-logistic-l1's LIBSVM
+            # corpora read a file fetched once by hand.
+            path = min(paths, key=_needs_a_source_file)
+            yield f"{path.relative_to(REPO)} (+{len(paths) - 1})", path
 
     def test_every_group_of_shipped_configs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -196,14 +209,27 @@ class EveryShippedConfigRoundTripsTest(unittest.TestCase):
                         self.skipTest("causal-LM configs need the llm extra")
                     runnable = _runnable(path, data, root / f"run{index}")
                     planned = set(_planned_metric_names(load_config(runnable)))
-                    self.assertEqual(
-                        planned,
-                        set(_planned_metric_names(load_config(path))),
-                        "the cheap stand-in plans other columns than the shipped config",
-                    )
+                    shipped = set(_planned_metric_names(load_config(path)))
+                    if _narrows_by_run(path):
+                        # Which declared columns it writes depends on its data
+                        # (ReportedMetrics), which the shipped config's path
+                        # need not hold: without it, every declared one.
+                        self.assertLessEqual(planned, shipped)
+                    else:
+                        self.assertEqual(
+                            planned,
+                            shipped,
+                            "the cheap stand-in plans other columns than the shipped config",
+                        )
                     written = _written(runnable)
                     self.assertEqual(planned - written, set(), "planned, not written")
                     self.assertEqual(written - planned, set(), "written, not planned")
+
+
+def _narrows_by_run(path: Path) -> bool:
+    from fedbrew.core.registry import tasks
+
+    return tasks.reported(load_config(path).task.name) is not None
 
 
 class EveryTaskDeclaresItsMetricsTest(unittest.TestCase):
@@ -214,7 +240,7 @@ class EveryTaskDeclaresItsMetricsTest(unittest.TestCase):
 
         register_builtin_components()
         names = {load_config(paths[0]).task.name for paths in _shipped_groups().values()}
-        self.assertEqual(len(names), 7)
+        self.assertEqual(len(names), 8)
         for name in sorted(names):
             with self.subTest(task=name):
                 self.assertTrue(tasks.metrics(name), f"{name} declares no metrics")

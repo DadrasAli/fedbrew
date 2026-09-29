@@ -28,6 +28,7 @@ examples/    pl-1d/                     (7 arms)
              fed-lasso/  fed-lasso-l2/  fed-lasso-smooth/  (9 arms each, 1 arm)
              simplex-lsq/  simplex-lsq-feasible/               (8 arms, 3 arms)
              nonconvex-simplex/                                       (8 arms)
+             fed-logistic-l1/                          (0 arms: its corpora's family base)
              fed-logistic-l1-a9a/                                     (6 arms)
              fed-logistic-l1-gisette/                                 (6 arms)
              fed-logistic-l1-ijcnn1-32/                               (4 arms)
@@ -45,7 +46,7 @@ because those examples turn a dial by generating different data:
 `-smooth` and `-feasible` directories are controls of the same shape. The
 `fed-logistic-l1-<corpus>` directories are `examples/fed-logistic-l1`'s
 corpora, one generated dataset each; each arm is one problem at one `λ` on it,
-an untuned FedAvg run. Their task, model and generator are defined
+an untuned FedAvg run, and extends the family base in `fed-logistic-l1/`. Their task, model and generator are defined
 outside the package, in each example's `problem.py`, which every config names
 — the key that does that is [chapter 04](../docs/04-configuration.md)'s, and
 what it is for is [chapter 12](../docs/12-extending.md)'s.

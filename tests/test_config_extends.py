@@ -239,7 +239,7 @@ class ShowTest(_Tree):
 class TheShippedLayoutTest(unittest.TestCase):
     def test_every_arm_beside_a_base_extends_it_and_every_base_is_extended(self) -> None:
         bases = sorted((REPO / "configs").rglob("_base.yaml"))
-        self.assertEqual(len(bases), 10)
+        self.assertEqual(len(bases), 11)
         extended = set()
         for base in bases:
             for arm in sorted(base.parent.glob("*.yaml")):
@@ -249,12 +249,21 @@ class TheShippedLayoutTest(unittest.TestCase):
                     named = yaml.safe_load(arm.read_text(encoding="utf-8")).get("extends")
                     self.assertEqual(named, "_base.yaml")
                     extended.add(base)
+        # Arms in a directory without a base extend another directory's: the
+        # smooth control fed-lasso's, and every fed-logistic-l1 corpus's arms
+        # their family's, which is alone in its directory.
+        for arm in sorted((REPO / "configs").rglob("*.yaml")):
+            if is_family_base(arm) or (arm.parent / "_base.yaml").is_file():
+                continue
+            named = yaml.safe_load(arm.read_text(encoding="utf-8")).get("extends")
+            if named is not None:
+                extended.add((arm.parent / named).resolve())
         smooth = REPO / "configs/examples/fed-lasso-smooth/fedavg.yaml"
         self.assertEqual(
             yaml.safe_load(smooth.read_text(encoding="utf-8"))["extends"],
             "../fed-lasso/_base.yaml",
         )
-        self.assertEqual(extended, set(bases))
+        self.assertEqual({path.resolve() for path in extended}, set(bases))
 
 
 class AShippedArmShownTest(unittest.TestCase):

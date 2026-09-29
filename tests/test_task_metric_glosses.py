@@ -94,7 +94,7 @@ class TheTaskSaysWhatItsMetricsAreTest(unittest.TestCase):
                         set(declared.get("METRIC_GLOSSES", {})), set(declared["METRICS"])
                     )
                     self.assertIn("glosses=", problem.read_text(encoding="utf-8"))
-        self.assertEqual(checked, 5)
+        self.assertEqual(checked, 6)
 
 
 if __name__ == "__main__":

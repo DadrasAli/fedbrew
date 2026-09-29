@@ -37,6 +37,12 @@ Two differences are allowed, both declared here rather than taken on trust:
 
 The ``schedule`` block, which ``defaults`` was renamed to, is read at load and
 never stored, so its rename moved nothing in the resolved config.
+
+examples/fed-logistic-l1's 34 arms were recorded as they resolved before they
+moved to this schema, in the record's own, with
+``evaluation.splits_without_data`` at the ``[]`` a config without client splits
+evaluated resolves to (the key came after their record), and the column list
+their task declares, which the loader could not plan before it did.
 """
 
 from __future__ import annotations
@@ -129,7 +135,7 @@ class EveryShippedConfigResolvesAsRecordedTest(unittest.TestCase):
     @pytest.mark.fast
     def test_the_record_covers_every_shipped_config(self) -> None:
         self.assertEqual(sorted(self.record), sorted(str(path) for path in shipped_run_configs()))
-        self.assertEqual(len(self.record), 97)
+        self.assertEqual(len(self.record), 131)
 
     def test_each_resolves_to_its_record(self) -> None:
         for path in shipped_run_configs():

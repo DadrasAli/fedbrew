@@ -1,0 +1,102 @@
+# examples/fed-logistic-l1: the keys every arm of this family shares.
+#
+# Not a run config. Each arm lives in the directory of its corpus,
+# configs/examples/fed-logistic-l1-<corpus>/, names this file under `extends:`
+# and states only its corpus (its data and d), its problem (the loss, the
+# penalty and lam) and its step. An arm resolved, as one flat file (docs/04
+# section 2.2):
+#
+#   fedbrew config show configs/examples/fed-logistic-l1-synthetic/logistic-l1-lambda0.03.yaml
+#
+# Every arm is FedAvg at lr = 1/L on the full gradient, one step a round. It is
+# not tuned: an arm is here to run its problem, not to rank anything. A convex
+# problem's F* is looked up in examples/fed-logistic-l1/optima.json by the
+# corpus's digest, the loss, the penalty and lam, and the run is refused
+# without one.
+
+experiment:
+  seed: 42
+  use_run_subdir: false
+  # The task, the model and the generator are defined outside the package.
+  extensions:
+    - examples/fed-logistic-l1/problem.py
+
+server:
+  participation_rate: 1.0
+
+client:
+  update_rule: fedavg
+  # One step on each client's whole split a round.
+  update_mode: full_gradient
+  frozen_gradient_weighting: examples
+  learning_rate_schedule: constant
+  min_learning_rate: 0.0
+  momentum: 0.0
+  weight_decay: 0.0
+  nesterov: false
+
+model:
+  name: logistic_vector
+  # The threshold at which a coordinate counts as being in the support. Not
+  # part of the objective: it is how the support metrics are measured.
+  support_tolerance: 1.0e-3
+  x_init: 0.0
+
+# Every key here changes the numbers a run produces, and arms compared
+# against each other must agree on all of them (docs/04 section 7.5).
+numerics:
+  deterministic: true
+  deterministic_warn_only: false
+  # NOT throughput-only: "highest" keeps every fp32 matmul at fp32's 24
+  # mantissa bits. This model is float64, so it is irrelevant here; written
+  # out because a config that omits it is not comparable with one that sets it.
+  matmul_precision: highest
+  cudnn_benchmark: false
+  precision: reference
+  use_amp: false
+
+runtime:
+  device: cpu
+  checkpointing:
+    enabled: true
+    interval: 100000
+    save_last: true
+    save_best: false
+    save_every_round: false
+    keep_last: 0
+  performance:
+    torch_num_threads: 1
+    reuse_model: false
+    fast_batching: false
+
+evaluation:
+  train:
+    every: never
+  val:
+    every: never
+  test:
+    every: never
+  central_test:
+    every: 1
+
+reporting:
+  fit_metrics: []
+  per_client_csv: true
+  statistics:
+    std: true
+    variance: false
+    min: true
+    max: true
+    worst_percent: 10
+
+divergence:
+  metric: fit_loss
+  non_finite: true
+  blowup_factor: 100.0
+  blowup_absolute: 10000.0
+  patience: null
+  min_delta: 0.0
+
+schedule:
+  rounds: 100
+  local_iterations: 1

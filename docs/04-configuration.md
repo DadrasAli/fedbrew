@@ -190,13 +190,16 @@ entire.
 A file whose name starts with `_` is a **family base**: the keys every arm of
 a family shares. It is not a run config -- it lacks what makes an arm one --
 so `fedbrew run` refuses it by name, and every listing of the shipped run
-configs skips it (`is_family_base`). `configs/femnist/` and nine of the
+configs skips it (`is_family_base`). `configs/femnist/` and ten of the
 directories under `configs/examples/` hold one `_base.yaml` each: the keys all
 of the directory's arms state with the same value. An arm file keeps the rest
 -- its rule, its rates, its tags, and a shared key it explains in a comment of
 its own -- so it holds 4 to 15 keys where it held about 60 (FEMNIST's, 14 to
 32). `examples/fed-lasso-smooth/fedavg.yaml`, the one arm in its directory,
 extends `examples/fed-lasso/_base.yaml` and states what differs from it.
+`examples/fed-logistic-l1/_base.yaml` is alone in its directory: every arm of
+each `examples/fed-logistic-l1-<corpus>/` extends it and states its corpus, its
+problem and its step.
 
 An arm file therefore no longer shows the whole run. `fedbrew config show
 <config>` prints it resolved: the chain merged and the inferred values filled

@@ -21,6 +21,7 @@ What is held:
 
 from __future__ import annotations
 
+import csv
 import dataclasses
 import json
 import tempfile
@@ -32,8 +33,11 @@ import torch
 import yaml
 
 from fedbrew.core import extensions
+from fedbrew.core.config import load_config, load_config_mapping, standalone_config_mapping
+from fedbrew.core.logging import _planned_metric_names
 from fedbrew.data.writers.torch_shards import load_client_shard, save_client_shard
 from tests.test_batched_executor_tolerance import CSVS, TOLERANCE, ExecutorRuns
+from tests.test_planned_columns_are_written import BOOKKEEPING
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EXTENSION = REPO_ROOT / "examples" / "fed-logistic-l1" / "problem.py"
@@ -137,14 +141,14 @@ def small_config(loss: str, penalty: str) -> dict[str, Any]:
     """The shipped synthetic FedAvg arm, on the small corpus, for one round."""
 
     manifest, table = small_corpus()
-    config = yaml.safe_load(ARM.read_text(encoding="utf-8"))
+    config = standalone_config_mapping(ARM)
     config["experiment"]["extensions"] = [str(EXTENSION)]
     config["data"]["path"] = str(manifest)
     config["model"].update(
         input_dim=8, loss=loss, penalty=penalty, penalty_strength=0.03, optima=str(table)
     )
     config["client"].update(learning_rate=0.5, batch_size=16)
-    config["defaults"]["global_rounds"] = 1
+    config["schedule"]["rounds"] = 1
     config["evaluation"]["test"] = {"every": 1, "clients": "all"}
     config["runtime"]["quiet"] = True
     config["runtime"]["checkpointing"].update(
@@ -254,7 +258,7 @@ class TheShippedTableTest(unittest.TestCase):
         for corpus_config in sorted(GENERATOR_CONFIGS.glob("fed-logistic-l1-*.yaml")):
             corpus = corpus_config.stem
             for arm in sorted((REPO_ROOT / "configs" / "examples" / corpus).glob("*.yaml")):
-                model = yaml.safe_load(arm.read_text(encoding="utf-8"))["model"]
+                model = load_config_mapping(arm)["model"]
                 if problem.convex(model["loss"], model["penalty"]):
                     arms.append((corpus, arm, model))
         return arms
@@ -395,12 +399,32 @@ class ALibsvmSourceTest(unittest.TestCase):
 
 
 class OneRoundBatchedAgreesTest(ExecutorRuns):
+    """One round of each problem, with its gradient norm: batched against sequential.
+
+    Also the plan header's columns against the CSV's, per problem -- the task
+    reports the gap and the distance to x* only where F* is certified -- and
+    grad_norm_sq against the analytic gradient of F at the round's model, the
+    minimum-norm subgradient under the l1 regularizer.
+    """
+
     def test_each_problem_within_the_executor_tolerance(self) -> None:
         for loss, penalty in problem.PROBLEMS:
             with self.subTest(problem=f"{loss}+{penalty}"):
-                batched, sequential = self.both(small_config(loss, penalty))
+                config = small_config(loss, penalty)
+                config["evaluation"]["grad_norm"] = {"every": 1}
+                batched, sequential = self.both(config)
                 record = json.loads((batched / "run.json").read_text())["reproducibility"]
                 self.assertEqual(record["executor"]["used"], "batched")
+                planned = set(
+                    _planned_metric_names(load_config(self.root / f"run{self._count}.yaml"))
+                )
+                with (sequential / "round_metrics.csv").open(encoding="utf-8") as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertEqual(planned, set(rows[0]) - BOOKKEEPING)
+                self.assertEqual(
+                    "central_test_optimality_gap" in planned, problem.convex(loss, penalty)
+                )
+                self._check_grad_norm(sequential, float(rows[-1]["grad_norm_sq"]), loss, penalty)
                 for name in CSVS:
                     self._compare_csv(batched / name, sequential / name, False, TOLERANCE)
                 self._compare_checkpoint(
@@ -409,6 +433,21 @@ class OneRoundBatchedAgreesTest(ExecutorRuns):
                     False,
                     TOLERANCE,
                 )
+
+    def _check_grad_norm(self, run: Path, measured: float, loss: str, penalty: str) -> None:
+        spec = _small_spec(loss, penalty)
+        state = torch.load(run / "checkpoints" / "round_001.pt", weights_only=False)
+        x = state["model_state"]["x"].to(torch.float64)
+        stacked = torch.cat(spec.client_indices())
+        features, labels = spec.design()[stacked], spec.labels()[stacked]
+        smooth = problem.smooth_gradient(x, features, labels, loss)
+        if penalty == "l1":
+            shrunk = smooth.abs().sub(0.03).clamp_min(0.0) * smooth.sign()
+            expected = torch.where(x == 0.0, shrunk, smooth + 0.03 * x.sign())
+        else:
+            expected = problem.gradient(x, features, labels, 0.03, loss, penalty)
+        squared = float(expected.square().sum())
+        self.assertLessEqual(abs(measured - squared), 1e-12 * squared)
 
 
 if __name__ == "__main__":

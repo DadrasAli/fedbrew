@@ -26,8 +26,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 EXAMPLE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = EXAMPLE_DIR.parent.parent
 DEFAULT_CORPUS = "fed-logistic-l1-synthetic"
@@ -60,10 +58,11 @@ def config_paths(corpus: str, arm: str | None) -> list[Path]:
 
 
 def output_dir_of(config_path: Path) -> Path:
-    """Where this arm writes, as the config itself says."""
+    """Where this arm writes: its config's output_dir, stated or inferred from its path."""
 
-    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    return REPO_ROOT / config["experiment"]["output_dir"]
+    from fedbrew.core.config import standalone_config_mapping
+
+    return REPO_ROOT / standalone_config_mapping(config_path)["experiment"]["output_dir"]
 
 
 def run_arm(config_path: Path, quiet: bool) -> None:

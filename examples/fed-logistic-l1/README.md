@@ -15,7 +15,9 @@ min_x  F(x) = (1/n) Σ_{i=1}^n loss(b_i xᵀa_i) + λ r(x)
 over `x ∈ ℝ^d`, with no constraint set. A **corpus** is one generator config
 and one generated dataset, `fed-logistic-l1-<corpus>`; every problem posed on
 it is one arm config in its directory, `<loss>-<penalty>-lambda<λ>.yaml`, and
-runs on the same shards:
+runs on the same shards. Every arm extends the family base,
+`configs/examples/fed-logistic-l1/_base.yaml`, and states only its corpus, its
+problem and its step:
 
 ```bash
 fedbrew generate --config data/configs/examples/fed-logistic-l1-synthetic.yaml
