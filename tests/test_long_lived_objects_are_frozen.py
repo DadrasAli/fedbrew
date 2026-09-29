@@ -6,7 +6,9 @@ traverse the clients, shards and models that live for the whole run, and
 unfreezes them when the run ends -- however it ends. Pinned here: nothing is
 frozen during the first round, everything is from the second on, nothing is
 left frozen afterwards, and a process that froze objects itself, or turned
-the collector off, is left as it was.
+the collector off, is left as it was. What the interpreter froze at its own
+start (CPython 3.12 freezes a few hundred tuples; earlier releases none) does
+not count as the process's own.
 """
 
 from __future__ import annotations
@@ -50,14 +52,17 @@ def _run(client: type[_Client] = _Client) -> list[tuple[int, int]]:
 
 class LongLivedObjectsTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.assertEqual(gc.get_freeze_count(), 0, "the process starts with nothing frozen")
+        self.start = gc.get_freeze_count()
+        self.assertLessEqual(
+            self.start, loop._FROZEN_AT_IMPORT, "nothing but the interpreter has frozen objects"
+        )
         self.addCleanup(gc.unfreeze)
 
     def test_frozen_from_the_second_round_and_released_at_the_end(self) -> None:
         seen = _run()
         self.assertEqual([round_id for round_id, _ in seen], [1, 1, 2, 2, 3, 3])
-        self.assertTrue(all(count == 0 for round_id, count in seen if round_id == 1))
-        self.assertTrue(all(count > 0 for round_id, count in seen if round_id > 1))
+        self.assertTrue(all(count == self.start for round_id, count in seen if round_id == 1))
+        self.assertTrue(all(count > self.start for round_id, count in seen if round_id > 1))
         self.assertEqual(gc.get_freeze_count(), 0)
 
     def test_a_run_that_raises_releases_them(self) -> None:
@@ -76,7 +81,7 @@ class LongLivedObjectsTest(unittest.TestCase):
         gc.disable()
         self.addCleanup(gc.enable)
         seen = _run()
-        self.assertTrue(all(count == 0 for _, count in seen))
+        self.assertTrue(all(count == self.start for _, count in seen))
 
 
 if __name__ == "__main__":

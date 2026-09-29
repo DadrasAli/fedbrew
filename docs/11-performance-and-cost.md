@@ -114,7 +114,9 @@ collections traverse only what later rounds build. The trade-off: a reference
 cycle among frozen objects — a client the shard cache evicts, whose objects
 refer to each other — is not collected until the run ends; everything outside
 a cycle is still freed by reference counting as it was. A process that froze
-objects itself, or turned the collector off, is left alone.
+objects itself, or turned the collector off, is left alone; what the
+interpreter froze at its own start -- CPython 3.12 freezes 375 tuples, earlier
+releases none -- does not count as the process's.
 `tests/test_long_lived_objects_are_frozen.py`.
 
 **The two per-client histories are held in memory for the whole run.** One

@@ -467,6 +467,12 @@ def run_fl_loop(
         long_lived.release()
 
 
+#: Objects already in the permanent generation when this module was imported:
+#: the interpreter's own. CPython 3.12 freezes 375 of its tuples at startup;
+#: 3.10 and 3.11 freeze none.
+_FROZEN_AT_IMPORT = gc.get_freeze_count()
+
+
 class _LongLivedObjects:
     """The objects a run builds in its first round, set aside from the garbage collector.
 
@@ -487,8 +493,10 @@ class _LongLivedObjects:
     what the run still holds.
 
     Nothing is frozen when the collector is off, or when something else in
-    the process has already frozen objects: their owner releases them, not
-    this run.
+    the process has frozen objects since the interpreter started: their owner
+    releases them, not this run. What the interpreter froze at its own start
+    (``_FROZEN_AT_IMPORT``) is not something else's, and ``release`` returns it
+    to the collector with the rest, as ``gc.unfreeze`` does everything.
     """
 
     __slots__ = ("frozen",)
@@ -499,7 +507,7 @@ class _LongLivedObjects:
     def freeze(self) -> None:
         """Collect once, then freeze every tracked object."""
 
-        if self.frozen or not gc.isenabled() or gc.get_freeze_count():
+        if self.frozen or not gc.isenabled() or gc.get_freeze_count() > _FROZEN_AT_IMPORT:
             return
         gc.collect()
         gc.freeze()
