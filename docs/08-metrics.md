@@ -11,11 +11,15 @@ code is right and this chapter is a bug.
 
 A round produces metrics along two paths that never mix.
 
-**The fit path** — what the local models did during training.
+**The fit path** — each client's locally trained model, measured after its
+update on its own whole train split. The losses of the training steps are
+not kept: `fit_*` comes from a separate evaluation pass, the post-fit pass
+(`_post_fit_evaluation`, `fedbrew/clients/torch_sgd_client.py`), which runs on
+`evaluation.fit.every`'s schedule (default every round).
 
 ```
-task.train_step / eval_step        per batch, on the client
-  -> task.compute_metrics          folded to one number per client
+task.eval_step                     per batch of the train split, after the update
+  -> task.compute_metrics          every key it returns, one number per client
   -> filter_metrics(client.metrics)  client-side filter, prefixed "fit_"
   -> FitResult.metrics             one record per selected client
   -> client_update_metrics.csv     one row per client per round; needs
@@ -30,6 +34,8 @@ task.train_step / eval_step        per batch, on the client
 ```
 task.eval_step                     per batch, on the client
   -> task.compute_metrics          one number per client per split
+  -> ["loss", "accuracy"]          the client keeps these two; a task's other
+                                   metrics never reach this path
   -> EvalResult.metrics            keyed "{split}_{metric}"
   -> client_metrics.csv            per client, if client_statistics.per_client_csv
   -> _aggregate_client_split_metrics   the aggregate columns
@@ -48,22 +54,36 @@ Sources: `fedbrew/core/loop.py`, `WeightedMetricAccumulator`
 
 The plan header printed at run start and by `--validate-only`
 (`fedbrew/core/logging.py`) lists these columns with a one-line gloss each. It
-asks `client_metric_names` for them, so it tracks the `client_statistics`
-toggles and the configured `worst_percent` rather than assuming the defaults.
+builds them from what the run's task declares it reports
+(`TaskAdapter.METRICS`, chapter 12 §6) and from the update rule's own columns
+(`RULE_FIT_METRICS`, `fedbrew/core/metrics.py`), and asks
+`client_metric_names` for the aggregates, so it tracks the task, the
+`client_statistics` toggles and the configured `worst_percent` rather than
+assuming a classification run at the defaults;
+`tests/test_planned_columns_every_task.py` holds it to what every shipped
+config writes.
 By default it lists a curated subset; `--verbose` lists every column the run
 will write. The gloss text is `fedbrew/core/metrics.py`, composed from the base
 metric and the suffix — see §5.
 
 ## 2. The two base metrics
 
-Everything in this chapter is built from exactly two per-client quantities.
-`CLIENT_METRIC_BASES` (`fedbrew/core/config.py`) fixes the set:
+The client-evaluation aggregates (§5) are built from two per-client
+quantities. `CLIENT_METRIC_BASES` (`fedbrew/core/config.py`) fixes the set:
 
 ```python
 CLIENT_METRIC_BASES = ("loss", "accuracy")
 ```
 
-Both are produced by the task. The two tasks define them differently.
+Both are produced by the task, and the two built-in tasks define them
+differently below. They are not the whole of what a task reports. The fit path
+forwards **every** key `compute_metrics` returns, as `fit_<key>`, and the
+central pass forwards every finite key the task's `evaluate_model` returns, as
+`central_test_<key>` (§6). The classification and causal-LM tasks return
+exactly `loss` and `accuracy`; each example task returns its own set (3 to 8
+names, `optimality_gap` among them, and no `accuracy`), which a task declares
+as `TaskAdapter.METRICS`. Only the client-evaluation path is held to the two
+bases.
 
 ### 2.1 `classification`
 
@@ -96,8 +116,10 @@ accuracy   = sum_b correct_b / sum_b n_b
 `fedbrew/tasks/causal_lm/torch_causal_lm.py`, `_loss_and_counts` at line 461.
 
 Both metrics are computed over **active tokens only**. A token is active when
-its target is neither `ignore_index` (default `-100`, covering padding and, for
-SFT, the prompt) nor `pad_token_id` when one is set:
+its target is neither `ignore_index` (default `-100`) nor `pad_token_id` when
+one is set. No generator writes `-100` for padding: it marks the prompt tokens
+of an SFT example and the separators between packed examples, and padding is
+removed by the second, value-based, filter:
 
 ```
 active = (target != ignore_index) & (target != pad_token_id)
@@ -202,20 +224,34 @@ stay example-weighted in every mode, because that is what makes the reported
 number a population mean — `FedAvgServer._accumulate_fit_results`
 (`fedbrew/servers/fedavg.py`).
 
-### 4.2 Metrics every update rule reports
+### 4.2 The fit metrics of the task and of the shared update rules
 
 | Name | Definition | Emitted by |
 | --- | --- | --- |
 | `fit_loss` | §2 loss of the client's post-training local model on its own train split | `TorchSGDClient.fit` (`fedbrew/clients/torch_sgd_client.py`) |
-| `fit_accuracy` | §2 accuracy, same model, same data | same |
+| `fit_accuracy` | §2 accuracy, same model, same data (classification and causal LM; the example tasks have none) | same |
+| `fit_<metric>` | every other key the task's `compute_metrics` returns, from the same pass | same |
 | `optimizer_steps` | count of optimizer `.step()` calls this round | `TorchSGDClient.fit` (`fedbrew/clients/torch_sgd_client.py`) |
-| `active_target_tokens` | sum of `total` over training outputs — examples for classification, active tokens for causal_lm | `TorchSGDClient.fit` (`fedbrew/clients/torch_sgd_client.py`) |
+| `active_target_tokens` | sum of `total` over the **training-step** outputs: active target tokens for causal_lm, and **0.0** for classification and every example task, whose `train_step` returns no `total` | `TorchSGDClient.fit` (`fedbrew/clients/torch_sgd_client.py`) |
 | `trainable_parameters` | `sum(p.numel() for p in model.parameters() if p.requires_grad)` | `TorchSGDClient.fit` (`fedbrew/clients/torch_sgd_client.py`) |
 | `communicated_parameters` | tensor elements in the state the client uploads | `model_state_size` (`fedbrew/core/federated_state.py`) |
 | `communicated_bytes` | `sum(t.numel() * t.element_size())` over that state, in bytes | same |
 
+Not every rule reports every row. The task's `fit_*` metrics come from every
+rule. `optimizer_steps`, `active_target_tokens` and `trainable_parameters` come
+from the rules on `TorchSGDClient` — `local_sgd`, `local_adamw`, `fedavg`,
+`centralized`, `fedavg_ft` — and from `delta_sgd`. `fedprox` reports none of
+the three; `scaffold` reports `local_steps` in place of `optimizer_steps` and
+neither of the other two; `fedlalr` reports `optimizer_steps` and `local_steps`
+but not `active_target_tokens` or `trainable_parameters`. Every rule reports
+`communicated_parameters` and `communicated_bytes`. `RULE_FIT_METRICS`
+(`fedbrew/core/metrics.py`) lists each rule's own columns, measured.
+
 `communicated_bytes` counts **one direction, one client, one round**: the
-upload. Chapter 07 gives the per-algorithm multipliers; SCAFFOLD and FedLALR
+upload. The round's column is the example-weighted **mean over the clients**
+of that per-client number (§4.1), not the round's traffic: summing it over
+clients, or over rounds with different clients, is wrong unless the clients
+are equal. Chapter 07 gives the per-algorithm multipliers; SCAFFOLD and FedLALR
 add their auxiliary state to this number at the client
 in `TorchScaffoldClient.fit` (`fedbrew/clients/torch_scaffold_client.py`) and
 `TorchFedLALRClient.fit` (`fedbrew/clients/torch_fedlalr_client.py`), so it is
@@ -328,7 +364,7 @@ clients with `n_c > 0` on that split, *m_c* the client's value, and
 
 | Suffix | Formula | Gloss | Switched by |
 | --- | --- | --- | --- |
-| `_sample_weighted_avg` | `sum_c (m_c * n_c) / N` | pooled over examples — the largest clients move it most | always on |
+| `_sample_weighted_avg` | `sum_c (m_c * n_c) / N`; for causal LM `n_c` is a token count (chapter 07 §3.1) | pooled over examples (active target tokens for causal LM) — the largest clients move it most | always on |
 | `_avg` | `(1/\|C\|) * sum_c m_c` | averaged over clients — a 9-example client counts as much as a 900-example one | always on |
 | `_std` | `sqrt( (1/\|C\|) * sum_c (m_c - mean)^2 )` — `statistics.pstdev`, **population**, divides by \|C\| | spread across clients (population standard deviation) | `client_statistics.std` (default `true`) |
 | `_variance` | `(1/\|C\|) * sum_c (m_c - mean)^2` — `statistics.pvariance`, **population** | spread across clients, before the square root (population variance) | `client_statistics.variance` (default `false`) |
@@ -471,9 +507,14 @@ server's pooled test shard, not a per-client aggregate.
 | `central_test_accuracy` | §2 accuracy over the same shard |
 | `central_test_{name}` | any other finite numeric key the server's `evaluate_global` reports, unmodified — a task's own central-pass diagnostic |
 
-**Aggregation:** none across clients — the shard is evaluated as one dataset, so
-the batch-combining rule in §2 is the whole story. For classification that is
-`total_correct / total_examples`; for causal_lm, `total_correct / total_tokens`.
+**Aggregation:** for classification and causal LM, none across clients — the
+shard is evaluated as one dataset, so the batch-combining rule in §2 is the
+whole story: `total_correct / total_examples` for classification,
+`total_correct / total_tokens` for causal_lm. For the example tasks the
+`global_test` shard holds **one row per client** (the client's objective), and
+the task's `evaluate_model` measures it in one batch, so `central_test_loss`
+there is the uniform mean of the clients' objectives, `F(x)`, not a pooled
+loss over examples.
 
 **Switched by:** `evaluation.central_test.every` (default `10` in the
 `EvaluationConfig` default factory, `fedbrew/core/config.py`). See chapter 04 for the
@@ -502,8 +543,11 @@ the two fixed ones do (`metrics.py`'s `metric_gloss`, `logging.py`'s
 
 On datasets where the client test splits partition this shard, `central_test_*`
 is a cheaper second view of `test_*_sample_weighted_avg` and should agree with
-it closely. On the LLM corpora, which hold out by conversation tree, it is the
-only measure of generalisation beyond the clients' own data.
+it closely. The LLM corpora write no client test split, so there it is the
+held-out test measure; it is held out by conversation tree on OASST1, by
+question id on MedMCQA (`group_field: id`), and by token window on the tiny
+corpus. It is not the only held-out measure: each client's `val` split is held
+out from its training data as well.
 
 ## 7. Algorithm-specific metrics
 
@@ -535,6 +579,12 @@ appear whether or not `server.metrics` lists
 them. `configs/femnist/scaffold.yaml` lists them anyway; the list is not what
 makes them appear.
 
+The four SCAFFOLD norms, and FedLALR's `momentum_norm` and `second_moment_norm`
+(§7.3), are square roots of `squared_l2_norm_model_state`
+(`fedbrew/core/torch_utils.py`), which squares in **float64**: they stay
+finite while the state is, to about 1.3e154. Squared in float32, as they were
+before, they became `inf` above about 1.8e19 while a float64 state was finite.
+
 ### 7.3 FedLALR — client `TorchFedLALRClient.fit` (`fedbrew/clients/torch_fedlalr_client.py`), server `FedLALRServer.aggregate_stream` (`fedbrew/servers/fedlalr.py`)
 
 | Name | Definition | Side |
@@ -561,7 +611,8 @@ falls below `epsilon^2` (`_learning_rate_metrics`,
 | `effective_learning_rate_across_clients_min` | server | the same | -- | -- | minimum |
 | `effective_learning_rate_across_clients_max` | server | the same | -- | -- | maximum |
 
-The three `coordinate` names are per-client values: each client's row in
+The rates `r_j` are computed in **float32**, whatever the model's dtype
+(`_learning_rate_metrics`). The three `coordinate` names are per-client values: each client's row in
 `client_update_metrics.csv` holds its own, and a round column exists only
 when `server.metrics` passes it, as for every client metric. The four
 `across_clients` names are the server's, computed in `_dispersion_metrics`
@@ -808,7 +859,7 @@ contains.
 | --- | --- | --- |
 | `divergence.metric` | `"fit_loss"` | the metric name to monitor |
 | `divergence.non_finite` | `true` | fires on the round the metric becomes `NaN` or `Inf` |
-| `divergence.blowup_factor` | `10.0` | fires when the metric exceeds this multiple of its **first observed** value |
+| `divergence.blowup_factor` | `10.0` | fires when the metric exceeds this multiple of its **first strictly positive** value (`divergence.py`); a metric that is never positive — nonconvex-simplex's loss — never arms it |
 | `divergence.blowup_absolute` | `null` | absolute ceiling; the backstop for a run already pathological at round 1 |
 | `divergence.patience` | `null` | rounds without improvement **against the best so far** before the run is called stalled |
 | `divergence.min_delta` | `0.0` | relative improvement required to reset the patience counter |
@@ -919,7 +970,8 @@ Every key that adds, removes or renames a column.
 | `client_statistics.worst_percent` | `10.0` | Adds `{split}_{metric}_worst{P}`; `null` or `0` removes it. Changing `P` **renames** the column. |
 | `evaluation.model_scope` | `"global"` | `personal` replaces every split name with its `personal_` form; `both` emits both sets. |
 | `evaluation.{train,val,test}.every` | `10`, `5`, `10`; `never` for a split the data does not carry | Which rounds have values in that split's columns. The columns exist for the whole run either way, except for a split the data does not carry, which has none (chapter 04 §8). |
-| `evaluation.central_test.every` | `10` | Same, for `central_test_loss` and `central_test_accuracy`. |
+| `evaluation.central_test.every` | `10` | Same, for every `central_test_*` column. |
+| `evaluation.fit.every` | `1` | Which rounds have values in the `fit_*` task columns and FedProx's `fit_total_loss`, which come from the post-fit pass (§1); `never` removes those columns. |
 | `evaluation.{train,val,test}.clients` | `participating`, `all`, `all` | Which clients enter the aggregate — changes the numbers, not the column set. |
 | `divergence.metric` | `"fit_loss"` | Requires that metric to be present every round. `validate_config` refuses a name a non-empty `server.metrics` would filter out (`config.py`, `_validate_divergence_metric_is_reachable`). |
 | `checkpointing.best_metric` | — | Requires that column to exist; validated against `client_metric_names` at config load. |

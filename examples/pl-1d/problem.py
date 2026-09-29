@@ -726,12 +726,14 @@ class PL1DTask(TaskAdapter):
 
         ``FedAvgServer.evaluate_global`` prefixes what this returns with
         ``global_`` and hands it to ``loop._evaluate_central_test_set``, which
-        passes through every finite numeric key it is given. So
-        ``central_test_loss`` is `F(x) - F*` for the aggregated iterate -- the
-        curve this example exists to draw -- and ``optimality_gap`` and
-        ``distance_to_optimum`` arrive beside it as
-        ``central_test_optimality_gap`` and
-        ``central_test_distance_to_optimum``.
+        passes through every finite numeric key it is given, under a
+        ``central_test_`` prefix: ``central_test_optimality_gap``, `F(x) - F*`
+        for the aggregated iterate and the curve this example exists to draw,
+        and ``central_test_distance_to_optimum`` beside it.
+        ``central_test_loss`` is the same quantity as the gap in exact
+        arithmetic, since `F* = 0`, but it is a mean of client objectives whose
+        shift terms have both signs, and deep in convergence it cancels to
+        exactly 0.0 where the gap is 1e-33.
         """
 
         outputs = [self.eval_step(model, batch) for batch in self.build_dataloader(data, None)]

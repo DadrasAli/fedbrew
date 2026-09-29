@@ -128,8 +128,13 @@ arm except SCAFFOLD — a final-round number that is a floor rather than a resul
 ζ = 1, seed 42. `F(x_0) − F* = 8.0` exactly, `‖x_0‖ = 1.938`, and client drift
 can carry a local iterate at most `max_i‖x_i*‖ = 0.369` from `x*`. Every arm is
 the best of the grid in **How the arms were tuned**. `gap` is
-`central_test_loss`, which for this problem *is* `F(x) − F*` for the aggregated
-iterate.
+`central_test_optimality_gap`, `F(x) − F*` for the aggregated iterate, in this
+table and the two below. (`central_test_loss` is the same quantity in exact
+arithmetic, since `F* = 0`, but it is a mean of client objectives whose offset
+terms cancel, and deep in convergence it reads less than the gap: 3.08e-33
+against 4.98e-33 on the κ = 1 SCAFFOLD arm at round 200, and 0.0 at one round
+of it. These tables read `central_test_loss` until 2026-09-29; only that cell
+changed.)
 
 | arm | gap @ 200 | median gap, 181–200 | best gap | first < 1e-2 | first < 1e-6 | `fit_distance_to_optimum` | `fit_distance_to_client_optimum` | params/round |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -230,7 +235,7 @@ there is no rate to fix and only the floor is left.
 | fedadam | η 1.9, server 0.01, β₁ 0.9 | 6.11e-04 | — | — |
 | fedyogi | η 1.9, server 0.01, β₁ 0.9 | 3.72e-04 | — | — |
 | fedadagrad | η 0.8, server 0.1, β₁ 0.5 | 2.83e-04 | — | — |
-| **scaffold** | η 0.2 | **3.08e-33** | **23** | **64** |
+| **scaffold** | η 0.2 | **4.98e-33** | **23** | **64** |
 | fedlalr | η 0.001 | 2.77e-04 | — | — |
 
 Thirty-one orders, and every other arm — including all four FedOpt members —
@@ -257,16 +262,17 @@ fedbrew run --config configs/examples/drift-quad/fedavg.yaml \
   --participation-rate 1.0 --lr 0.008 --output-dir outputs/examples/control/fedavg-p1-0.008
 ```
 
-Measured that way, base dials, ζ = 1:
+Measured that way, base dials, ζ = 1, reading `central_test_optimality_gap` at
+round 200:
 
 | η | FedAvg, ζ=1, p=1.0 | SCAFFOLD, ζ=1, p=1.0 | FedAvg, ζ=0, p=0.5 |
 | --- | --- | --- | --- |
 | 0.002 | 1.759e-04 | 1.759e-04 | 1.759e-04 |
 | 0.008 | 5.568e-15 | 5.568e-15 | 5.568e-15 |
-| 0.016 | 4.773e-29 | 4.654e-29 | 4.779e-29 |
+| 0.016 | 4.776e-29 | 4.660e-29 | 4.779e-29 |
 
 FedAvg and SCAFFOLD print the same digits at η 0.002 and 0.008 and differ only
-in round-off at 0.016 (4.773e-29 against 4.654e-29), and both agree with the run
+in round-off at 0.016 (4.776e-29 against 4.660e-29), and both agree with the run
 that has no heterogeneity at all. Client drift on this problem is a statement
 about partial participation: at `participation_rate: 1.0`, a SCAFFOLD win here
 would be a difference that is not there.
@@ -484,15 +490,18 @@ cost is clearer with a task that has a metric worth aggregating per client:
 `loop._aggregate_client_split_metrics` iterates it, so
 `distance_to_client_optimum` — the one metric here whose per-client
 *spread* would say something, since it is a different number for every client —
-arrives only as a mean over the fit path and never as `test_distance_to_client_optimum_std`.
+arrives as a mean over the fit path (`fit_distance_to_client_optimum`) and on
+the central pass (`central_test_distance_to_client_optimum`), and never as
+`test_distance_to_client_optimum_std`.
 `artifacts._CLIENT_EVALUATION_FIELDS` is still a fixed 13-column schema.
 
-There is one new cost of running through the shipped surface, and it is
-cosmetic rather than numerical: the plan header's metrics block predicts the
-columns a run will write from `client_metric_names`, which is name-driven and
-does not know this task reports no accuracy. So preflight lists
-`central_test_accuracy`, `test_accuracy_avg` and four more that no round of
-this example ever writes. The CSV is correct; the prediction of it is not.
+The plan header's metrics block used to predict the columns from
+`client_metric_names` alone, which did not know this task reports no accuracy,
+so preflight listed `central_test_accuracy`, `test_accuracy_avg` and five more
+that no round of this example writes, and none of the task's own columns. It
+now builds them from the metrics the task declares (`DriftQuadTask.METRICS`),
+and `tests/test_planned_columns_every_task.py` holds the list to what every
+shipped arm writes.
 
 ### Four client rules still read `task._scaler`
 

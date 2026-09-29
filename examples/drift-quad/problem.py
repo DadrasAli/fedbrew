@@ -923,10 +923,13 @@ class DriftQuadTask(TaskAdapter):
 
         ``FedAvgServer.evaluate_global`` prefixes what this returns with
         ``global_`` and hands it to ``loop._evaluate_central_test_set``, which
-        passes through every finite numeric key it is given. So
-        ``central_test_loss`` is `F(x) - F*` for the aggregated iterate -- the
-        curve this example exists to draw -- and the other three arrive beside
-        it under the same prefix.
+        passes through every finite numeric key it is given, under a
+        ``central_test_`` prefix. So ``central_test_optimality_gap`` is
+        `F(x) - F*` for the aggregated iterate -- the curve this example exists
+        to draw. ``central_test_loss`` is the same quantity in exact
+        arithmetic, since `F* = 0`, but it is a mean of client objectives with
+        terms of both signs, and deep in convergence it cancels to 0.0 where
+        the gap, a sum of non-negative terms, is 1e-33.
         """
 
         outputs = [self.eval_step(model, batch) for batch in self.build_dataloader(data, None)]

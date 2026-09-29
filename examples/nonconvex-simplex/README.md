@@ -100,14 +100,18 @@ So a run demonstrates three things.
 
 1. **Every arm diverges**, at a rate the config sets and nothing else bounds.
 2. **Nothing stops it, and nothing says so** — see the next section.
-3. **Projecting afterwards makes it worse than not running.** `simplex-lsq` ends
-   with `Π_Δ` of its iterate landing exactly on `x*`, which is a property of that
-   problem's geometry rather than a method. Here the iterate diverges along the
-   star's eigenvector, whose largest coordinate is the hub, and the projection of
-   a large vector concentrates on its largest coordinate — so `Π_Δ(x)` is the
-   single hub vertex, which spans no edge and scores `F = 0`. The projected gap
-   ends at **+0.4**: worse than the barycentre the run started from, and the
-   worst value any feasible point can have.
+3. **Projecting afterwards is no better than not running, and for half the
+   arms worse.** `simplex-lsq` ends with `Π_Δ` of its iterate landing exactly on
+   `x*`, which is a property of that problem's geometry rather than a method.
+   Here the iterate of the fast-diverging arms runs along the star's
+   eigenvector, whose largest coordinate is the hub, and the projection of a
+   large vector concentrates on its largest coordinate — so `Π_Δ(x)` is the
+   single hub vertex, which spans no edge and scores `F = 0`. For `fedavg`,
+   `fedprox`, `fedavgm` and `scaffold` the projected gap ends at **+0.4**:
+   worse than the barycentre the run started from (+0.3636), and the worst
+   value any feasible point can have. `fedadam`, `fedyogi` and `fedadagrad`
+   end on the barycentre's +0.3636 exactly, and `fedlalr` at +0.3386, a little
+   better than it (the table below).
 
 ## Nothing stops it
 

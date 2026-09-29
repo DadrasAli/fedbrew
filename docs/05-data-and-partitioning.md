@@ -220,7 +220,11 @@ on the writer rather than on its position in the selection, so requesting a
 different client count does not change an unrelated writer's data. The
 partition seed is **separate from `experiment.seed`**: two runs at different
 training seeds share one partition, which is what makes a seed spread measure
-training variance rather than partition variance. Chapter 10.
+training variance rather than partition variance. Chapter 10. The exception is
+the in-memory `synthetic_classification` backend (a run config with no
+`data.path`), which generates nothing to disk: its teacher, its features and
+its partition are drawn from `experiment.seed` (`factory._build_source_dataset`),
+so two training seeds there are two datasets as well.
 
 ### 3.7 Every client holds at least one example
 
@@ -258,7 +262,7 @@ manifest says which.** There are two answers and the difference matters, so
 
 | `client_test_source` | Written by | Where a client's test slice comes from |
 | --- | --- | --- |
-| `partitioned_global_test` | the shared generator (`generate.py`) and `synthetic_classification` | the corpus's **official test set**, dealt out to mirror each client's training profile — §4.1 |
+| `partitioned_global_test` | the shared generator (`generate.py`), and the in-memory `synthetic_classification` backend | the corpus's **official test set**, dealt out to mirror each client's training profile — §4.1. The in-memory backend differs in two ways: its client **val split is the same rows as its test split**, and its test data is drawn unshifted while each client's train data is shifted by +*i* (`fedbrew/data/synthetic_classification.py`) |
 | `within_client_holdout_disjoint_from_eval` | `femnist.py` | a **third slice of that client's own examples**, disjoint from its train and eval slices — §4.2 |
 | `identical_to_train` | no generator in the package; the value an out-of-tree generator writes when its splits hold the same rows, named in `manifest_validation.py` | **the same rows as train.** An analytic objective is not estimated from samples — `f_i` *is* the client — so nothing is held out, and a number read off `test_*` or `central_test_*` is a training number. Preflight prints a note saying so |
 
@@ -593,14 +597,16 @@ python -m pytest tests/test_partition_disjointness.py \
    eval* slice; taking them from its own examples is what a natural partition
    with no external test set has to do. §4.
 4. **The three splits never overlap**, and a reader for one cannot see
-   another. Guarded in both directions. A generator config that would make the
+   another — in every generated dataset. The in-memory `synthetic_classification`
+   backend is the exception: its val and test splits are the same rows (§4). Guarded in both directions. A generator config that would make the
    *rows* overlap while the bookkeeping stayed right is refused rather than
    written: `causal_lm.stride` below `causal_lm.sequence_length` alongside a
    client eval split. §4.
 5. **`label_skew`'s bound is a guarantee.** A configuration that cannot honour
    `labels_per_client` raises rather than exceeding it.
 6. **`dataset.seed` and `experiment.seed` are different seeds.** Sharing one
-   partition across training seeds is what makes a seed spread meaningful.
+   partition across training seeds is what makes a seed spread meaningful. Not
+   for the in-memory backend, whose data is drawn from `experiment.seed` (§3.6).
 7. **The manifest is descriptive.** Never add a key to it that changes run
    behaviour; that belongs in the run config.
 8. **No client is written with zero examples.** A partition that cannot give

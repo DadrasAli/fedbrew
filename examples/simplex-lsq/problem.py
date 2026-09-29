@@ -98,7 +98,8 @@ from fedbrew.tasks.base import (
 )
 
 #: float64 throughout: `constraint_violation` and `simplex_sum - 1` are the two
-#: numbers the example is about, and both are exactly 0 at initialisation. In
+#: numbers the example is about, and both are exactly 0 at the initial iterate
+#: (which no CSV row records: the first row is round 1). In
 #: float32 the sum would drift off 1 by ~1e-7 from rounding alone and the
 #: violation column would report the arithmetic rather than the algorithm.
 DTYPE = torch.float64
@@ -376,9 +377,10 @@ class SimplexModel(nn.Module):  # type: ignore[misc]
                 simplex and, for a power-of-two `d`, sums to exactly 1.0 in
                 floating point. ``zeros`` starts outside it, at a point whose
                 sum is 0. The default is feasible so that
-                ``constraint_violation`` is exactly 0 at round 0 and non-zero
-                from round 1 onward -- the shortest statement of what is
-                missing.
+                ``constraint_violation`` is exactly 0 at the starting point and
+                non-zero from round 1 onward -- the shortest statement of what
+                is missing. No CSV row holds the starting point: the first row
+                is round 1.
         """
 
         super().__init__()
@@ -878,7 +880,8 @@ class SimplexLSQTask(TaskAdapter):
         ``negative_mass``
             `||x - Proj_Delta(x)||`, which is 0 exactly when `x` is feasible,
             and the three readings that say how it is infeasible. All four are 0,
-            1 and 1/d at initialisation and never again.
+            1 and 1/d at the initial iterate, which no CSV row records (the
+            first row is round 1), and never again.
         """
 
         records = [record for record in outputs if isinstance(record, Mapping)]

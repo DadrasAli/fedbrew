@@ -100,10 +100,12 @@ having:
    fast — `fedavg`'s gap is already negative at round 1 and at the floor by
    round 5.
 2. The iterate leaves the feasible set immediately and never returns.
-   `constraint_violation` is exactly 0 at initialisation, because the
+   `constraint_violation` is exactly 0 at the starting point, because the
    barycentre `1/d` sums to exactly 1.0 at a power-of-two `d`, and it is 0.5154
-   from round 5 on.
-3. **The objective column inverts.** `optimality_gap` starts at +0.2656, crosses
+   from round 5 on. No CSV row holds the starting point: the first row is
+   round 1, already after a round of local steps.
+3. **The objective column inverts.** `optimality_gap` is +0.2656 at the
+   starting point (computed from `x₀`; round 1 is the first row on disk), crosses
    zero, and settles at −0.1328 — which is `−½‖x* − θ̄‖²`, known in closed form
    before the run. Any ranking taken from that column ranks arms by how
    thoroughly they broke the constraint.

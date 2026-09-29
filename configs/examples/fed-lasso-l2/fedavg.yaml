@@ -40,9 +40,10 @@ server:
   # changing it would stop this being a control for the L1 arm.
   participation_rate: 1.0
   # Empty, deliberately: filter_metrics keeps everything when the list is
-  # empty, and a non-empty list would drop the six metrics beyond `loss` on
-  # their way to the round record, since none is a name a shipped config knows
-  # to ask for.
+  # empty, and a non-empty list would drop the fit_ columns of the six
+  # metrics beyond `loss` that it does not name. Their central_test_ columns,
+  # which run.py reads, are never filtered: the central pass does not go
+  # through this list.
   metrics: []
 
 client:

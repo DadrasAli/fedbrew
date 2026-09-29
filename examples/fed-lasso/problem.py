@@ -91,8 +91,9 @@ Support recovery is the second thing that needs saying twice. `x*` has exactly
 there is no proximal step anywhere in the repository -- so "the support of the
 iterate" is a *thresholding decision*, and ``model.support_tolerance`` is the
 free parameter that makes it. The ``exact_zeros`` metric is the unthresholded
-version: the count of coordinates that are bit-for-bit 0.0. It is `d` at
-initialisation and 0 from round 1 onward, on every arm.
+version: the count of coordinates that are bit-for-bit 0.0. It is `d` at the
+initial iterate, which no CSV row records -- the first row is round 1 -- and 0
+from round 1 onward, on every arm.
 
 What this file registers
 ------------------------
@@ -1203,9 +1204,9 @@ class FedLassoTask(TaskAdapter):
             choice and not part of the objective.
 
         ``exact_zeros``
-            Coordinates that are bit-for-bit 0.0. `d` at initialisation, 0 from
-            round 1 on every shipped arm, because none of them applies a
-            proximal operator.
+            Coordinates that are bit-for-bit 0.0. `d` at the initial iterate
+            (no CSV row: the first is round 1), 0 from round 1 on every shipped
+            arm, because none of them applies a proximal operator.
         """
 
         records = [record for record in outputs if isinstance(record, Mapping)]

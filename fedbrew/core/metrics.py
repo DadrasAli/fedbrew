@@ -323,7 +323,10 @@ PERSONAL_GLOSS = " under each client's own model"
 #: How the per-client numbers were combined. This is the half of the name a
 #: reader skims, and the half that decides what the number means.
 METRIC_SUFFIX_GLOSSES: Mapping[str, str] = {
-    "sample_weighted_avg": "pooled over examples — the largest clients move it most",
+    "sample_weighted_avg": (
+        "pooled over examples (active target tokens for causal LM) — the largest clients "
+        "move it most"
+    ),
     "avg": ("averaged over clients — a 9-example client counts as much as a 900-example one"),
     "std": "spread across clients (population standard deviation)",
     "variance": "spread across clients, before the square root (population variance)",
@@ -372,15 +375,17 @@ FIXED_METRIC_GLOSSES: Mapping[str, str] = {
         "Example-weighted mean client (cross-entropy + proximal loss) after local training."
     ),
     "control_delta_norm": (
-        "Example-weighted mean ||c_i,new - c_i,old||_2 across selected clients."
+        "Example-weighted mean ||c_i,new - c_i,old||_2 across selected clients (float64)."
     ),
-    "client_control_norm": "Example-weighted mean ||c_i,new||_2 across selected clients.",
+    "client_control_norm": (
+        "Example-weighted mean ||c_i,new||_2 across selected clients (float64)."
+    ),
     "local_steps": "Example-weighted mean minibatch optimizer steps per selected client.",
     "mean_client_control_delta_norm": (
-        "Unweighted mean ||c_i,new - c_i,old||_2 across selected clients."
+        "Unweighted mean ||c_i,new - c_i,old||_2 across selected clients (float64)."
     ),
     "server_control_norm": (
-        "||c_server,new||_2 after adding sum(selected client deltas) / all clients."
+        "||c_server,new||_2 after adding sum(selected client deltas) / all clients (float64)."
     ),
     # The remaining diagnostics had no gloss at all before the plan header
     # needed one, and fell through to a sentence generated from the column
@@ -389,19 +394,28 @@ FIXED_METRIC_GLOSSES: Mapping[str, str] = {
     # a description of a cost accumulator as if it were a loss.
     "optimizer_steps": "Minibatch optimizer steps a client actually took this round.",
     "active_target_tokens": (
-        "Non-padding, non-prompt target tokens a client trained on this round."
+        "Non-padding, non-prompt target tokens a client trained on this round; 0.0 "
+        "for a task whose train step reports no count (classification, the examples)."
     ),
     "trainable_parameters": "Parameters a client updated locally, after any freezing.",
-    "communicated_parameters": "Parameters a client sent back to the server this round.",
+    "communicated_parameters": (
+        "Parameters a client sent back to the server this round; the round's value is "
+        "the example-weighted mean over clients, not their total."
+    ),
     "communicated_bytes": (
-        "Bytes a client sent back this round, at the dtype the tensors are stored in."
+        "Bytes a client sent back this round, at the dtype the tensors are stored in; "
+        "the round's value is the example-weighted mean over clients, not their total."
     ),
     "client_learning_rate": "The step size a client actually used, after any schedule.",
-    "momentum_norm": "||m||_2 of the server's first-moment buffer after this round's update.",
-    "second_moment_norm": "||v||_2 of the server's second-moment buffer after this round's update.",
+    "momentum_norm": (
+        "||m||_2 of the server's first-moment buffer after this round's update (float64)."
+    ),
+    "second_moment_norm": (
+        "||v||_2 of the server's second-moment buffer after this round's update (float64)."
+    ),
     "effective_learning_rate_coordinate_mean": (
-        "A client's per-coordinate step size alpha/sqrt(v_hat), averaged over its "
-        "coordinates; across clients, example-weighted."
+        "A client's per-coordinate step size alpha/sqrt(v_hat) in float32, averaged over "
+        "its coordinates; across clients, example-weighted."
     ),
     "effective_learning_rate_coordinate_min": (
         "A client's smallest per-coordinate step size; across clients, the "

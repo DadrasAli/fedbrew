@@ -210,8 +210,9 @@ config already sets `use_amp: false`.
 ### 3.1 What "active" means
 
 For `causal_lm`, a token counts only if its target is neither `ignore_index`
-(default `-100`, covering padding and, under SFT, the prompt) nor
-`pad_token_id` when one is set — `TorchCausalLMTask._loss_and_counts`
+(default `-100`, which the SFT generators write for prompt tokens and for the
+separators between packed examples, never for padding) nor `pad_token_id` when
+one is set, which is the filter that removes padding — `TorchCausalLMTask._loss_and_counts`
 (`fedbrew/tasks/causal_lm/torch_causal_lm.py`). Everything —
 loss, accuracy, `active_target_tokens` — is measured over that subset.
 
@@ -223,11 +224,16 @@ one case where that happens — §3.3.
 This is why `num_examples` means different things per task, and why
 `federated_aggregation_weight` exists: it lets a task decide a client's weight
 rather than assuming an example count. For `causal_lm` it is active target
-tokens either way; `model.active_target_weighting` decides which ones — those
-in the client's whole train split (`false`, the default), or those in the
-batches the round trained on, counted once per step (`true`, the default when
-the manifest's task is `causal_lm_sft`). Chapter 07 §3.1 has the full
-definition, per task and per update mode.
+tokens either way; the task's `active_target_weighting` decides which ones —
+those in the client's whole train split (`false`), or those in the batches the
+round trained on, counted once per step (`true`). It is `true` when the
+manifest's task is `causal_lm_sft` and `false` otherwise, and a config cannot
+change it today: the task reads `model.active_target_weighting` and
+`model.ignore_index`, but every causal-LM model builder refuses both as keys it
+does not read (`tiny_gpt2` refuses them when a run starts; the `hf_causal_lm`
+builders' key sets do not include them either). `ignore_index` comes from the
+manifest (`dataset_ignore_index`). Chapter 07 §3.1 has the full definition, per
+task and per update mode.
 
 ### 3.2 Evaluation batch size differs by task
 

@@ -112,10 +112,10 @@ def active_target_weighting_refusal(
         f"client.update_rule={rule} does not honour {source}: {rule} reports the "
         "active target tokens of the whole train split, counted after fitting, and "
         "never asks the task for the tokens its training batches held, so the key "
-        "would be recorded and ignored. Set model.active_target_weighting: false to "
-        "weight by the train split's tokens, which is what this rule does, or use a "
-        "rule that honours it: "
-        f"{', '.join(sorted(AGGREGATION_WEIGHT_HOOK_CLIENT_RULES))}."
+        "would be recorded and ignored; use a rule that honours it: "
+        f"{', '.join(sorted(AGGREGATION_WEIGHT_HOOK_CLIENT_RULES))}. "
+        "(model.active_target_weighting cannot turn it off: every causal-LM model "
+        "builder refuses the key.)"
     )
 
 

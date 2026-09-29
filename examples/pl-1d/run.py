@@ -111,8 +111,11 @@ def _float(row: dict[str, str], column: str) -> float | None:
 def summarise(output_dir: Path) -> dict[str, Any] | None:
     """The columns the README's table reports, read off one arm's artifacts.
 
-    ``gap`` is ``central_test_loss``, which for this problem *is* `F(x) - F*`
-    for the aggregated iterate, because `F* = 0` exactly. The median over the
+    ``gap`` is ``central_test_optimality_gap``, `F(x) - F*` for the aggregated
+    iterate. ``central_test_loss`` is the same quantity in exact arithmetic,
+    since `F* = 0`, but deep in convergence it is a cancellation of paired
+    terms of both signs, and it reads exactly 0.0 on rounds where the gap is
+    1e-33; the gap column is a sum of non-negative terms, so it cannot. The median over the
     last twenty rounds is here because the final-round value of a
     floor-limited arm is a question about the phase of an oscillation, and a
     table that reports only the last round hides that.
@@ -122,7 +125,9 @@ def summarise(output_dir: Path) -> dict[str, Any] | None:
     if not rounds:
         return None
     run_record = json.loads((output_dir / "run.json").read_text(encoding="utf-8"))
-    gaps = [value for row in rounds if (value := _float(row, "central_test_loss")) is not None]
+    gaps = [
+        value for row in rounds if (value := _float(row, "central_test_optimality_gap")) is not None
+    ]
     if not gaps:
         return None
     tail = sorted(gaps[-20:])

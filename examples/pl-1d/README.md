@@ -57,8 +57,10 @@ process.
 ## What the shipped strategies do on it
 
 200 rounds, 8 clients, 4 sampled per round, 5 local steps, `shift_scale: 2.0`,
-`x_init: 2.5`, seed 42. `gap` is `central_test_loss`, which for this problem
-*is* `F(x) − F*` for the aggregated iterate.
+`x_init: 2.5`, seed 42. `gap` is `central_test_optimality_gap`, `F(x) − F*` for
+the aggregated iterate. It read `central_test_loss` until 2026-09-29, which is
+the same quantity in exact arithmetic but cancels to exactly 0.0 deep in
+convergence; only SCAFFOLD's row changed, from three zeros.
 
 | arm | gap @ 200 | median gap, rounds 181–200 | best gap | first round < 1e-6 | first < 1e-12 | `fit_distance_to_optimum` @ 200 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -67,7 +69,7 @@ process.
 | fedadam | 7.64e-03 | 7.65e-03 | 3.72e-07 | 78 | — | 1.61e-01 |
 | fedyogi | 3.02e-03 | 7.84e-03 | 5.31e-08 | 95 | — | 1.58e-01 |
 | fedadagrad | 3.23e-01 | 3.91e-01 | 3.23e-01 | — | — | 1.48e-01 |
-| **scaffold** | **0.00e+00** | **0.00e+00** | **0.00e+00** | **23** | **59** | **1.80e-17** |
+| **scaffold** | **1.29e-33** | **9.69e-34** | **3.42e-37** | **23** | **59** | **1.80e-17** |
 | fedlalr | 6.64e-03 | 1.10e-02 | 2.50e-08 | 93 | — | 7.58e-02 |
 
 The separation is the textbook one, and it is legible precisely because the
@@ -223,7 +225,11 @@ numbers for the **aggregated** model now arrive too, as
 this example emits all four columns. Before the central pass was widened they
 did not arrive at all, and this problem was the one place that cost nothing,
 because `F* = 0` makes `central_test_loss` *equal* to the global optimality
-gap. That was a coincidence of this objective, not a general fit.
+gap. That was a coincidence of this objective, not a general fit, and it holds
+in exact arithmetic only: `central_test_loss` is a mean of client objectives
+whose shift terms cancel, and on SCAFFOLD's 200-round run it reads exactly 0.0
+in 40 rounds, the last among them, where `central_test_optimality_gap` is
+1.29e-33 (measured 2026-09-29). The tables above read the gap column.
 
 Two of the three routes are still closed, and they are different kinds of
 closed. `CLIENT_METRIC_BASES` is a genuine vocabulary: a new base name has to

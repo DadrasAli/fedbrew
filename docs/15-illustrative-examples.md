@@ -56,7 +56,7 @@ it and guarded against it in both directions.
 | [`drift-quad`](../examples/drift-quad/) | `f_i(x) = ½xᵀAx − b_iᵀx`, shared diagonal `A`, per-client offsets. Dials for condition number `κ` and gradient dissimilarity `ζ`. `x* = 0`, `F* = 0` | That κ sets the rate and ζ sets the floor, that each is fixed by a different family, and that neither family fixes the other's dial — with both dials turnable to zero as controls | All eight arms run. Only SCAFFOLD reaches `x*` under partial participation; every other arm converges to a ζ-dependent floor |
 | [`fed-lasso`](../examples/fed-lasso/) | `f_i(x) = (1/2m)‖Hx − y_i‖² + λ‖x‖₁` over a planted 3-sparse signal, orthonormal design. `x* = S_λ(x_true)` in closed form. A `penalty` dial swaps the L1 term for `λ‖x‖²/2m` at the same λ, where `x* = (m+λ)⁻¹Hᵀȳ` | What subgradient descent does to a composite objective: a floor set by `ηλ`, no sparsity at any round, and a support that exists only at a threshold — with the smooth control removing the non-smoothness and not the penalty, so every arm converges and still produces no zeros | **None.** There is no proximal operator in fedbrew, so no arm produces a single exact zero. `fedprox` is not the exception — its penalty is smooth. A decaying step size helps the gap and not the sparsity. All nine solve the L2 setting, which is a different problem and not a rescue |
 | [`simplex-lsq`](../examples/simplex-lsq/) | Least squares over the probability simplex `Δ`, orthonormal design, with the unconstrained optimum placed outside `Δ`. `x* = Π_Δ(θ̄)` in closed form | That the objective column inverts: every arm converges to an infeasible point and ends with a **negative** optimality gap, beating `F*` by leaving the feasible set | **None.** No projection, no Frank-Wolfe step and no mirror map, and no hook one could attach to. Every arm converges — to the wrong set |
-| [`nonconvex-simplex`](../examples/nonconvex-simplex/) | Motzkin-Straus: `−½xᵀAx` over `Δ` for a `K₅` disjoint from a star `K₁,₂₅`, so the clique number is the clique's and the spectral radius is the star's. `F* = −½(1 − 1/ω) = −0.4` | That every arm diverges, no divergence detector fires, all eight report `status: completed`, and projecting the result afterwards is worse than never having run | **None**, and the unconstrained problem is unbounded below. `blowup_factor` never arms because the loss is never positive |
+| [`nonconvex-simplex`](../examples/nonconvex-simplex/) | Motzkin-Straus: `−½xᵀAx` over `Δ` for a `K₅` disjoint from a star `K₁,₂₅`, so the clique number is the clique's and the spectral radius is the star's. `F* = −½(1 − 1/ω) = −0.4` | That every arm diverges, no divergence detector fires, all eight report `status: completed`, and projecting the result afterwards is no better than never having run: worse for four arms, level with the start for three, and 0.025 better for one | **None**, and the unconstrained problem is unbounded below. `blowup_factor` never arms because the loss is never positive |
 
 **Three of the five pose problems no shipped algorithm can solve.** That is the
 point of having them, not a gap in the set. A problem is worth stating before
@@ -186,9 +186,12 @@ python -m pytest tests/test_docs_illustrative_examples.py -v
 
 - **Adding an example and not the chapter row.** The guard fails in the
   direction that names the missing row.
-- **Turning a dial with a run-config key.** The run then scores against a
-  manifest describing different data, and the optimality gap is measured
-  against the wrong `F*`.
+- **Expecting a run-config key to turn a dial.** It cannot move `F*` under the
+  data: `F*` is a module constant in `drift-quad` and `pl-1d`, and in
+  `fed-lasso`, `simplex-lsq` and `nonconvex-simplex` the task recomputes it from
+  the problem the manifest records (`reference`), and refuses a model key that
+  disagrees with the data when the run builds the task. A dial is turned by regenerating the data from
+  a changed generator config.
 - **Reading a table as a ranking.** Every table that could be misread says in
   its own section which arms are separated by a mechanism and which are sitting
   on one floor at different phases of one oscillation.
