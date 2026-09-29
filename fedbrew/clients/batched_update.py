@@ -605,7 +605,7 @@ def accumulate(
 
     return {
         name: (torch.zeros_like(gradient) if accumulated is None else accumulated[name])
-        + gradient * weight
+        + gradient * _stacked(weight, gradient)
         for name, gradient in gradients.items()
     }
 
@@ -613,7 +613,21 @@ def accumulate(
 def divide(accumulated: Mapping[str, Tensor], denominator: float | Tensor) -> dict[str, Tensor]:
     """The whole split's gradient: ``_whole_split_gradient``'s ``div_(denominator)``."""
 
-    return {name: value.div(denominator) for name, value in accumulated.items()}
+    return {name: value.div(_stacked(denominator, value)) for name, value in accumulated.items()}
+
+
+def _stacked(value: float | Tensor, like: Tensor) -> float | Tensor:
+    """A value per client, on a stack stepped as a whole, shaped to scale ``like``'s rows.
+
+    Under vmap -- one client's scalar, logically 0-dim -- or as a Python
+    number it is returned as it is. One value per row of a stack is cast to
+    ``like``'s dtype first, as vmap's promotion casts a client's scalar to the
+    result's, so the stacked product or quotient is the vmapped one.
+    """
+
+    if isinstance(value, Tensor) and value.dim() == 1 and like.dim() >= 1:
+        return _per_client(value, like)
+    return value
 
 
 def clip_batch_gradients(gradients: Mapping[str, Tensor], max_norm: Tensor) -> dict[str, Tensor]:

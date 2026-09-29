@@ -1252,6 +1252,8 @@ class _Bucket:
         self.model.train()
         if self.summed:
             return self._run_summed(params, state, corrections, outputs)
+        if self._stepwise():
+            return self._run_stepwise(params, state, corrections, outputs)
         step = 0
         for number, count in enumerate(self.structure, start=1):
             if program.combine == "batch":
@@ -1320,6 +1322,61 @@ class _Bucket:
             params = {name: value.unsqueeze(0) for name, value in params.items()}
         return params, training, evaluated
 
+    # -- a stack's step arithmetic, on the stack ------------------------------
+
+    def _stepwise(self) -> bool:
+        """Whether a step's combination and update run on the stacked tensors, not under vmap.
+
+        Unclipped, they are elementwise -- every operand a client's tensor,
+        one shared by all, a Python number, or a value per client, which
+        ``_per_client`` shapes to its rows, cast as vmap casts it -- so on the
+        stack they are the vmapped arithmetic, each element's the same
+        operation, without vmap's cost a call. A compiled step keeps its own
+        functions.
+        """
+
+        return self.stacked and not self.compiled and self.program.max_grad_norm is None
+
+    def _run_stepwise(
+        self,
+        params: dict[str, Tensor],
+        state: Any,
+        corrections: list[tuple[Any, int | None]],
+        outputs: list[dict[str, Tensor]],
+    ) -> tuple[dict[str, Tensor], list[dict[str, Tensor]], int]:
+        """``run``'s steps, each gradient vmapped and its combination and update on the stack."""
+
+        program = self.program
+        gradient = gradient_function(
+            self.task, self.model, self.buffers, self.context.autocast(self.device)
+        )
+        controls = [value for value, _ in corrections]
+        step = 0
+        for number, count in enumerate(self.structure, start=1):
+            if program.combine == "batch":
+                batch, mask = self._gather(step)
+                step += 1
+                grads, step_outputs = self._call(gradient, [(params, 0), (batch, 0), (mask, 0)])
+                params, state = apply_update(
+                    program, params, grads, state, number, *controls, values=self.values.at(number)
+                )
+                outputs.append(step_outputs)
+                continue
+            total: Any = None
+            first = step
+            for _ in range(count):
+                batch, mask = self._gather(step)
+                grads, step_outputs = self._call(gradient, [(params, 0), (batch, 0), (mask, 0)])
+                total = accumulate(total, grads, self._weights(step)[0])
+                outputs.append(step_outputs)
+                step += 1
+            if program.combine == "full":
+                total = divide(total, self._denominators(first, count)[0])
+            params, state = apply_update(
+                program, params, total, state, number, *controls, values=self.values.at(number)
+            )
+        return params, outputs, step
+
     # -- the summed form of a step's gradient ---------------------------------
 
     def _run_summed(
@@ -1332,8 +1389,9 @@ class _Bucket:
         """``run``'s steps with each gradient taken as ``_summed_gradients`` takes it.
 
         The rule's step -- correction, clipping, optimizer -- and the
-        combination of a pass's gradients are ``run``'s, vmapped over the
-        clients as there.
+        combination of a pass's gradients are ``run``'s: on the stack where
+        they are elementwise (``_stepwise``), vmapped over the clients where
+        clipping reduces over a client's tensors.
         """
 
         program = self.program
@@ -1419,9 +1477,26 @@ class _Bucket:
             first = step
             for _ in range(count):
                 grads, step_outputs = self._summed_gradients(params, *self._gather(step))
-                total = self._call(combine, [(total, 0), (grads, 0), self._weights(step)])
+                if program.max_grad_norm is None:
+                    # Elementwise, as the unclipped batch step above.
+                    total = accumulate(total, grads, self._weights(step)[0])
+                else:
+                    total = self._call(combine, [(total, 0), (grads, 0), self._weights(step)])
                 outputs.append(step_outputs)
                 step += 1
+            if program.max_grad_norm is None:
+                if program.combine == "full":
+                    total = divide(total, self._denominators(first, count)[0])
+                params, state = apply_update(
+                    program,
+                    params,
+                    total,
+                    state,
+                    number,
+                    *(value for value, _ in corrections),
+                    values=self.values.at(number),
+                )
+                continue
             params, state = self._call(
                 partial(full_update, step=number),
                 [
@@ -1531,11 +1606,7 @@ def step_functions(
     runs under bfloat16 autocast on ``autocast``'s device type, when given.
     """
 
-    def loss(params: Any, batch: Any, mask: Any) -> Any:
-        with _autocast(autocast):
-            return task.functional_loss(model, params, buffers, batch, mask)
-
-    gradient = torch.func.grad(loss, has_aux=True)
+    gradient = gradient_function(task, model, buffers, autocast)
 
     def batch_update(  # type: ignore[no-untyped-def]
         params, state, batch, mask, reference, client_control, server_control, values, step
@@ -1576,6 +1647,18 @@ def step_functions(
         )
 
     return batch_update, gradient_sum, combined_update
+
+
+def gradient_function(
+    task: Any, model: nn.Module, buffers: Mapping[str, Tensor], autocast: str | None
+) -> Callable[..., Any]:
+    """One client's gradient of its batch's loss, and the loss's outputs (``torch.func.grad``)."""
+
+    def loss(params: Any, batch: Any, mask: Any) -> Any:
+        with _autocast(autocast):
+            return task.functional_loss(model, params, buffers, batch, mask)
+
+    return torch.func.grad(loss, has_aux=True)
 
 
 def _autocast(device_type: str | None) -> Any:
