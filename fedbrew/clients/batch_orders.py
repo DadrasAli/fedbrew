@@ -16,8 +16,10 @@ them for every client together from what each task declares about its loader
   per epoch, one int64 base seed, then the sampler's ``randperm`` and, once
   the epoch's last batch has been taken, one more ``randperm`` it discards;
   the linear examples' loaders draw one ``randperm`` when they are built and
-  yield that order every time they are iterated. The draws are torch's own,
-  so the orders are the loaders' by construction;
+  yield that order every time they are iterated; an iid oracle's
+  (``LoaderOrder.replacement``) draws one ``randint`` batch per iteration,
+  all of a round's drawn in one call, which is the same stream. The draws
+  are torch's own, so the orders are the loaders' by construction;
 - each epoch's batches, cut and dropped as the loader cuts and drops them,
   the batches each applied update consumes, and every client's batch at every
   step as row indices, for all clients at once (:func:`plan_orders`).
@@ -139,6 +141,8 @@ class RoundOrders:
 def batches_per_epoch(order: LoaderOrder) -> int:
     """How many batches one epoch of ``order``'s loader yields."""
 
+    if order.replacement:
+        return 1
     whole, rest = divmod(order.rows, order.batch_size)
     if not order.drop_last or (order.keep_single_batch and whole + (rest > 0) <= 1):
         return whole + (rest > 0)
@@ -166,6 +170,12 @@ def plan_orders(
     whole = torch.div(rows, sizes, rounding_mode="floor")
     every = whole + (rows % sizes > 0).to(_LONG)
     per_epoch = torch.where(~drop | (keep & (every <= 1)), every, whole)
+    # An iid oracle yields one batch per iteration, of batch_size rows however
+    # many the split holds. Nothing is built for a round without one.
+    oracle = None
+    if any(order.replacement for order in orders):
+        oracle = torch.tensor([order.replacement for order in orders], dtype=torch.bool)
+        per_epoch = torch.where(oracle, 1, per_epoch)
     counts = per_epoch.tolist()
     step_counts: list[int] = []
     structure: list[tuple[int, ...]] = []
@@ -189,16 +199,22 @@ def plan_orders(
     epoch = torch.div(step, safe, rounding_mode="floor")
     starts = (step % safe) * sizes.unsqueeze(1)
     lengths = torch.minimum(torch.clamp(rows.unsqueeze(1) - starts, min=0), sizes.unsqueeze(1))
+    if oracle is not None:
+        lengths = torch.where(oracle.unsqueeze(1), sizes.unsqueeze(1), lengths)
     lengths = torch.where(step < steps.unsqueeze(1), lengths, 0)
 
     shuffled = torch.tensor([order.shuffle for order in orders], dtype=torch.bool)
     positions = starts.unsqueeze(2) + torch.arange(widest, dtype=_LONG).view(1, 1, -1)
     positions = torch.minimum(positions, torch.clamp(rows - 1, min=0).view(-1, 1, 1))
     indices = positions.clone()
-    if bool(shuffled.any()):
+    permuted = shuffled if oracle is None else shuffled & ~oracle
+    if bool(permuted.any()) or oracle is not None:
         if seeds is None:
             seeds = [order.seed for order in orders]
-        _shuffle_positions(orders, seeds, shuffled, rows, epoch, epochs_used, positions, indices)
+    if bool(permuted.any()):
+        _shuffle_positions(orders, seeds, permuted, rows, epoch, epochs_used, positions, indices)
+    if oracle is not None:
+        _draw_with_replacement(orders, seeds, oracle, steps, indices)
     return RoundOrders(
         indices=indices,
         lengths=lengths,
@@ -266,6 +282,36 @@ def _shuffle_positions(
     which = torch.where(per_loader.unsqueeze(1), 0, which)
     which = which + torch.tensor(first, dtype=_LONG).unsqueeze(1)
     indices[chosen] = joined[starts[which].unsqueeze(2) + positions[chosen]]
+
+
+def _draw_with_replacement(
+    orders: Sequence[LoaderOrder],
+    all_seeds: Sequence[int | None],
+    oracle: Tensor,
+    steps: Tensor,
+    indices: Tensor,
+) -> None:
+    """Each iid oracle's batches, in place: one ``randint`` for all of a client's steps.
+
+    The loader draws ``randint(rows, (batch_size,))`` per iteration from one
+    generator; the round's ``steps`` iterations drawn as one
+    ``(steps, batch_size)`` call are the same stream.
+    """
+
+    generator = torch.Generator()
+    for client in torch.nonzero(oracle).view(-1).tolist():
+        order, count = orders[client], int(steps[client])
+        if not order.shuffle:
+            raise ValueError("an iid oracle's order is declared shuffled")
+        seed = all_seeds[client]
+        if seed is None:
+            raise ValueError("an iid oracle's batches are drawn from its own seed")
+        if count == 0:
+            continue
+        generator.manual_seed(int(seed))
+        indices[client, :count, : order.batch_size] = torch.randint(
+            order.rows, (count, order.batch_size), generator=generator, dtype=_LONG
+        )
 
 
 def _permutations(

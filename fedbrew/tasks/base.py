@@ -151,7 +151,12 @@ class LoaderOrder:
       ``torch.Generator`` seeded with ``seed``: once per epoch after one int64
       base-seed draw, and once more after the last batch, when ``per_epoch``
       (torch's ``DataLoader``); otherwise once, when it is built, and every
-      iteration yields that order.
+      iteration yields that order;
+    - with ``replacement`` (and ``shuffle``) it is an iid oracle instead:
+      every iteration yields one batch of ``batch_size`` rows drawn uniformly
+      with replacement, ``torch.randint(rows, (batch_size,))`` on a
+      ``torch.Generator`` seeded with ``seed`` once, when it is built. The
+      batch may hold more rows than the split.
     """
 
     rows: int
@@ -161,6 +166,7 @@ class LoaderOrder:
     seed: int | None
     per_epoch: bool
     keep_single_batch: bool = False
+    replacement: bool = False
 
 
 def listed_loader_order(rows: int, config: Mapping[str, Any] | bool | None) -> LoaderOrder:

@@ -2,7 +2,8 @@
 
 ``fedbrew/clients/batch_orders.py`` plans a round's batch orders for every
 client together from each task's ``LoaderOrder`` declaration, drawing each
-permutation with the calls the loader makes rather than through the loader. So
+permutation -- or an iid oracle's batches (``LoaderOrder.replacement``) --
+with the calls the loader makes rather than through the loader. So
 each order here is compared with the loader's own: the task's ``build_dataloader`` built
 on a split whose rows are their own numbers and iterated as each update rule's
 loop iterates it (``sgd_mode_updates``, ``own_loop_updates``), for every update
@@ -217,6 +218,28 @@ class PlannedOrdersAreTheLoadersTest(unittest.TestCase):
         result = plan_orders([order], [LocalLoop(epochs=2)])
         self.assertEqual(int(result.steps[0]), 0)
         self.assertEqual(result.structure[0], ())
+
+
+class AnIidOracleIsPlannedAsItDrawsTest(unittest.TestCase):
+    """``LoaderOrder.replacement``: one randint batch per iteration, from one seeded generator."""
+
+    def test_the_planned_batches_are_the_loaders_draws(self) -> None:
+        orders = [
+            LoaderOrder(rows, size, True, False, seed, per_epoch=False, replacement=True)
+            for rows, size, seed in ((32, 16, 5), (3, 8, 2**40 + 1), (1, 1, 0))
+        ]
+        loops = [LocalLoop(epochs=7, single_batch=True), LocalLoop(epochs=4), LocalLoop(epochs=2)]
+        result = plan_orders(orders, loops)
+        for client, (order, loop) in enumerate(zip(orders, loops, strict=True)):
+            generator = torch.Generator()
+            generator.manual_seed(int(order.seed))
+            expected = [
+                torch.randint(order.rows, (order.batch_size,), generator=generator).tolist()
+                for _ in range(loop.epochs)
+            ]
+            with self.subTest(client=client):
+                self.assertEqual(result.structure[client], (1,) * loop.epochs)
+                self.assertEqual([update[0] for update in planned(result, client)], expected)
 
 
 class DataloaderSeedsTest(unittest.TestCase):
