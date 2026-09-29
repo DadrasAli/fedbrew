@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 
 import torch
 from torch import Tensor
@@ -159,7 +160,67 @@ def plan_orders(
     ``seeds[c]``, or ``orders[c].seed`` without them, is the seed client
     ``c``'s loader is seeded with; ``loops[c]`` which of its batches the
     update consumes. A client whose loader yields no batch gets no steps, and
-    the caller refuses it in its rule's words.
+    the caller refuses it in its rule's words. Everything but the draws the
+    seeds make is the same for the same orders and loops, round after round,
+    and is worked out once (``_plan_shape``).
+    """
+
+    shape = _plan_shape(tuple(orders), tuple(loops))
+    positions = shape.positions
+    if bool(shape.permuted.any()) or shape.oracle is not None:
+        if seeds is None:
+            seeds = [order.seed for order in orders]
+    if bool(shape.permuted.any()):
+        indices = _shuffle_positions(
+            orders,
+            seeds,
+            shape.permuted,
+            shape.rows,
+            shape.epoch,
+            shape.epochs_used,
+            positions,
+            positions if shape.everyone else positions.clone(),
+            shape.everyone,
+        )
+    else:
+        indices = positions.clone()
+    if shape.oracle is not None:
+        _draw_with_replacement(orders, seeds, shape.oracle, shape.steps, indices)
+    return RoundOrders(
+        indices=indices,
+        lengths=shape.lengths.clone(),
+        starts=shape.starts.clone(),
+        steps=shape.steps.clone(),
+        structure=list(shape.structure),
+        contiguous=~shape.shuffled,
+    )
+
+
+@dataclass(frozen=True)
+class _PlanShape:
+    """What ``plan_orders`` computes from the orders and loops alone, before any draw."""
+
+    rows: Tensor
+    per_epoch: Tensor
+    oracle: Tensor | None
+    structure: list[tuple[int, ...]]
+    steps: Tensor
+    epochs_used: Tensor
+    epoch: Tensor
+    starts: Tensor
+    lengths: Tensor
+    shuffled: Tensor
+    positions: Tensor
+    permuted: Tensor
+    everyone: bool
+
+
+@lru_cache(maxsize=16)
+def _plan_shape(orders: tuple[LoaderOrder, ...], loops: tuple[LocalLoop, ...]) -> _PlanShape:
+    """The seed-independent part of ``plan_orders``: kept for the same orders and loops.
+
+    Its tensors are shared by every call that finds them here, so
+    ``plan_orders`` hands out copies, and writes into none of them.
     """
 
     clients = len(orders)
@@ -209,25 +270,21 @@ def plan_orders(
     permuted = shuffled if oracle is None else shuffled & ~oracle
     # The positions are read again only to map a permuted client's through
     # its permutations; where every client is permuted, what that returns is
-    # the whole of the indices. Either way, then, nothing to copy first.
-    everyone = bool(permuted.all())
-    indices = positions if everyone or not bool(permuted.any()) else positions.clone()
-    if bool(permuted.any()) or oracle is not None:
-        if seeds is None:
-            seeds = [order.seed for order in orders]
-    if bool(permuted.any()):
-        indices = _shuffle_positions(
-            orders, seeds, permuted, rows, epoch, epochs_used, positions, indices, everyone
-        )
-    if oracle is not None:
-        _draw_with_replacement(orders, seeds, oracle, steps, indices)
-    return RoundOrders(
-        indices=indices,
-        lengths=lengths,
-        starts=starts,
-        steps=steps,
+    # the whole of the indices, a new tensor.
+    return _PlanShape(
+        rows=rows,
+        per_epoch=per_epoch,
+        oracle=oracle,
         structure=structure,
-        contiguous=~shuffled,
+        steps=steps,
+        epochs_used=epochs_used,
+        epoch=epoch,
+        starts=starts,
+        lengths=lengths,
+        shuffled=shuffled,
+        positions=positions,
+        permuted=permuted,
+        everyone=bool(permuted.all()),
     )
 
 
