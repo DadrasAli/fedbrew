@@ -243,6 +243,28 @@ class FitEvaluationConfig:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class GradNormEvaluationConfig:
+    """When ``grad_norm_sq`` is measured: the gradient norm of the global objective.
+
+    ``||grad F(x)||^2`` at the global model after the round's aggregation,
+    where F is the task's training loss over every client's train split,
+    weighted as the task's loss averages -- by examples, or by active target
+    tokens for the causal-LM task -- its parameter terms included; under an
+    l1 term, the squared norm of F's minimum-norm subgradient
+    (``fedbrew/core/grad_norm.py``). One forward and backward over every
+    client's train rows per scheduled round, and nothing on the others.
+    Refused for a task that declares no gradient of its objective
+    (``TaskAdapter.GRAD_NORM_GLOSS``).
+    """
+
+    #: The schedule SplitEvaluationConfig.every takes, defaulting to never:
+    #: the pass reads every client's data, and no run asked for it before it
+    #: existed.
+    every: int | str = "never"
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
 #: Which model each evaluation pass measures.
 #:   global    the aggregated server model, as every non-personalized arm does
 #:   personal  each client's own model, which for a personalized update rule is
@@ -277,6 +299,7 @@ class EvaluationConfig:
     )
     central_test: CentralTestConfig = field(default_factory=lambda: CentralTestConfig(every=10))
     fit: FitEvaluationConfig = field(default_factory=FitEvaluationConfig)
+    grad_norm: GradNormEvaluationConfig = field(default_factory=GradNormEvaluationConfig)
     #: Which model the client passes measure. "global" keeps every existing
     #: config evaluating exactly what it evaluated before this field existed.
     model_scope: str = "global"
@@ -872,6 +895,7 @@ _KNOWN_EXTRA_KEYS: dict[str, frozenset[str]] = {
     "evaluation.test": frozenset(),
     "evaluation.central_test": frozenset(),
     "evaluation.fit": frozenset(),
+    "evaluation.grad_norm": frozenset(),
     "reporting": frozenset(),
     "reporting.statistics": frozenset(),
     "divergence": frozenset(),
@@ -1195,7 +1219,7 @@ def _validate_unknown_keys(config: FullConfig) -> None:
         )
     _validate_known_keys("numerics", config.numerics.extra)
     _validate_known_keys("evaluation", config.evaluation.extra)
-    for split in ("train", "val", "test", "central_test", "fit"):
+    for split in ("train", "val", "test", "central_test", "fit", "grad_norm"):
         _validate_known_keys(f"evaluation.{split}", getattr(config.evaluation, split).extra)
     _validate_known_keys("reporting", config.reporting.extra)
     _validate_known_keys("reporting.statistics", config.reporting.statistics.extra)
@@ -1676,15 +1700,23 @@ def _build_evaluation_config(values: object) -> EvaluationConfig:
         raise RunRefused("evaluation.fit must be a mapping")
     fit_known, fit_extra = _split_extra(fit_values, FitEvaluationConfig)
     fit = FitEvaluationConfig(every=fit_known.get("every", defaults.fit.every), extra=fit_extra)
+    grad_values = values.get("grad_norm", {})
+    if not isinstance(grad_values, Mapping):
+        raise RunRefused("evaluation.grad_norm must be a mapping")
+    grad_known, grad_extra = _split_extra(grad_values, GradNormEvaluationConfig)
+    grad_norm = GradNormEvaluationConfig(
+        every=grad_known.get("every", defaults.grad_norm.every), extra=grad_extra
+    )
     extra = {
         key: value
         for key, value in values.items()
-        if key not in {"train", "val", "test", "central_test", "fit", "model_scope"}
+        if key not in {"train", "val", "test", "central_test", "fit", "grad_norm", "model_scope"}
     }
     return EvaluationConfig(
         **splits,
         central_test=central_test,
         fit=fit,
+        grad_norm=grad_norm,
         model_scope=values.get("model_scope", defaults.model_scope),
         extra=extra,
     )
@@ -1850,11 +1882,49 @@ def _validate_fit_evaluation(config: FullConfig) -> None:
         )
 
 
+def _validate_grad_norm_evaluation(config: FullConfig) -> None:
+    """evaluation.grad_norm.every parses, the task can take F's gradient, and a monitor has it.
+
+    A task that declares no gradient of its objective (``GRAD_NORM_GLOSS``)
+    refuses the key rather than reporting a number it cannot define. And
+    with the pass never run no round carries ``grad_norm_sq``, so a divergence
+    monitor or a checkpoint selection watching it would never run: refused
+    as a fit_ metric is with ``evaluation.fit.every: never``.
+    """
+
+    from fedbrew.core.metrics import GRAD_NORM_COLUMN
+
+    schedule = parse_evaluation_schedule(config.evaluation.grad_norm.every, "evaluation.grad_norm")
+    if schedule is not None and task_grad_norm_gloss(config) is None:
+        raise RunRefused(
+            f"evaluation.grad_norm.every is {config.evaluation.grad_norm.every!r}, but task "
+            f"{config.task.name!r} declares no gradient of its objective "
+            "(TaskAdapter.GRAD_NORM_GLOSS), so it has no grad_norm_sq to report. "
+            "Set evaluation.grad_norm.every to never."
+        )
+    if schedule is not None:
+        return
+    watched = []
+    divergence = config.divergence
+    if divergence is not None and divergence.active and divergence.metric == GRAD_NORM_COLUMN:
+        watched.append("divergence.metric")
+    checkpointing = config.runtime.extra.get("checkpointing")
+    if isinstance(checkpointing, Mapping) and checkpointing.get("best_metric") == GRAD_NORM_COLUMN:
+        watched.append("runtime.checkpointing.best_metric")
+    if watched:
+        raise RunRefused(
+            f"evaluation.grad_norm.every is 'never', so no round carries {GRAD_NORM_COLUMN}, "
+            f"which {' and '.join(watched)} watches. Measure it on a schedule, or watch "
+            "another metric."
+        )
+
+
 def _validate_evaluation(config: FullConfig) -> None:
     """Check every split's schedule and client scope, and the split roles."""
 
     parse_evaluation_schedule(config.evaluation.central_test.every, "evaluation.central_test")
     _validate_fit_evaluation(config)
+    _validate_grad_norm_evaluation(config)
     for split in ("train", "val", "test"):
         block = getattr(config.evaluation, split)
         parse_evaluation_schedule(block.every, f"evaluation.{split}")
@@ -2035,7 +2105,10 @@ def _metrics_no_filter_can_remove(config: FullConfig) -> set[str]:
     configs into failures.
     """
 
-    unfiltered: set[str] = set()
+    from fedbrew.core.metrics import GRAD_NORM_COLUMN
+
+    # The server's own measurement, never a fit-side column.
+    unfiltered: set[str] = {GRAD_NORM_COLUMN}
     prefixes = [""] if config.evaluation.model_scope in {"global", "both"} else []
     if config.evaluation.model_scope in {"personal", "both"}:
         prefixes.append(PERSONAL_SPLIT_PREFIX)
@@ -2191,7 +2264,29 @@ def task_metric_glosses(config: FullConfig) -> dict[str, str]:
     else:
         glosses = {name: name.replace("_", " ") for name in reports}
     glosses.update(declared or {})
+    grad_norm = task_grad_norm_gloss(config)
+    if grad_norm is not None:
+        from fedbrew.core.metrics import GRAD_NORM_COLUMN
+
+        glosses[GRAD_NORM_COLUMN] = grad_norm
     return glosses
+
+
+def task_grad_norm_gloss(config: FullConfig) -> str | None:
+    """What the run's task says its ``grad_norm_sq`` measures, or None if it cannot report one.
+
+    ``TaskAdapter.GRAD_NORM_GLOSS`` read off the task registry. None also when
+    registration raises, as for ``task_metric_directions``: the task then
+    fails where it is built, with the real reason.
+    """
+
+    from fedbrew.core.registry import register_builtin_components, tasks
+
+    try:
+        register_builtin_components()
+        return tasks.grad_norm(config.task.name)
+    except Exception:  # noqa: BLE001 - as task_metric_directions.
+        return None
 
 
 def default_selection_metric(config: FullConfig) -> str:

@@ -35,6 +35,12 @@ class TorchCausalLMTask(TaskAdapter):
         "loss": "token cross-entropy in nats over active target tokens",
         "accuracy": "next-token accuracy over active target tokens",
     }
+    #: What its grad_norm_sq measures (TaskAdapter.GRAD_NORM_GLOSS).
+    GRAD_NORM_GLOSS = (
+        "squared norm of the gradient of F, the token cross-entropy averaged over the "
+        "active target tokens of every client's train split, at the global model in "
+        "its trainable parameters (a LoRA model's adapter)"
+    )
 
     def __init__(
         self,
@@ -459,6 +465,15 @@ class TorchCausalLMTask(TaskAdapter):
         if not self.active_target_weighting:
             return super().federated_aggregation_weight(training_outputs, evaluated_num_examples)
         return int(sum(float(output.get("total", 0.0)) for output in training_outputs))
+
+    def objective_loss(self, model: nn.Module, batch: Any) -> tuple[Tensor, float]:
+        """The batch's token cross-entropy, as ``train_step`` takes it, and its active tokens."""
+
+        model.to(self.device)
+        inputs, targets = self._move_batch(batch)
+        logits = _extract_logits(model(**self._model_inputs(inputs)))
+        loss, _, total = self._loss_and_counts(logits, targets)
+        return loss, float(total)
 
     def train_loss_denominator(self, batch: Any, output: Mapping[str, float]) -> float:
         """The active target tokens `train_step` averaged its loss over.

@@ -60,6 +60,7 @@ from fedbrew.core.console import (
 from fedbrew.core.divergence import DivergenceVerdict
 from fedbrew.core.metrics import (
     FIXED_METRIC_GLOSSES,
+    GRAD_NORM_COLUMN,
     METRIC_SUFFIX_GLOSSES,
     POST_FIT_RULE_METRICS,
     RULE_FIT_METRICS,
@@ -473,6 +474,9 @@ def _metrics_rows(config: FullConfig, *, verbose: bool) -> list[Row]:
     central = _schedule_text(config.evaluation.central_test.every, "evaluation.central_test")
     if central is not None:
         rows.append(Row("evaluation.central_test", central))
+    grad_norm = _schedule_text(config.evaluation.grad_norm.every, "evaluation.grad_norm")
+    if grad_norm is not None:
+        rows.append(Row("evaluation.grad_norm", grad_norm))
     rows.append(Row("evaluation.model_scope", config.evaluation.model_scope))
 
     checkpointing = config.runtime.extra.get("checkpointing")
@@ -658,6 +662,8 @@ def _planned_metric_names(config: FullConfig) -> list[str]:
             )
     if _central_is_evaluated(config):
         names.extend(f"central_test_{name}" for name in task_metrics)
+    if _grad_norm_is_measured(config):
+        names.append(GRAD_NORM_COLUMN)
     return _ordered_metric_names(_deduplicate(names))
 
 
@@ -1292,6 +1298,23 @@ def _central_is_evaluated(config: FullConfig | None) -> bool:
         return False
 
 
+def _grad_norm_is_measured(config: FullConfig | None) -> bool:
+    """Whether this run writes ``grad_norm_sq``: scheduled, for a task that declares it."""
+
+    from fedbrew.core.config import parse_evaluation_schedule, task_grad_norm_gloss
+
+    if config is None:
+        return False
+    try:
+        scheduled = (
+            parse_evaluation_schedule(config.evaluation.grad_norm.every, "evaluation.grad_norm")
+            is not None
+        )
+    except ValueError:
+        return False
+    return scheduled and task_grad_norm_gloss(config) is not None
+
+
 def _progress_metric_names(config: FullConfig | None) -> list[str]:
     def evaluated(split: str) -> bool:
         return _split_is_evaluated(config, split)
@@ -1304,6 +1327,8 @@ def _progress_metric_names(config: FullConfig | None) -> list[str]:
         names.extend(("train_loss_sample_weighted_avg", "train_accuracy_sample_weighted_avg"))
     if central_evaluated():
         names.extend(("central_test_loss", "central_test_accuracy"))
+    if _grad_norm_is_measured(config):
+        names.append(GRAD_NORM_COLUMN)
     if evaluated("val"):
         names.extend(_client_val_metric_names(config))
     if evaluated("test"):

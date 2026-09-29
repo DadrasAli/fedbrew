@@ -141,6 +141,16 @@ class Evaluator(Protocol):
     ) -> dict[str, float]:
         """The ``central_test_*`` metrics of the server's model."""
 
+    def evaluate_grad_norm(
+        self,
+        server: ServerStrategy,
+        dataset: FederatedDataset,
+    ) -> dict[str, float]:
+        """``grad_norm_sq`` of the server's model (``fedbrew/core/grad_norm.py``).
+
+        Asked only on the rounds ``evaluation.grad_norm.every`` schedules.
+        """
+
 
 class StreamingAggregator:
     """The reference Aggregator: the server folds each result as it is pulled.

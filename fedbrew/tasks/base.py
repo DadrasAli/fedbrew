@@ -276,6 +276,15 @@ class TaskAdapter(ABC):
     #: is glossed by its own words.
     METRIC_GLOSSES: ClassVar[Mapping[str, str] | None] = None
 
+    #: What ``grad_norm_sq`` measures for this task (``evaluation.grad_norm``),
+    #: as a noun phrase: the squared norm of the gradient of the task's global
+    #: objective F at the global model, and what F is. Registered beside
+    #: ``METRICS`` (``registry.tasks.register(..., grad_norm=...)``). None for a
+    #: task that cannot take F's gradient, which refuses the key at load. A task
+    #: that sets it implements ``objective_loss``, and ``objective_l1`` when F
+    #: carries an l1 term.
+    GRAD_NORM_GLOSS: ClassVar[str | None] = None
+
     @abstractmethod
     def build_model(self, config: Mapping[str, Any]) -> Any:
         """Build a task-specific model object."""
@@ -386,6 +395,38 @@ class TaskAdapter(ABC):
 
         del output
         return batch_example_count(batch)
+
+    def objective_loss(self, model: Any, batch: Any) -> tuple[Tensor, float]:
+        """The training loss on ``batch`` at the model's parameters, and what it is a mean over.
+
+        ``evaluation.grad_norm`` sums these over every client's train split,
+        each loss weighted by its count, and differentiates: F is that
+        weighted mean, so its gradient is exact whatever the batches. The
+        loss is ``train_step``'s, as a tensor autograd can differentiate --
+        its parameter terms included, once per batch -- taken as the model
+        is: the caller has put it in eval mode, and nothing here may draw
+        from a random generator or step an optimizer. The count is
+        ``train_loss_denominator``'s.
+
+        Only a task that declares ``GRAD_NORM_GLOSS`` is asked.
+        """
+
+        del model, batch
+        raise NotImplementedError(
+            f"{type(self).__name__} declares no gradient of its objective (GRAD_NORM_GLOSS)"
+        )
+
+    def objective_l1(self, model: Any) -> Mapping[str, float]:
+        """The l1 terms of F: each parameter name ``lam * ||p||_1`` is on, with its ``lam``.
+
+        Empty for a smooth F. Where F has one, ``grad_norm_sq`` is the squared
+        norm of F's minimum-norm subgradient: autograd's subgradient of
+        ``|p_j|`` is 0 at ``p_j == 0``, so there the smooth gradient is
+        soft-thresholded at ``lam`` instead (``fedbrew/core/grad_norm.py``).
+        """
+
+        del model
+        return {}
 
 
 def loss_averages_over_examples(task: TaskAdapter | type[TaskAdapter]) -> bool:

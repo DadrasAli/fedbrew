@@ -183,6 +183,11 @@ POST_FIT_RULE_METRICS = frozenset({"fit_total_loss"})
 #: The split a round-record name starts with. ``fit_`` is the post-fit pass,
 #: the other four the evaluation passes; ``personal_`` goes in front of a
 #: personalized pass's split and is taken off first.
+#: evaluation.grad_norm's column (fedbrew/core/grad_norm.py): a squared
+#: gradient norm, better at zero whatever the task.
+GRAD_NORM_COLUMN = "grad_norm_sq"
+GRAD_NORM_DIRECTION = "min"
+
 _SPLIT_PREFIXES = ("central_test_", "fit_", "train_", "val_", "test_")
 #: Aggregates of one metric across clients that keep its direction: an
 #: average, an extreme or the worst-percent mean of accuracies is still better
@@ -201,6 +206,8 @@ def declared_direction(name: str, directions: Mapping[str, str]) -> str | None:
     ``fit_proximal_loss``, a server diagnostic, a spread.
     """
 
+    if name == GRAD_NORM_COLUMN:
+        return GRAD_NORM_DIRECTION
     rest = name.removeprefix("personal_")
     for prefix in _SPLIT_PREFIXES:
         if rest.startswith(prefix):
@@ -307,6 +314,8 @@ def _task_metric_gloss(name: str, glosses: Mapping[str, str]) -> str | None:
     column that is not one of them.
     """
 
+    if name == GRAD_NORM_COLUMN and name in glosses:
+        return f"{_sentence(glosses[name])}."
     if name == "fit_total_loss":
         loss = glosses.get("loss", "loss")
         return f"Example-weighted mean client ({loss} + proximal loss) after local training."
@@ -376,6 +385,13 @@ FIXED_METRIC_GLOSSES: Mapping[str, str] = {
     ),
     "mean_client_control_delta_norm": (
         "Unweighted mean ||c_i,new - c_i,old||_2 across selected clients (float64)."
+    ),
+    # evaluation.grad_norm's column, as a task that says nothing more reads
+    # it; a task's own gloss (TaskAdapter.GRAD_NORM_GLOSS) says what its F is.
+    GRAD_NORM_COLUMN: (
+        "Squared norm ||grad F(x)||^2 of the gradient of the global objective F at the "
+        "global model: the task's training loss over every client's train split, "
+        "weighted as the loss averages, in the trainable parameters (float64)."
     ),
     "server_control_norm": (
         "||c_server,new||_2 after adding sum(selected client deltas) / all clients (float64)."

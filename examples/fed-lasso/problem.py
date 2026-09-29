@@ -929,6 +929,14 @@ class FedLassoTask(TaskAdapter):
         "exact_zeros": "count of coordinates exactly 0.0",
     }
 
+    #: What its grad_norm_sq measures (TaskAdapter.GRAD_NORM_GLOSS).
+    GRAD_NORM_GLOSS = (
+        "squared norm of the gradient of the federated objective F(x) = mean_i "
+        "(1/2m)‖Hx − y_i‖² + penalty at the global model; under the l1 penalty, of F's "
+        "minimum-norm subgradient, whose coordinates at x_j = 0 are the smooth "
+        "gradient's soft-thresholded at λ"
+    )
+
     #: The batched executor's form of a stacked step's gradients: one backward
     #: through the per-client losses' sum, which is faster for this problem's
     #: few, tiny parameters than vmap(grad) -- 5.98 against 7.82 ms a round
@@ -1082,6 +1090,17 @@ class FedLassoTask(TaskAdapter):
         with torch.no_grad():
             outputs = self.functional_eval(model, None, None, self._move_batch(batch))
         return {name: float(value) for name, value in outputs.items()}
+
+    def objective_loss(self, model: Any, batch: Any) -> tuple[Tensor, float]:
+        """The batch's objective, as ``train_step`` takes it, and its rows (TaskAdapter)."""
+
+        loss, _ = self.functional_loss(model, None, None, self._move_batch(batch))
+        return loss, float(self.evaluation_total(batch) or 0.0)
+
+    def objective_l1(self, model: Any) -> dict[str, float]:
+        """``lam ||x||_1`` on ``x`` under the l1 penalty; nothing under the smooth one."""
+
+        return {"x": model.penalty_strength} if model.penalty_form == "l1" else {}
 
     # -- the batched executor (fedbrew.tasks.base.BatchableTask) --------------
 
@@ -1383,6 +1402,7 @@ def register() -> None:
         lambda **kwargs: FedLassoTask(**kwargs),
         metrics=FedLassoTask.METRICS,
         glosses=FedLassoTask.METRIC_GLOSSES,
+        grad_norm=FedLassoTask.GRAD_NORM_GLOSS,
     )
     registry.models.register(
         MODEL_NAME, build_lasso_vector, task=TASK_NAME, shape_keys=("input_dim",)

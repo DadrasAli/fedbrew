@@ -18,6 +18,11 @@ global test rows in order, then ``compute_metrics`` -- which
 ``functional_eval`` computes batch for batch (``BatchableTask``). Any other
 task's central pass, and a rule the batched evaluator does not measure, run
 at the flush through the evaluator itself, as the per-round path runs them.
+
+``grad_norm_sq`` (``evaluation.grad_norm``) is measured on the device from the
+rows the round trains on: every client's, gathered in chunks of consecutive
+rows from the stacks held for the run, one ``functional_loss`` and one
+backward per chunk at the round's mean (``fedbrew/core/grad_norm.py``).
 """
 
 from __future__ import annotations
@@ -91,6 +96,9 @@ class ResidentEvaluation:
         self._plans: dict[tuple[int, tuple[str, ...]], tuple[ClientEvalPlan, str | None]] = {}
         self._work: dict[tuple[Any, ...], Any] = {}
         self.central = _central_rows(rounds)
+        #: The gradient pass's chunks, as positions into the flattened train
+        #: stacks: made on its first scheduled round and kept for the run.
+        self._grad_index: list[Tensor] | None = None
 
     # -- the client splits ---------------------------------------------------
 
@@ -331,6 +339,44 @@ class ResidentEvaluation:
                 )
         staged, layout = staged_values([(outputs, [len(outputs)])], [])
         return CentralStage(layout, staged)
+
+    # -- the gradient of the global objective ----------------------------------
+
+    def enqueue_grad_norm(self, params: dict[str, Tensor]) -> Tensor:
+        """``grad_norm_sq`` at ``params`` over every client's train rows, as a 0-d device tensor."""
+
+        from fedbrew.core.grad_norm import flat_chunk_gradient
+
+        rows = self.rounds.rows
+        stacks = [tensor.reshape(-1, *tensor.shape[2:]) for tensor in rows.tensors]
+        chunks = (
+            tuple(stack.index_select(0, index) for stack in stacks)
+            for index in self._grad_norm_index()
+        )
+        return flat_chunk_gradient(self.task, self.template, params, self.buffers, chunks)
+
+    def _grad_norm_index(self) -> list[Tensor]:
+        """Each chunk's rows, as positions into the train stacks flattened to one row axis."""
+
+        if self._grad_index is None:
+            from fedbrew.core.grad_norm import chunk_pieces, chunk_rows
+            from fedbrew.core.torch_utils import uploaded
+
+            rows = self.rounds.rows
+            cap = chunk_rows(self.task, rows.row_bytes, self.rounds.executor.chunk_bytes)
+            self._grad_index = [
+                uploaded(
+                    torch.cat(
+                        [
+                            torch.arange(first, stop, dtype=torch.long) + split * rows.longest
+                            for split, first, stop in chunk
+                        ]
+                    ),
+                    rows.tensors[0].device,
+                )
+                for chunk in chunk_pieces(rows.lengths, cap)
+            ]
+        return self._grad_index
 
     def central_metrics(self, stage: CentralStage, values: Sequence[float]) -> dict[str, float]:
         """The ``central_test_*`` metrics the evaluator's central pass reports, from its steps."""

@@ -671,6 +671,12 @@ class DriftQuadTask(TaskAdapter):
         "distance_to_client_optimum": "distance ‖x − A⁻¹b_i‖₂ to the client's own optimum",
     }
 
+    #: What its grad_norm_sq measures (TaskAdapter.GRAD_NORM_GLOSS).
+    GRAD_NORM_GLOSS = (
+        "squared norm ‖∇F(x)‖² of the federated objective F(x) = mean_i ½xᵀAx − b_iᵀx "
+        "at the global model"
+    )
+
     #: The batched executor's form of a stacked step's gradients: one backward
     #: through the per-client losses' sum, which is faster for this problem's
     #: few, tiny parameters than vmap(grad) -- 8.54 against 10.66 ms a round
@@ -796,6 +802,12 @@ class DriftQuadTask(TaskAdapter):
         with torch.no_grad():
             outputs = self.functional_eval(model, None, None, self._move_batch(batch))
         return {name: float(value) for name, value in outputs.items()}
+
+    def objective_loss(self, model: Any, batch: Any) -> tuple[Tensor, float]:
+        """The batch's objective, as ``train_step`` takes it, and its rows (TaskAdapter)."""
+
+        loss, _ = self.functional_loss(model, None, None, self._move_batch(batch))
+        return loss, float(self.evaluation_total(batch) or 0.0)
 
     # -- the batched executor (fedbrew.tasks.base.BatchableTask) --------------
 
@@ -1045,6 +1057,7 @@ def register() -> None:
         lambda **kwargs: DriftQuadTask(**kwargs),
         metrics=DriftQuadTask.METRICS,
         glosses=DriftQuadTask.METRIC_GLOSSES,
+        grad_norm=DriftQuadTask.GRAD_NORM_GLOSS,
     )
     registry.models.register(
         MODEL_NAME, build_quad_vector, task=TASK_NAME, shape_keys=("input_dim",)

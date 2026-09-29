@@ -479,6 +479,12 @@ class PL1DTask(TaskAdapter):
         "distance_to_optimum": "distance |x − x*| to the global optimum",
     }
 
+    #: What its grad_norm_sq measures (TaskAdapter.GRAD_NORM_GLOSS).
+    GRAD_NORM_GLOSS = (
+        "squared derivative F′(x)² of the federated objective F(x) = mean_i x² + "
+        "3sin²(x) + s_i·x at the global model"
+    )
+
     #: The batched executor's form of a stacked step's gradients: one backward
     #: through the per-client losses' sum, which is faster for this problem's
     #: few, tiny parameters than vmap(grad) -- 4.86 against 5.90 ms a round
@@ -607,6 +613,12 @@ class PL1DTask(TaskAdapter):
         with torch.no_grad():
             outputs = self.functional_eval(model, None, None, self._move_batch(batch))
         return {name: float(value) for name, value in outputs.items()}
+
+    def objective_loss(self, model: Any, batch: Any) -> tuple[Tensor, float]:
+        """The batch's objective, as ``train_step`` takes it, and its rows (TaskAdapter)."""
+
+        loss, _ = self.functional_loss(model, None, None, self._move_batch(batch))
+        return loss, float(self.evaluation_total(batch) or 0.0)
 
     # -- the batched executor (fedbrew.tasks.base.BatchableTask) --------------
 
@@ -827,6 +839,7 @@ def register() -> None:
         lambda **kwargs: PL1DTask(**kwargs),
         metrics=PL1DTask.METRICS,
         glosses=PL1DTask.METRIC_GLOSSES,
+        grad_norm=PL1DTask.GRAD_NORM_GLOSS,
     )
     registry.models.register(MODEL_NAME, build_pl_scalar, task=TASK_NAME)
 

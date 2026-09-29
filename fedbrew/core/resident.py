@@ -397,9 +397,14 @@ class DeviceRound:
     eval_stage: Any = None
     central_due: bool = False
     central_stage: Any = None
+    #: Whether ``grad_norm_sq`` is due, and its value on the device, staged
+    #: after the central pass's (``evaluation.grad_norm``).
+    grad_norm_due: bool = False
+    grad_norm_stage: Tensor | None = None
     #: The staged values' sizes: the chunks', the evaluation's, the central
-    #: pass's, and 1 for the aggregate's finiteness flag, when there is one.
-    sizes: tuple[int, int, int, int] = (0, 0, 0, 0)
+    #: pass's, the gradient norm's, and 1 for the aggregate's finiteness flag,
+    #: when there is one.
+    sizes: tuple[int, int, int, int, int] = (0, 0, 0, 0, 0)
     #: The phase boundaries on the device's timeline, and the event the
     #: flush's copy waits for.
     clock: Any = None
@@ -536,6 +541,11 @@ class ResidentRounds:
         )
         if device_round.central_due:
             device_round.central_stage = self.evaluation.enqueue_central(self.model)
+        if context.grad_norm_schedule is not None and evaluates_round(
+            context.grad_norm_schedule, round_id, context.global_rounds
+        ):
+            device_round.grad_norm_due = True
+            device_round.grad_norm_stage = self.evaluation.enqueue_grad_norm(self.model)
         device_round.clock.mark("evaluated")
 
     def _refuse_empty(self, planned: PlannedRound) -> None:
@@ -821,7 +831,8 @@ class ResidentRounds:
     def _stage(self, device_round: DeviceRound) -> None:
         """Join the round's staged values in one float64 tensor, for the flush's copy.
 
-        The chunks' first, then the evaluation's and the central pass's.
+        The chunks' first, then the evaluation's, the central pass's and the
+        gradient norm's.
         """
 
         pieces, layouts = [], []
@@ -839,12 +850,17 @@ class ResidentRounds:
             if staged is not None:
                 pieces.append(staged)
                 stage.staged = None
+        grad_norm = device_round.grad_norm_stage
+        extra.append(0 if grad_norm is None else 1)
+        if grad_norm is not None:
+            pieces.append(grad_norm.reshape(1))
+            device_round.grad_norm_stage = None
         flag = 0
         if device_round.finite is not None:
             pieces.append(device_round.finite.to(torch.float64).reshape(1))
             flag = 1
         device_round.staged_layouts = layouts
-        device_round.sizes = (fit_size, extra[0], extra[1], flag)
+        device_round.sizes = (fit_size, extra[0], extra[1], extra[2], flag)
         device_round.staged = torch.cat(pieces) if pieces else None
 
     # -- the flush's side ----------------------------------------------------
@@ -1266,7 +1282,9 @@ class _Loop:
         context, rounds = self.context, self.rounds
         state, round_id = context.state, device_round.round_id
         round_started = time.perf_counter()
-        values, eval_values, central_values, finite = _split_values(device_round, values)
+        values, eval_values, central_values, grad_values, finite = _split_values(
+            device_round, values
+        )
         round_info = RoundInfo(round_id=round_id, total_rounds=context.global_rounds)
         selected = [rounds.roster.client_ids[place] for place in device_round.positions]
         if context.on_client_progress is not None:
@@ -1290,6 +1308,8 @@ class _Loop:
         }
         evaluated = _client_evaluation(context, rounds, device_round, eval_values, timings)
         central = _central_evaluation(context, rounds, device_round, central_values, timings)
+        if device_round.grad_norm_due:
+            central = {**(central or {}), **_grad_norm(context, grad_values, timings)}
         timings["client_eval"] += clock.seconds("trained", "clients")
         timings["global_eval"] += clock.seconds("clients", "evaluated")
         return self._record_rest(
@@ -1444,13 +1464,20 @@ class _Loop:
 
 def _split_values(
     device_round: DeviceRound, values: list[float]
-) -> tuple[list[float], list[float], list[float], bool]:
-    """A round's staged values: its chunks', its evaluation's, its central pass's, and its flag."""
+) -> tuple[list[float], list[float], list[float], list[float], bool]:
+    """A round's staged values: the chunks', evaluation's, central pass's, gradient norm's, flag."""
 
-    fit, evaluation, central, flag = device_round.sizes
-    finite = True if not flag else values[fit + evaluation + central] != 0.0
+    fit, evaluation, central, grad_norm, flag = device_round.sizes
     rest = fit + evaluation
-    return values[:fit], values[fit:rest], values[rest : rest + central], finite
+    after = rest + central
+    finite = True if not flag else values[after + grad_norm] != 0.0
+    return (
+        values[:fit],
+        values[fit:rest],
+        values[rest:after],
+        values[after : after + grad_norm],
+        finite,
+    )
 
 
 def _client_evaluation(
@@ -1510,6 +1537,19 @@ def _central_evaluation(
             central = context.evaluator.evaluate_central(context.server, context.dataset)
     timings["global_eval"] = time.perf_counter() - started
     return central
+
+
+def _grad_norm(context: Any, values: list[float], timings: dict[str, float]) -> dict[str, float]:
+    """The round's ``grad_norm_sq``: measured on the device, or by the evaluator now."""
+
+    from fedbrew.core.metrics import GRAD_NORM_COLUMN
+
+    if values:
+        return {GRAD_NORM_COLUMN: values[0]}
+    started = time.perf_counter()
+    measured = context.evaluator.evaluate_grad_norm(context.server, context.dataset)
+    timings["global_eval"] += time.perf_counter() - started
+    return measured
 
 
 def _record_evaluation(

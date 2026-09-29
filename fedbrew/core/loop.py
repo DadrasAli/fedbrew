@@ -184,6 +184,9 @@ def run_fl_loop(
         evaluation.central_test.every, "evaluation.central_test"
     )
     fit_schedule = parse_evaluation_schedule(evaluation.fit.every, "evaluation.fit")
+    grad_norm_schedule = parse_evaluation_schedule(
+        evaluation.grad_norm.every, "evaluation.grad_norm"
+    )
     executor = executor or SequentialExecutor()
     aggregator = aggregator or StreamingAggregator()
     evaluator = evaluator or SequentialEvaluator()
@@ -260,6 +263,7 @@ def run_fl_loop(
         schedules=schedules,
         central_schedule=central_schedule,
         fit_schedule=fit_schedule,
+        grad_norm_schedule=grad_norm_schedule,
         executor=executor,
         aggregator=aggregator,
         evaluator=evaluator,
@@ -393,6 +397,10 @@ def run_fl_loop(
             global_eval_started = time.perf_counter()
             if evaluates_round(central_schedule, round_id, global_rounds):
                 round_info.metrics.update(evaluator.evaluate_central(server, dataset))
+            if grad_norm_schedule is not None and evaluates_round(
+                grad_norm_schedule, round_id, global_rounds
+            ):
+                round_info.metrics.update(evaluator.evaluate_grad_norm(server, dataset))
             global_eval_seconds = time.perf_counter() - global_eval_started
 
             num_examples = fit_totals.num_examples
@@ -533,6 +541,7 @@ class LoopContext:
     schedules: dict[str, int | None]
     central_schedule: int | None
     fit_schedule: int | None
+    grad_norm_schedule: int | None
     executor: ClientExecutor
     aggregator: Aggregator
     evaluator: Evaluator
@@ -1182,6 +1191,19 @@ class SequentialEvaluator:
         dataset: FederatedDataset,
     ) -> dict[str, float]:
         return _evaluate_central_test_set(server, dataset)
+
+    def evaluate_grad_norm(
+        self,
+        server: ServerStrategy,
+        dataset: FederatedDataset,
+    ) -> dict[str, float]:
+        from fedbrew.core.grad_norm import SequentialGradNorm
+
+        # Built on the first scheduled round, so a run that never asks holds nothing.
+        grad_norm = self.__dict__.get("_grad_norm")
+        if grad_norm is None:
+            grad_norm = self.__dict__["_grad_norm"] = SequentialGradNorm()
+        return grad_norm.measure(server, dataset)
 
 
 def _evaluate_models_on_clients(

@@ -613,6 +613,7 @@ run at `highest` while `run.json` recorded the typo as though it applied.
 | `test.clients` | scope | `"all"` | `participating` is **rejected** for test. |
 | `central_test.every` | int \| `final` \| `never` | `10` | |
 | `fit.every` | int \| `final` \| `never` | `1` | The pass each training client makes over its own train split after its update: the `fit_` metrics. See below. |
+| `grad_norm.every` | int \| `final` \| `never` | `never` | `grad_norm_sq`, the squared norm of the gradient of the global objective at the global model. See below. |
 | `model_scope` | `global` \| `personal` \| `both` | `"global"` | |
 
 **Schedule grammar** — `parse_evaluation_schedule` (`fedbrew/core/config.py`):
@@ -664,6 +665,25 @@ blow-up is caught up to *n* − 1 rounds later, and `divergence.patience` counts
 evaluated rounds. The refusal of a non-finite client state at aggregation reads
 no metric and still runs every round. `never` is refused while the monitor
 watches a `fit_` metric. `tests/test_evaluation_cadence.py` pins all of it.
+
+**`grad_norm.every` schedules the gradient norm of the global objective.** On
+a scheduled round, after aggregation, the round carries `grad_norm_sq`:
+`‖∇F(x)‖²` at the global model x, where F is the task's training loss over
+every client's train split, each batch's loss weighted by the count it averages
+over — examples for classification and the shipped examples, active target
+tokens for the causal-LM task — so F is the pooled mean, its parameter terms
+(fed-lasso's penalty) included once. The gradient is taken in the model's
+trainable parameters, in eval mode, in float64. Under an l1 term it is the
+squared norm of F's minimum-norm subgradient: at a coordinate that is exactly 0,
+the smooth gradient soft-thresholded at λ. The sequential path runs the task's
+loader over each client's split; the batched and resident paths run every
+client's train rows in chunks of consecutive rows on the device, one backward per
+chunk (chapter 08 §6.1). It consumes no random draw and changes no model, so every
+other column and checkpoint is what it would be with the pass off; on the rounds
+it skips, and at the default `never`, it runs nothing. A task that declares no
+gradient of its objective (chapter 12, `GRAD_NORM_GLOSS`) refuses the key, and
+`never` is refused while `divergence.metric` or `checkpointing.best_metric`
+names `grad_norm_sq`, which is better lower. `tests/test_grad_norm.py`.
 
 **Client scope grammar** — `parse_evaluation_client_scope` (`fedbrew/core/config.py`):
 

@@ -528,6 +528,33 @@ question id on MedMCQA (`group_field: id`), and by token window on the tiny
 corpus. It is not the only held-out measure: each client's `val` split is held
 out from its training data as well.
 
+### 6.1 The gradient norm of the global objective
+
+`grad_norm_sq`, opt-in through `evaluation.grad_norm.every` (default `never`;
+chapter 04 §8), measured after aggregation on the rounds it schedules
+(`fedbrew/core/grad_norm.py`):
+
+| Column | Definition |
+| --- | --- |
+| `grad_norm_sq` | `‖∇F(x)‖²` at the global model x, in float64. F is the task's training loss over every client's train split, each batch's loss weighted by the count it averages over (`TaskAdapter.objective_loss`, the same count as `train_loss_denominator`): the pooled mean over examples, or over active target tokens for causal LM, with a parameter term such as fed-lasso's penalty entering once. The gradient is in the trainable parameters (a LoRA model's adapter), with the model in eval mode. Where F carries an l1 term (`TaskAdapter.objective_l1`), the squared norm of F's **minimum-norm subgradient**: at `x_j ≠ 0` the gradient, at `x_j = 0` the smooth gradient soft-thresholded at λ, `sign(g_j)·max(|g_j| − λ, 0)`. |
+
+Each task says what its F is in its gloss (`TaskAdapter.GRAD_NORM_GLOSS`, which
+the plan header prints); for the two simplex examples F is the objective the run
+descends over all of ℝᵈ, so the column is not a stationarity measure of the
+constrained problem. A task that declares no gloss refuses the key. Better
+lower: `divergence.metric` and `checkpointing.best_metric` may name it while it
+is measured.
+
+**Computed** by the evaluator (`Evaluator.evaluate_grad_norm`): the reference
+`SequentialGradNorm` runs each client's train split through the task's loader
+at the task's `eval_batch_size`, one backward per batch; the batched evaluator
+and the resident round run every client's train rows in chunks of consecutive
+rows, one `functional_loss` and one backward per chunk, on the device — the
+resident round from the train stacks it holds for the run, staging the value
+with its round's others. The three agree to the executor tolerance. The pass
+restores every random generator and the model's mode, so the other columns and
+the checkpoints are those of a run with it off.
+
 ## 7. Algorithm-specific metrics
 
 Emitted only by the arms that produce them. Each is a real column in
@@ -960,6 +987,7 @@ Every key that adds, removes or renames a column.
 | `evaluation.{train,val,test}.every` | `10`, `5`, `10`; `never` for a split the data does not carry | Which rounds have values in that split's columns. The columns exist for the whole run either way, except for a split the data does not carry, which has none (chapter 04 §8). |
 | `evaluation.central_test.every` | `10` | Same, for every `central_test_*` column. |
 | `evaluation.fit.every` | `1` | Which rounds have values in the `fit_*` task columns and FedProx's `fit_total_loss`, which come from the post-fit pass (§1); `never` removes those columns. |
+| `evaluation.grad_norm.every` | `never` | Adds `grad_norm_sq` (§6.1), with values on the rounds it schedules. |
 | `evaluation.{train,val,test}.clients` | `participating`, `all`, `all` | Which clients enter the aggregate — changes the numbers, not the column set. |
 | `divergence.metric` | `"fit_loss"` | Requires that metric to be present every round. `validate_config` refuses a name a non-empty `reporting.fit_metrics` would filter out (`config.py`, `_validate_divergence_metric_is_reachable`). |
 | `checkpointing.best_metric` | — | Requires that column to exist; validated against `client_metric_names` at config load. |
@@ -1066,6 +1094,7 @@ head -1 <output_dir>/round_metrics.csv | tr ',' '\n'
 | `tests/test_fedlalr_diagnostics.py` | §7.3: each FedLALR learning-rate column equals its hand-computed estimand for two clients with known rates, no name is both a coordinate and an across-clients statistic, a retired name is refused in every config place that names a metric, and a resume onto CSVs carrying one is refused and changes nothing (`POST-F14`). |
 | `tests/test_divergence_metric_reachable.py` | §12's cross-check: it fires on a name a non-empty `reporting.fit_metrics` would drop, the rule's extras and the strategy's diagnostics included, stays quiet for evaluation columns and `central_test_*`, derives `CLIENT_UNFILTERED_FIT_METRICS` from every rule's `fit`, no shipped config trips it, and the check stays in `validate_config` rather than the preflight module. |
 | `tests/test_client_history_summary.py` | The running totals `client_update_metrics.csv` column names come from. |
+| `tests/test_grad_norm.py` | §6.1: `grad_norm_sq` is autograd's gradient of the pooled objective at random points on every linear example (fed-lasso's l1 case against its analytic subgradient), the three paths agree, a run with it on writes every other column and checkpoint as one with it off, off runs no pass, and the planned columns are the written ones for every task. |
 | `tests/test_metric_filter_scope.py` | §4.3, §7.2 and §7.3: both servers add diagnostics before the one filter, so the list keeps or drops them, the loop never filters, and §4.3 states the choice as one. Fails if a third server starts emitting diagnostics. |
 
 ### Known failure modes

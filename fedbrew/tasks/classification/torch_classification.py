@@ -35,6 +35,13 @@ class TorchClassificationTask(TaskAdapter):
     #: (measured on 2026-09-27).
     batched_gradient = "vmap_grad"
 
+    #: What its grad_norm_sq measures (TaskAdapter.GRAD_NORM_GLOSS).
+    GRAD_NORM_GLOSS = (
+        "squared norm of the gradient of F, the example-weighted mean cross-entropy "
+        "over every client's train split, at the global model in its trainable "
+        "parameters"
+    )
+
     def __init__(
         self,
         model_config: Mapping[str, Any] | None = None,
@@ -462,6 +469,13 @@ class TorchClassificationTask(TaskAdapter):
         loss = self._cross_entropy(logits, targets, mask).detach()
         hits = logits.argmax(dim=1) == targets
         return loss, hits.sum() if mask is None else (hits * mask).sum()
+
+    def objective_loss(self, model: nn.Module, batch: Any) -> tuple[Tensor, float]:
+        """The batch's mean cross-entropy, as ``train_step`` takes it, and its examples."""
+
+        features, targets = self._move_batch(batch)
+        loss, _ = self.functional_loss(model, None, None, (features, targets))
+        return loss, float(int(targets.numel()))
 
     def evaluation_total(self, batch: Any) -> float | None:
         """eval_step's "total": how many targets the batch holds."""

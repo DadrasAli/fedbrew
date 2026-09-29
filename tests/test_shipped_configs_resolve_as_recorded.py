@@ -31,7 +31,12 @@ Two differences are allowed, both declared here rather than taken on trust:
   reached the round record was the server's, so the merged list keeps every
   shipped config's columns -- which the planned column list, compared as
   recorded, confirms. ``client.metrics`` is ``MERGED`` into it and not
-  compared on its own.
+  compared on its own;
+- a key added since, under ``ADDED``, at the value that leaves a run as it
+  was: ``evaluation.grad_norm`` is off unless a config asks for it.
+
+The ``schedule`` block, which ``defaults`` was renamed to, is read at load and
+never stored, so its rename moved nothing in the resolved config.
 """
 
 from __future__ import annotations
@@ -79,6 +84,13 @@ MOVED_FROM_ABSENT: dict[str, Any] = {
     "reporting.extra": {},
 }
 
+#: Keys added since the record, each at the value that changes nothing a run
+#: computes or writes.
+ADDED: dict[str, Any] = {
+    "evaluation.grad_norm.every": "never",
+    "evaluation.grad_norm.extra": {},
+}
+
 #: Inferred keys whose inferred value may differ from the recorded one.
 INFERRED_AND_CHANGED = frozenset({"experiment.name"})
 
@@ -98,6 +110,8 @@ def _differences(before: dict[str, Any], now: dict[str, Any]) -> list[str]:
             differences.append(f"{key}: {before[key]!r} -> (gone)")
         elif key not in before:
             if key in MOVED_FROM_ABSENT and moved_back[key] == MOVED_FROM_ABSENT[key]:
+                continue
+            if key in ADDED and moved_back[key] == ADDED[key]:
                 continue
             differences.append(f"{key}: (new) -> {moved_back[key]!r}")
         elif before[key] != moved_back[key]:

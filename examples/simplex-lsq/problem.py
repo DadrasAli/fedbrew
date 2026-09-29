@@ -667,6 +667,13 @@ class SimplexLSQTask(TaskAdapter):
         "negative_mass": "negative mass Σ_j max(0, −x_j)",
     }
 
+    #: What its grad_norm_sq measures (TaskAdapter.GRAD_NORM_GLOSS).
+    GRAD_NORM_GLOSS = (
+        "squared norm ‖∇F(x)‖² of F(x) = mean_i (1/2m)‖Hx − y_i‖² over all of ℝᵈ, the "
+        "objective the run descends, at the global model; not a stationarity measure of"
+        " the problem constrained to the simplex"
+    )
+
     #: The batched executor's form of a stacked step's gradients: one backward
     #: through the per-client losses' sum, which is faster for this problem's
     #: few, tiny parameters than vmap(grad) -- 5.21 against 6.81 ms a round
@@ -800,6 +807,12 @@ class SimplexLSQTask(TaskAdapter):
         with torch.no_grad():
             outputs = self.functional_eval(model, None, None, self._move_batch(batch))
         return {name: float(value) for name, value in outputs.items()}
+
+    def objective_loss(self, model: Any, batch: Any) -> tuple[Tensor, float]:
+        """The batch's objective, as ``train_step`` takes it, and its rows (TaskAdapter)."""
+
+        loss, _ = self.functional_loss(model, None, None, self._move_batch(batch))
+        return loss, float(self.evaluation_total(batch) or 0.0)
 
     # -- the batched executor (fedbrew.tasks.base.BatchableTask) --------------
 
@@ -1034,6 +1047,7 @@ def register() -> None:
         lambda **kwargs: SimplexLSQTask(**kwargs),
         metrics=SimplexLSQTask.METRICS,
         glosses=SimplexLSQTask.METRIC_GLOSSES,
+        grad_norm=SimplexLSQTask.GRAD_NORM_GLOSS,
     )
     registry.models.register(
         MODEL_NAME, build_simplex_vector, task=TASK_NAME, shape_keys=("input_dim",)

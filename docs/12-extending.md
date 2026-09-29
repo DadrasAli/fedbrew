@@ -247,6 +247,7 @@ def register() -> None:
         lambda **kwargs: DriftQuadTask(**kwargs),
         metrics=DriftQuadTask.METRICS,
         glosses=DriftQuadTask.METRIC_GLOSSES,
+        grad_norm=DriftQuadTask.GRAD_NORM_GLOSS,
     )
     registry.models.register(
         MODEL_NAME, build_quad_vector, task=TASK_NAME, shape_keys=("input_dim",)
@@ -559,6 +560,19 @@ The plan header composes every column's gloss from it — `fit_loss`, the
 client aggregates of `loss`, `central_test_<name>` — where it used to call
 every task's `loss` a cross-entropy. A name left out is glossed by its own
 words.
+
+For `evaluation.grad_norm` (chapter 04 §8), say what the task's `grad_norm_sq`
+measures as `GRAD_NORM_GLOSS` -- the squared norm of the gradient of its global
+objective F, and what F is -- pass it as
+`registry.tasks.register(..., grad_norm=MyTask.GRAD_NORM_GLOSS)`, and implement
+`objective_loss(model, batch)`: the batch's training loss as `train_step` takes
+it, a tensor autograd can differentiate, with the count it is a mean over
+(`train_loss_denominator`'s). The pass puts the model in eval mode and sums
+these over every client's train split, weighted by the counts, so the loss must
+draw nothing random and step nothing. Where F carries an l1 term, return it from
+`objective_l1(model)` -- a parameter name and its `lam` -- and the column is the
+squared norm of F's minimum-norm subgradient (chapter 08). A task that declares
+no gloss refuses the key at load. Every shipped task declares one.
 
 Implement `evaluate_model(model, data)` as well unless you want no central test
 set. It is not abstract — `eval_step` is per batch and required, this scores a

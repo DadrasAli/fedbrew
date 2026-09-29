@@ -286,6 +286,7 @@ class TaskRegistry(Registry[TaskFactory]):
         super().__init__(label)
         self._metrics: dict[str, Mapping[str, str] | Callable[[], Mapping[str, str] | None]] = {}
         self._glosses: dict[str, Mapping[str, str] | Callable[[], Mapping[str, str] | None]] = {}
+        self._grad_norms: dict[str, str | Callable[[], str | None]] = {}
 
     def register(  # type: ignore[override]
         self,
@@ -294,6 +295,7 @@ class TaskRegistry(Registry[TaskFactory]):
         *,
         metrics: Mapping[str, str] | Callable[[], Mapping[str, str] | None] | None = None,
         glosses: Mapping[str, str] | Callable[[], Mapping[str, str] | None] | None = None,
+        grad_norm: str | Callable[[], str | None] | None = None,
         origin: str | None = None,
         config_keys: Iterable[str] = (),
     ) -> None:
@@ -311,6 +313,10 @@ class TaskRegistry(Registry[TaskFactory]):
             glosses: The task class's ``METRIC_GLOSSES`` -- what each of those
                 names measures, for the plan header -- or a function returning
                 it. None glosses each name by its own words.
+            grad_norm: The task class's ``GRAD_NORM_GLOSS`` -- what its
+                ``grad_norm_sq`` measures -- or a function returning it. None
+                for a task that cannot take its objective's gradient, which
+                ``evaluation.grad_norm`` is then refused for.
             origin, config_keys: As for ``Registry.register``.
         """
 
@@ -318,11 +324,27 @@ class TaskRegistry(Registry[TaskFactory]):
             _check_task_metrics(name, metrics)
         if glosses is not None and not callable(glosses):
             _check_task_glosses(name, glosses)
+        if grad_norm is not None and not callable(grad_norm):
+            _check_task_grad_norm(name, grad_norm)
         super().register(name, obj, origin=origin, config_keys=config_keys)
         if metrics is not None:
             self._metrics[name] = metrics
         if glosses is not None:
             self._glosses[name] = glosses
+        if grad_norm is not None:
+            self._grad_norms[name] = grad_norm
+
+    def grad_norm(self, name: str) -> str | None:
+        """What a registered task's ``grad_norm_sq`` measures, or None if it cannot report one."""
+
+        if name not in self._items:
+            raise KeyError(f"Object is not registered: {name}")
+        declared = self._grad_norms.get(name)
+        if callable(declared):
+            declared = declared()
+            if declared is not None:
+                _check_task_grad_norm(name, declared)
+        return declared
 
     def glosses(self, name: str) -> Mapping[str, str] | None:
         """What a registered task says its metrics measure, or None if it said nothing."""
@@ -355,6 +377,11 @@ def _check_task_glosses(name: str, glosses: Mapping[str, str]) -> None:
     for metric, gloss in glosses.items():
         if not isinstance(metric, str) or not isinstance(gloss, str) or not gloss.strip():
             raise ValueError(f"tasks: {name!r} declares a gloss {gloss!r} for {metric!r}")
+
+
+def _check_task_grad_norm(name: str, gloss: str) -> None:
+    if not isinstance(gloss, str) or not gloss.strip():
+        raise ValueError(f"tasks: {name!r} declares a grad_norm gloss {gloss!r}")
 
 
 def _check_task_metrics(name: str, metrics: Mapping[str, str]) -> None:
@@ -622,6 +649,7 @@ def register_builtin_components() -> None:
         _build_torch_classification_task,
         metrics=_classification_metrics,
         glosses=_classification_glosses,
+        grad_norm=_classification_grad_norm,
     )
     _register_once(
         tasks,
@@ -629,6 +657,7 @@ def register_builtin_components() -> None:
         _build_torch_causal_lm_task,
         metrics=_causal_lm_metrics,
         glosses=_causal_lm_glosses,
+        grad_norm=_causal_lm_grad_norm,
     )
     # Generators by name, resolved on first use: registering them imports no
     # torchvision, no transformers and no generator module.
@@ -897,6 +926,20 @@ def _causal_lm_glosses() -> Mapping[str, str] | None:
         from fedbrew.tasks.causal_lm.torch_causal_lm import TorchCausalLMTask
 
     return TorchCausalLMTask.METRIC_GLOSSES
+
+
+def _classification_grad_norm() -> str | None:
+    with _suppress_torch_numpy_warning():
+        from fedbrew.tasks.classification.torch_classification import TorchClassificationTask
+
+    return TorchClassificationTask.GRAD_NORM_GLOSS
+
+
+def _causal_lm_grad_norm() -> str | None:
+    with _suppress_torch_numpy_warning():
+        from fedbrew.tasks.causal_lm.torch_causal_lm import TorchCausalLMTask
+
+    return TorchCausalLMTask.GRAD_NORM_GLOSS
 
 
 def _build_delta_sgd_client(*args: Any, **kwargs: Any) -> ClientUpdate:

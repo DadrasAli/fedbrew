@@ -17,7 +17,11 @@ to summation order:
   alone is not vmapped, and is ``eval_step``'s arithmetic bit for bit;
 - the central pass: one model, built once and kept, into which the server's
   state is copied in place each time, and the global test shard read once
-  and served again for as long as it is not edited.
+  and served again for as long as it is not edited;
+- ``grad_norm_sq``: every client's train rows in chunks of consecutive rows,
+  one ``functional_loss`` and one backward per chunk at the server's model
+  (``fedbrew/core/grad_norm.py``), the chunks kept for the next scheduled
+  round while they fit ``chunk_bytes`` and the splits are unedited.
 
 Splits are taken into a chunk until its rows reach ``chunk_bytes``
 (``runtime.performance.executor_chunk_bytes``), as the executor chunks
@@ -32,6 +36,7 @@ import copy
 from collections.abc import Mapping
 from typing import Any
 
+import torch
 from torch import nn
 
 from fedbrew.clients.batch_orders import LocalLoop
@@ -87,6 +92,10 @@ class BatchedEvaluator:
         #: The central pass's model, built once, and the global test shard.
         self._central_model: nn.Module | None = None
         self._global: tuple[FederatedDataset, CachedPayload | None] | None = None
+        #: The gradient pass's model, and its chunks of every client's train
+        #: rows with the splits they were cut from (``_grad_norm_chunks``).
+        self._grad_model: nn.Module | None = None
+        self._grad_chunks: tuple[list[Any], list[Any], list[tuple[Any, ...]]] | None = None
 
     # -- the clients ---------------------------------------------------------
 
@@ -284,6 +293,75 @@ class BatchedEvaluator:
             # caller the same instance, and this one's weights are ours.
             self._central_model = copy.deepcopy(task.build_model(server.model_config))
         return _central_test_metrics(server.evaluate_global(global_data, model=self._central_model))
+
+    # -- the gradient of the global objective ----------------------------------
+
+    def evaluate_grad_norm(
+        self,
+        server: ServerStrategy,
+        dataset: FederatedDataset,
+    ) -> dict[str, float]:
+        from fedbrew.core.grad_norm import GRAD_NORM_COLUMN, flat_chunk_gradient
+        from fedbrew.tasks.base import BatchableTask
+
+        task = getattr(server, "task", None)
+        if not isinstance(task, BatchableTask):
+            return self._reference.evaluate_grad_norm(server, dataset)
+        if server._model_state is None:
+            server.initialize()
+        if self._grad_model is None:
+            self._grad_model = copy.deepcopy(task.build_model(server.model_config))
+        template = self._grad_model
+        parameters = dict(template.named_parameters())
+        state = server._model_state
+        params = {
+            name: _placed(state[name], parameter) if name in state else parameter.detach()
+            for name, parameter in parameters.items()
+        }
+        buffers = {
+            name: _placed(state[name], buffer) if name in state else buffer
+            for name, buffer in template.named_buffers()
+        }
+        chunks = self._grad_norm_chunks(task, dataset)
+        value = flat_chunk_gradient(task, template, params, buffers, chunks)
+        return {GRAD_NORM_COLUMN: float(value)}
+
+    def _grad_norm_chunks(self, task: Any, dataset: FederatedDataset) -> list[tuple[Any, ...]]:
+        """Every client's train rows, in chunks; the last round's while its splits are unedited."""
+
+        from fedbrew.clients.batched_update import data_versions
+        from fedbrew.core.grad_norm import _train_split, chunk_pieces, chunk_rows
+
+        sources = [
+            _train_split(dataset.get_client_data(client)) for client in dataset.list_clients()
+        ]
+        held = self._grad_chunks
+        if (
+            held is not None
+            and len(held[0]) == len(sources)
+            and all(a is b for a, b in zip(held[0], sources, strict=True))
+            and held[1] == [data_versions(source) for source in sources]
+        ):
+            return held[2]
+        rows = [task.split_rows(source) for source in sources]
+        row_bytes = sum(tensor[:1].numel() * tensor.element_size() for tensor in rows[0])
+        pieces = chunk_pieces(
+            [len(split[0]) for split in rows], chunk_rows(task, row_bytes, self.chunk_bytes)
+        )
+        chunks = [
+            tuple(
+                torch.cat([rows[split][k][first:stop] for split, first, stop in chunk])
+                for k in range(len(rows[0]))
+            )
+            for chunk in pieces
+        ]
+        total = sum(tensor.numel() * tensor.element_size() for chunk in chunks for tensor in chunk)
+        self._grad_chunks = (
+            (sources, [data_versions(source) for source in sources], chunks)
+            if total <= self.chunk_bytes
+            else None
+        )
+        return chunks
 
     def _global_data(self, dataset: FederatedDataset) -> Any:
         """The global test shard: read once, and refused if edited since."""
