@@ -20,7 +20,10 @@ client_updates     local_sgd fedavg centralized local_adamw fedprox
 
 Four names appear in both. They are separate objects: `server.strategy:
 scaffold` selects the SCAFFOLD server, `client.update_rule: scaffold` selects
-the SCAFFOLD client, and the config sets each.
+the SCAFFOLD client. A config may leave the strategy out: the loader then
+takes the one the rule implies — the paired rule's own, `fedavg` for the
+FedAvg family's rules (chapter 04 §6.1) — and a strategy it states is still
+checked against the rule.
 
 ## 2. Which pairings are enforced
 

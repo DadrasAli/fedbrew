@@ -20,9 +20,6 @@ experiment:
     - simplex-lsq-feasible
     - scaffold
 
-server:
-  strategy: scaffold
-
 client:
   update_rule: scaffold
   learning_rate: 0.0125

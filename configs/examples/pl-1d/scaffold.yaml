@@ -17,9 +17,6 @@ experiment:
     - pl-1d
     - scaffold
 
-server:
-  strategy: scaffold
-
 client:
   update_rule: scaffold
   # One row per client: a "batch" is the whole objective, and local_iterations is

@@ -40,7 +40,6 @@ experiment:
   notes: "HPC plumbing check for the federated LoRA SFT path: one round, four clients. Not a baseline."
 
 server:
-  strategy: fedavg
   participation_rate: 0.5
 
 client:

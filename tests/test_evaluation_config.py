@@ -97,8 +97,8 @@ class EvaluationConfigTests(unittest.TestCase):
     def test_component_schedule_fields_are_rejected(self) -> None:
         config_text = _SMOKE_CONFIG.read_text(encoding="utf-8")
         config_text = config_text.replace(
-            "  strategy: fedavg\n",
-            "  strategy: fedavg\n  global_rounds: 5\n",
+            "  participation_rate: 1\n",
+            "  participation_rate: 1\n  global_rounds: 5\n",
         )
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "duplicate_rounds.yaml"

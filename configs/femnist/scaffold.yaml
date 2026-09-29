@@ -12,7 +12,6 @@ experiment:
 # global control variate c and ships it to clients each round. Validation
 # rejects any other pairing in either direction.
 server:
-  strategy: scaffold
   # NOTE: validation warns here. A client's control variate is refreshed only
   # when the client is sampled, so at pr=0.01 each variate is on average about
   # 100 rounds old when it is used. 0.01 matches the other cross-device FEMNIST

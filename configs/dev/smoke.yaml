@@ -10,7 +10,6 @@ experiment:
   notes: "One-round smoke test on in-process synthetic data; the default config for `fedbrew run`."
 
 server:
-  strategy: fedavg
   participation_rate: 1
 
 client:

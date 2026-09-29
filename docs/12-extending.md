@@ -141,7 +141,9 @@ Preflight reports `algorithm.extension_pairing_unchecked` as an info issue and
 stands down. If your strategy needs its own client rule, **refuse the wrong
 partner in your own constructor**, where you can see both — an incompatible
 pair then fails when it is built rather than at preflight, which is the
-deliberate cost of leaving the hook open.
+deliberate cost of leaving the hook open. A config running your rule states
+`server.strategy`: the loader infers it only for the built-in rules, since a
+missing strategy read as `fedavg` could be the wrong server for yours.
 
 **`client.learning_rate`.** Preflight neither requires nor refuses one for an
 out-of-tree rule, because whether a rule derives its own step size is a fact
@@ -174,9 +176,9 @@ object than the same name in the next.
 Everything above is the out-of-tree route, where a name reaches the CLI without
 the package knowing about it. **Adding a strategy or a rule to
 `register_builtin_components()` is the other route, and it is the one with
-homework.** Nine guards enumerate the two algorithm registries and diff them
+homework.** Ten guards enumerate the two algorithm registries and diff them
 against a hand-written table, so a name registered and nothing else turns the
-suite red in nine places at once.
+suite red in ten places at once.
 
 That is deliberate. Each table is a question the author is the only person who
 can answer, asked at the moment they are the only person thinking about it.
@@ -192,12 +194,13 @@ can answer, asked at the moment they are the only person thinking about it.
 | `tests/test_planned_columns_are_written.py` | `RULES`, in the test | a minimal client block for the rule and the strategy it pairs with, so the plan header's column list is checked against the CSV the rule actually writes |
 | `tests/test_adapter_state_support.py` | `ADAPTER_STATE_CLIENT_RULES` or `FULL_STATE_ONLY_CLIENT_RULES` in `fedbrew/core/federated_state.py` | whether the rule trains adapter-only (LoRA) state, or why it cannot and is refused with it — chapter 07 §5.1. Asks of a rule only |
 | `tests/test_active_target_weighting_is_honoured_or_refused.py` | `AGGREGATION_WEIGHT_HOOK_CLIENT_RULES` or `AGGREGATION_WEIGHT_HOOK_BYPASS_RULES` in `fedbrew/core/federated_state.py` | whether the rule's client asks the task for its aggregation weight, checked by running its `fit`; a rule that does not is refused with `active_target_weighting` on — chapter 07 §3.1. Asks of a rule only |
+| `tests/test_inferred_config_values.py` | `PAIRED_STRATEGIES` or `FEDAVG_FAMILY_CLIENT_RULES` in `fedbrew/core/config.py` | the server strategy the rule implies, which a config naming the rule may then leave out — chapter 04 §6.1. Asks of a rule only |
 
 Measured rather than assumed: registering one strategy and one rule that reuse
 FedAvg's builders, and running the suite, failed exactly the first seven
 modules — eleven test methods, four of them subtests. Measured on 2026-09-16,
 when the seventh was added; the eighth and ninth, added on 2026-09-21, are
-not in that measurement.
+not in that measurement, nor is the tenth, added on 2026-09-29.
 
 Two more fire on what the new name *is* rather than on the name itself:
 

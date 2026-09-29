@@ -10,7 +10,6 @@ experiment:
   notes: "Three rounds reading the generated synthetic manifest from disk."
 
 server:
-  strategy: fedavg
   participation_rate: 1
 
 client:

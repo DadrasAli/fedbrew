@@ -17,9 +17,6 @@ experiment:
     - drift-quad-floor
     - fedavg
 
-server:
-  strategy: fedavg
-
 client:
   update_rule: fedavg
   learning_rate: 1.9

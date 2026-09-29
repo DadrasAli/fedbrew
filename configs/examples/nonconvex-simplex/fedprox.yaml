@@ -20,9 +20,6 @@ experiment:
     - nonconvex-simplex
     - fedprox
 
-server:
-  strategy: fedavg
-
 client:
   update_rule: fedprox
   learning_rate: 0.05

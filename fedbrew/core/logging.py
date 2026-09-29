@@ -413,7 +413,7 @@ def _data_rows(config: FullConfig, client_count: int | None) -> list[Row]:
 def _federation_rows(config: FullConfig, client_count: int | None) -> list[Row]:
     server = config.server
     rows = [
-        Row("Strategy", server.strategy),
+        Row("Strategy", _marked(config, "server.strategy", server.strategy)),
         Row("Rounds", str(server.global_rounds)),
         Row("Participation probability", f"{server.participation_probability:g}")
         if server.participation_probability is not None

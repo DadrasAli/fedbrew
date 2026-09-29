@@ -9,14 +9,14 @@ experiment:
   notes: "Centralized upper bound on the FEMNIST writer partition, pooled into one client."
 
 server:
-  # Pools every writer of data.path into one client and trains it with the same
-  # local-update engine FedAvg uses. Aggregating one client is the identity, so
-  # this is the centralized upper bound on exactly the FedAvg data and model.
-  strategy: centralized
   # Meaningless with a single pooled client; kept so runs stay comparable.
   participation_rate: 1
 
 client:
+  # Pools every writer of data.path into one client and trains it with the same
+  # local-update engine FedAvg uses. Aggregating one client is the identity, so
+  # this is the centralized upper bound on exactly the FedAvg data and model.
+  # server.strategy is centralized too, inferred from this rule.
   update_rule: centralized
   batch_size: 16
   learning_rate: 0.01

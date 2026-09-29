@@ -18,7 +18,6 @@ experiment:
 # per-parameter rate alpha/sqrt(v_hat) for the duration of a round, then the
 # server averages the three states and hands them back.
 server:
-  strategy: fedlalr
   # The paper averages the sampled clients uniformly, 1/m, not by example
   # count. Keeping that reproduces the published algorithm; it also means this
   # arm aggregates differently from the fedavg/fedprox/scaffold arms, which

@@ -13,7 +13,6 @@ experiment:
 # global control variate c and ships it to clients each round. Validation
 # rejects any other pairing in either direction.
 server:
-  strategy: scaffold
 
   # 1, as the rest of the family: every client trains every round. That also
   # removes the staleness this strategy has at a lower rate -- a control

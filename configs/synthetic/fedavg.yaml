@@ -16,7 +16,6 @@ experiment:
   notes: "FedAvg baseline on the fifty-client Dirichlet synthetic dataset."
 
 server:
-  strategy: fedavg
   participation_rate: 1
 
 client:

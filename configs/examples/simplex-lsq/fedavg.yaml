@@ -20,9 +20,6 @@ experiment:
     - simplex-lsq
     - fedavg
 
-server:
-  strategy: fedavg
-
 client:
   update_rule: fedavg
   learning_rate: 0.05

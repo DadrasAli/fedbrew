@@ -23,7 +23,6 @@ experiment:
   notes: "Reference config for the evaluation and client_statistics sections; not a research arm."
 
 server:
-  strategy: fedavg
   participation_rate: 0.02
 
 client:

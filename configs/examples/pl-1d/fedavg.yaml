@@ -17,9 +17,6 @@ experiment:
     - pl-1d
     - fedavg
 
-server:
-  strategy: fedavg
-
 client:
   update_rule: fedavg
   update_mode: sequential_epoch

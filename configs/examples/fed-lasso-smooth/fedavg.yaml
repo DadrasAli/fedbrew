@@ -18,9 +18,6 @@ experiment:
     - fedavg
   notes: "Federated lasso with the L1 term removed; d=16, s=3, lam=0, zeta=0.4; x* = x_true."
 
-server:
-  strategy: fedavg
-
 client:
   update_rule: fedavg
   # NOT the base arm's 0.004. This control's claim is that removing the L1

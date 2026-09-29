@@ -10,7 +10,6 @@ experiment:
   notes: "FedAvg baseline on FedScale-partitioned OpenImage at 96x96."
 
 server:
-  strategy: fedavg
   participation_rate: 0.01
 
 client:

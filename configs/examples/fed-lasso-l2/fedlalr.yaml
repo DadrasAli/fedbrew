@@ -20,7 +20,6 @@ experiment:
     - fedlalr
 
 server:
-  strategy: fedlalr
   # The paper aggregates the sampled clients uniformly. Every client here
   # already carries the same weight, so this changes nothing and is written
   # only so the arm is not silently different from the published algorithm.

@@ -11,7 +11,6 @@ experiment:
   notes: "FedAvg + LoRA SFT baseline on naturally contributor-partitioned OASST1."
 
 server:
-  strategy: fedavg
   participation_rate: 0.25
 
 client:

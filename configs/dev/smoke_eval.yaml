@@ -10,7 +10,6 @@ experiment:
   notes: "Ten-round smoke test exercising the per-split evaluation schedules."
 
 server:
-  strategy: fedavg
   participation_rate: 1
 
 client:

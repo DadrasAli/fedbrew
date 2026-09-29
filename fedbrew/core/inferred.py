@@ -1,17 +1,23 @@
 """Config values the loader infers instead of requiring them.
 
-Four keys a config had to write carry nothing the loader could not already
+Five keys a config had to write carry nothing the loader could not already
 find out:
 
 - ``model.input_dim`` and ``model.num_classes``: the manifest states both,
   and a model whose value disagreed with it was refused when it was built;
 - ``experiment.output_dir``: 84 of the 97 shipped run configs wrote
   ``outputs/<their path under configs/>``;
-- ``experiment.name``: 71 wrote ``<their directory>-<their file name>``.
+- ``experiment.name``: 71 wrote ``<their directory>-<their file name>``;
+- ``server.strategy``: 60 wrote the one their ``client.update_rule`` implies --
+  the paired rules' own strategy (``scaffold``, ``fedlalr``, ``centralized``),
+  and ``fedavg`` for the FedAvg family's rules.
 
 Each is now inferred when a config leaves it out, and stating it stays legal.
 A stated model dimension is checked against the manifest at load, where the
-disagreement used to surface only when the model was built. A stated output
+disagreement used to surface only when the model was built. A stated strategy
+is checked against the rule as before: a paired rule's half without the other
+is refused (``_validate_paired_strategies``), and a FedOpt strategy over a
+FedAvg-family rule is the config's choice. A stated output
 directory or name that is not the path's is the config's choice -- 13 shipped
 configs write to a directory of their own -- and is kept.
 
@@ -38,6 +44,7 @@ from fedbrew.core.refusal import RunRefused
 #: The ``FullConfig.inferred`` sources.
 FROM_MANIFEST = "the dataset manifest"
 FROM_CONFIG_PATH = "the config path"
+FROM_UPDATE_RULE = "client.update_rule"
 
 #: The directory whose tree the path inference reads a config's place in.
 CONFIGS_DIRECTORY = "configs"
@@ -119,6 +126,38 @@ def infer_experiment(
     if not experiment.get("name"):
         experiment["name"] = inferred_name(config_path)
         inferred["experiment.name"] = FROM_CONFIG_PATH
+
+
+def infer_strategy(
+    server: MutableMapping[str, Any],
+    client: Mapping[str, Any],
+    inferred: MutableMapping[str, str],
+) -> None:
+    """Fill ``server.strategy`` from ``client.update_rule`` where the server block has none.
+
+    A rule that implies no strategy -- an extension's, or a missing one --
+    leaves a strategy required, and the refusal says which rules imply one.
+    """
+
+    from fedbrew.core.config import (
+        FEDAVG_FAMILY_CLIENT_RULES,
+        PAIRED_STRATEGIES,
+        implied_strategy,
+    )
+
+    if "strategy" in server:
+        return
+    rule = client.get("update_rule")
+    strategy = implied_strategy(rule)
+    if strategy is None:
+        raise RunRefused(
+            f"server.strategy is required: client.update_rule={rule!r} implies none. "
+            f"It is inferred for {', '.join(sorted(PAIRED_STRATEGIES))} (the strategy "
+            f"of the same name) and for {', '.join(sorted(FEDAVG_FAMILY_CLIENT_RULES))} "
+            "(fedavg)"
+        )
+    server["strategy"] = strategy
+    inferred["server.strategy"] = FROM_UPDATE_RULE
 
 
 def infer_model_shape(config: Any, stated: Mapping[str, Any]) -> None:

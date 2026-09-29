@@ -1,15 +1,20 @@
 """Keys the loader can find out are inferred, marked, and checked when stated.
 
-``fedbrew/core/inferred.py`` fills four keys a config leaves out:
+``fedbrew/core/inferred.py`` fills five keys a config leaves out:
 ``model.input_dim`` and ``model.num_classes`` from the manifest, for a model
-registered as sized by them, and ``experiment.output_dir`` and
-``experiment.name`` from where the config sits under ``configs/``. Pinned here:
+registered as sized by them, ``experiment.output_dir`` and
+``experiment.name`` from where the config sits under ``configs/``, and
+``server.strategy`` from the strategy ``client.update_rule`` implies. Pinned
+here:
 
 - each is filled, written into the resolved config, and named with its
   source in ``FullConfig.inferred``, which run.json records and the plan
   header prints;
 - a stated value is not marked; a stated dimension that disagrees with the
-  manifest is refused at load, not when the model is built;
+  manifest is refused at load, not when the model is built, and a stated
+  strategy is still checked against the rule;
+- every built-in rule implies a strategy, and one that implies none -- an
+  extension's -- leaves it required;
 - a model not sized by a key gets nothing inferred for it;
 - outside a ``configs/`` directory the output directory is required and the
   name is the file stem, as every unnamed config was called before;
@@ -36,8 +41,18 @@ import pytest
 import yaml
 
 from fedbrew.core import registry, runner
-from fedbrew.core.config import load_config
-from fedbrew.core.inferred import FROM_CONFIG_PATH, FROM_MANIFEST
+from fedbrew.core.config import (
+    FEDAVG_FAMILY_CLIENT_RULES,
+    PAIRED_STRATEGIES,
+    implied_strategy,
+    load_config,
+)
+from fedbrew.core.inferred import (
+    FROM_CONFIG_PATH,
+    FROM_MANIFEST,
+    FROM_UPDATE_RULE,
+    infer_strategy,
+)
 from fedbrew.core.refusal import RunRefused
 
 BASE = textwrap.dedent("""
@@ -293,6 +308,66 @@ class FromTheManifestTest(_Directory):
         models = registry.ModelRegistry("models")
         with self.assertRaisesRegex(ValueError, "shape_keys may name only"):
             models.register("m", lambda config: None, task="classification", shape_keys=("dim",))
+
+
+@pytest.mark.fast
+class FromTheUpdateRuleTest(_Directory):
+    """``server.strategy`` is the one ``client.update_rule`` implies, when left out."""
+
+    @staticmethod
+    def _inferred(rule: str, server: dict[str, Any] | None = None) -> tuple[dict, dict]:
+        server = {} if server is None else server
+        inferred: dict[str, str] = {}
+        infer_strategy(server, {"update_rule": rule}, inferred)
+        return server, inferred
+
+    def test_a_paired_rule_implies_its_own_strategy(self) -> None:
+        for rule in PAIRED_STRATEGIES:
+            with self.subTest(rule=rule):
+                self.assertEqual(
+                    self._inferred(rule),
+                    ({"strategy": rule}, {"server.strategy": FROM_UPDATE_RULE}),
+                )
+
+    def test_a_fedavg_family_rule_implies_fedavg(self) -> None:
+        for rule in FEDAVG_FAMILY_CLIENT_RULES:
+            with self.subTest(rule=rule):
+                self.assertEqual(self._inferred(rule)[0], {"strategy": "fedavg"})
+
+    def test_every_built_in_rule_implies_one(self) -> None:
+        registry.register_builtin_components()
+        for rule in registry.client_updates.builtin():
+            with self.subTest(rule=rule):
+                self.assertIsNotNone(implied_strategy(rule))
+
+    def test_a_stated_strategy_is_kept_and_not_marked(self) -> None:
+        self.assertEqual(
+            self._inferred("fedavg", {"strategy": "fedadam"}), ({"strategy": "fedadam"}, {})
+        )
+
+    def test_a_rule_that_implies_none_leaves_it_required(self) -> None:
+        with self.assertRaisesRegex(RunRefused, r"server\.strategy is required.*'my_rule'"):
+            self._inferred("my_rule")
+
+    def test_the_resolved_config_and_the_plan_header_carry_it(self) -> None:
+        from fedbrew.core.logging import _federation_rows
+
+        path = _write(
+            self.root / "configs" / "study" / "arm.yaml",
+            lambda raw: raw["server"].pop("strategy"),
+        )
+        config = load_config(path)
+        self.assertEqual(config.server.strategy, "fedavg")
+        self.assertEqual(config.inferred["server.strategy"], FROM_UPDATE_RULE)
+        rows = {row.label: row.value for row in _federation_rows(config, None)}
+        self.assertEqual(rows["Strategy"], "fedavg (inferred from client.update_rule)")
+
+    def test_a_stated_strategy_is_still_checked_against_the_rule(self) -> None:
+        def state(raw: dict[str, Any]) -> None:
+            raw["server"]["strategy"] = "scaffold"
+
+        with self.assertRaisesRegex(RunRefused, "server.strategy=scaffold requires"):
+            load_config(_write(self.root / "configs" / "study" / "arm.yaml", state))
 
 
 class TheKeysRequiredOnlyWhereTheyActTest(_Directory):

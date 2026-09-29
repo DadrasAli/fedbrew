@@ -22,7 +22,6 @@ experiment:
 # A writer is sampled about five times in 500 rounds at pr=0.01, but it is
 # fine-tuned at every evaluation whether or not it ever trained.
 server:
-  strategy: fedavg
   # Example-weighted, matching the fedavg/fedprox/scaffold arms. NOT uniform:
   # this arm exists to be compared with them.
   participation_rate: 0.01

@@ -17,7 +17,8 @@ Two differences are allowed, both declared here rather than taken on trust:
   named after their file (``fedavg``) and are named after their directory and
   file now (``femnist-fedavg``), as the 69 example arms that did state one
   already were. Every other inferred value, the 79 inferred output
-  directories among them, must equal the one the file used to state;
+  directories and the 60 strategies inferred from the update rule among
+  them, must equal the one the file used to state;
 - a key a step moved, under ``MOVED``: compared at its new place against the
   value recorded at its old one -- or, where the record has none because the
   config left it out, against the value its old reader took then

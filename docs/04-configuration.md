@@ -231,7 +231,7 @@ base counts for every arm that extends it
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `strategy` | enum | **required** | One of the nine below. |
+| `strategy` | enum | inferred | One of the nine below. Unset, the one `client.update_rule` implies (§6.1): `scaffold`, `fedlalr` and `centralized` for the rule of the same name, `fedavg` for the FedAvg family's rules. A FedOpt strategy is stated. |
 | `participation_rate` | float | — | In `(0, 1]`. A fixed number of clients per round, `ceil(rate × clients)` and at least one. **Exactly one** of this and `participation_probability` is required. |
 | `participation_probability` | float | — | In `(0, 1]`. Bernoulli participation, for any strategy: each client joins each round independently with this probability, one value for every client. The count varies by round and can be zero; a round that selects no client is not aggregated, so the model and the server's state carry over unchanged, and it records `num_clients` 0. **Exactly one** of this and `participation_rate` is required. |
 
@@ -427,7 +427,7 @@ strategy does not load clean under another.
 
 ### 6.1 Values the loader infers
 
-Four keys may be left out, because the loader can find them out
+Five keys may be left out, because the loader can find them out
 (`fedbrew/core/inferred.py`):
 
 | Key | Inferred from | When stated |
@@ -435,6 +435,7 @@ Four keys may be left out, because the loader can find them out
 | `model.input_dim`, `model.num_classes` | the manifest's own `input_dim` and `num_classes`, for a model registered as sized by that key (`models.register(..., shape_keys=)`: `mlp` both, `cnn`, `small_cnn`, `femnist_resnet18` and `openimage_shufflenet` `num_classes`, the four vector examples `input_dim`) | checked against the manifest at load, and refused if they disagree |
 | `experiment.output_dir` | `outputs/<the config's path under its nearest configs/ directory, without .yaml>`; required outside a `configs/` directory | kept as an override, and the plan header says `(overrides the inferred <value>)` where it differs: 13 shipped configs write to a directory of their own |
 | `experiment.name` | `<directory>-<file stem>` for a config in a directory under `configs/`, the file stem otherwise | kept as an override, marked in the plan header the same way; `tests/test_shipped_config_explicitness.py` refuses a stated name equal to the inferred one |
+| `server.strategy` | `client.update_rule`: a paired rule (`PAIRED_STRATEGIES`: `scaffold`, `fedlalr`, `centralized`) implies the strategy of its own name, a FedAvg-family rule (`FEDAVG_FAMILY_CLIENT_RULES`: `fedavg`, `fedavg_ft`, `fedprox`, `local_sgd`, `local_adamw`, `delta_sgd`) implies `fedavg`. An extension's rule implies none, so its config states one | checked against the rule as before: half of a paired rule is refused (§4); a FedOpt strategy over a FedAvg-family rule is the config's choice. `tests/test_shipped_config_explicitness.py` refuses a stated strategy equal to the implied one |
 
 An inferred value is written into the resolved config like a stated one, so
 `run.json` records it, and `config.inferred` there names each inferred key and

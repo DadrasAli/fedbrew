@@ -13,7 +13,6 @@ experiment:
 # as the paper's experiments weight it (Section 5.1); its Algorithm 2 writes a
 # uniform 1/K average.
 server:
-  strategy: fedavg
   participation_rate: 1
 
 client:

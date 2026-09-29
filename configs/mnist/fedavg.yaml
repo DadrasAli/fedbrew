@@ -10,7 +10,6 @@ experiment:
   notes: "FedAvg baseline on one-digit-per-client MNIST."
 
 server:
-  strategy: fedavg
   participation_rate: 1
 
 client:

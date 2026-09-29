@@ -10,7 +10,6 @@ experiment:
   notes: "Three rounds on in-process synthetic data, no manifest on disk."
 
 server:
-  strategy: fedavg
   participation_rate: 1
 
 client:

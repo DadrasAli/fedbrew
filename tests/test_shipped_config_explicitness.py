@@ -40,6 +40,7 @@ from fedbrew.clients.torch_delta_sgd_client import (
 from fedbrew.core.config import (
     MATMUL_PRECISIONS,
     NUMERICS_KEYS,
+    implied_strategy,
     is_family_base,
     load_config_mapping,
 )
@@ -121,6 +122,25 @@ class ExperimentHeaderConventionTest(unittest.TestCase):
             f"these set experiment.name to the name their path gives: {restating}. "
             "load_config already infers it; writing it again is a second copy "
             "that can drift from the first.",
+        )
+
+    def test_a_config_states_its_strategy_only_to_differ_from_the_implied_one(self) -> None:
+        """``server.strategy`` is inferred from the rule (fedbrew/core/inferred.py).
+
+        60 configs wrote exactly the strategy their rule implies; the ones that
+        state it now name a FedOpt server over a FedAvg-family rule.
+        """
+
+        restating = [
+            str(path)
+            for path, config in self.configs
+            if "strategy" in (config.get("server") or {})
+            and config["server"]["strategy"] == implied_strategy(config["client"]["update_rule"])
+        ]
+        self.assertEqual(
+            restating,
+            [],
+            f"these set server.strategy to the one their update_rule implies: {restating}",
         )
 
     def test_a_config_that_names_itself_says_why(self) -> None:

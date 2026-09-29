@@ -17,9 +17,6 @@ experiment:
     - drift-quad
     - fedprox
 
-server:
-  strategy: fedavg
-
 client:
   update_rule: fedprox
   learning_rate: 0.002

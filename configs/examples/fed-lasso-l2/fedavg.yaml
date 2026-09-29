@@ -19,9 +19,6 @@ experiment:
     - fed-lasso-l2
     - fedavg
 
-server:
-  strategy: fedavg
-
 client:
   update_rule: fedavg
   learning_rate: 0.008

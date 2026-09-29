@@ -622,14 +622,15 @@ def load_config(common_path: str | Path) -> FullConfig:
     # Imported here: registry pulls in the client/server packages, which import
     # this module for its config types.
     from fedbrew.core.extensions import load_extensions
-    from fedbrew.core.inferred import infer_experiment, infer_model_shape
+    from fedbrew.core.inferred import infer_experiment, infer_model_shape, infer_strategy
     from fedbrew.core.registry import task_for_model
 
+    inferred: dict[str, str] = {}
+    infer_strategy(server, client, inferred)
     experiment_values = common.get("experiment")
     if not isinstance(experiment_values, Mapping):
         raise RunRefused("config missing required mapping: experiment")
     experiment_values = dict(experiment_values)
-    inferred: dict[str, str] = {}
     # The config file already names the experiment and its place; restating
     # either invites drift.
     infer_experiment(experiment_values, common_config_path, inferred)
@@ -2612,6 +2613,31 @@ PAIRED_STRATEGIES: dict[str, str] = {
         "client's local AMSGrad reads"
     ),
 }
+
+#: Built-in rules whose client runs against the plain FedAvg server as it is:
+#: it returns its trained model and the server averages. A config naming one
+#: of them may leave ``server.strategy`` out, and gets ``fedavg``; the FedOpt
+#: strategies take the same clients and are stated wherever they are meant.
+#: Built-in only, because an extension's rule may need a strategy of its own,
+#: and a missing one read as ``fedavg`` would run the wrong server silently.
+FEDAVG_FAMILY_CLIENT_RULES: frozenset[str] = frozenset(
+    {"fedavg", "fedavg_ft", "fedprox", "local_sgd", "local_adamw", "delta_sgd"}
+)
+
+
+def implied_strategy(update_rule: object) -> str | None:
+    """The server strategy ``update_rule`` implies, or None when it implies none.
+
+    A rule in ``PAIRED_STRATEGIES`` runs only against the strategy of its own
+    name, and a rule in ``FEDAVG_FAMILY_CLIENT_RULES`` against ``fedavg`` unless
+    the config states a FedOpt strategy.
+    """
+
+    if update_rule in PAIRED_STRATEGIES:
+        return str(update_rule)
+    if update_rule in FEDAVG_FAMILY_CLIENT_RULES:
+        return "fedavg"
+    return None
 
 
 def _validate_output_dir(config: FullConfig) -> None:

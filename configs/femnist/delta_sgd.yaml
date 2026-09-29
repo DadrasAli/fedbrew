@@ -14,7 +14,6 @@ experiment:
 # rounds, so this arm has the same memory profile as fedavg -- unlike
 # SCAFFOLD, which stores a control variate per writer.
 server:
-  strategy: fedavg
   # The paper averages the sampled clients uniformly, 1/|S_t|, not by example
   # count. Keeping that means this arm reproduces the published algorithm; it
   # also means the aggregation differs from the fedavg/fedprox/scaffold arms,

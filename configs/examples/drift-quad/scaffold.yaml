@@ -17,9 +17,6 @@ experiment:
     - drift-quad
     - scaffold
 
-server:
-  strategy: scaffold
-
 client:
   update_rule: scaffold
   learning_rate: 0.008

@@ -9,7 +9,6 @@ experiment:
   notes: "FedAvg baseline on naturally writer-partitioned FEMNIST."
 
 server:
-  strategy: fedavg
   participation_rate: 1
 
 client:

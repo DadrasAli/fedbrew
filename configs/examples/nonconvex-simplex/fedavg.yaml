@@ -20,9 +20,6 @@ experiment:
     - nonconvex-simplex
     - fedavg
 
-server:
-  strategy: fedavg
-
 client:
   update_rule: fedavg
   # One matrix per client, so a "batch" is that client's whole objective and
