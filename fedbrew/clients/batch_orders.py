@@ -206,13 +206,19 @@ def plan_orders(
     shuffled = torch.tensor([order.shuffle for order in orders], dtype=torch.bool)
     positions = starts.unsqueeze(2) + torch.arange(widest, dtype=_LONG).view(1, 1, -1)
     positions = torch.minimum(positions, torch.clamp(rows - 1, min=0).view(-1, 1, 1))
-    indices = positions.clone()
     permuted = shuffled if oracle is None else shuffled & ~oracle
+    # The positions are read again only to map a permuted client's through
+    # its permutations; where every client is permuted, what that returns is
+    # the whole of the indices. Either way, then, nothing to copy first.
+    everyone = bool(permuted.all())
+    indices = positions if everyone or not bool(permuted.any()) else positions.clone()
     if bool(permuted.any()) or oracle is not None:
         if seeds is None:
             seeds = [order.seed for order in orders]
     if bool(permuted.any()):
-        _shuffle_positions(orders, seeds, permuted, rows, epoch, epochs_used, positions, indices)
+        indices = _shuffle_positions(
+            orders, seeds, permuted, rows, epoch, epochs_used, positions, indices, everyone
+        )
     if oracle is not None:
         _draw_with_replacement(orders, seeds, oracle, steps, indices)
     return RoundOrders(
@@ -250,8 +256,13 @@ def _shuffle_positions(
     epochs_used: Tensor,
     positions: Tensor,
     indices: Tensor,
-) -> None:
-    """Map each shuffled client's positions through its epochs' permutations, in place."""
+    everyone: bool = False,
+) -> Tensor:
+    """Each shuffled client's positions mapped through its epochs' permutations.
+
+    Into ``indices``, which is returned; where ``everyone`` is shuffled, the
+    mapped positions are returned as the indices themselves.
+    """
 
     chosen = torch.nonzero(shuffled).view(-1)
     picked = chosen.tolist()
@@ -281,7 +292,11 @@ def _shuffle_positions(
     which = torch.minimum(epoch[chosen], last.unsqueeze(1))
     which = torch.where(per_loader.unsqueeze(1), 0, which)
     which = which + torch.tensor(first, dtype=_LONG).unsqueeze(1)
+    if everyone:
+        where = starts[which].unsqueeze(2) + positions
+        return joined.index_select(0, where.view(-1)).view(where.shape)
     indices[chosen] = joined[starts[which].unsqueeze(2) + positions[chosen]]
+    return indices
 
 
 def _draw_with_replacement(
