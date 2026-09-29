@@ -859,7 +859,15 @@ DEFAULT_MIN_EVAL_BATCH_SIZE = 256
 
 
 def _eval_batch_size(config: FullConfig) -> int:
-    """Return the evaluation batch size, defaulting well above the train size."""
+    """Return the evaluation batch size.
+
+    Unset, ``max(batch_size, DEFAULT_MIN_EVAL_BATCH_SIZE)`` for every task but
+    ``causal_lm``, which evaluates at ``batch_size``. The two differ on purpose:
+    evaluation runs without gradients, so the size changes only throughput and
+    the summation order of a mean, and the floor that keeps a classification
+    pass from leaving the GPU idle would allocate batch x sequence x vocabulary
+    logits for a causal LM.
+    """
 
     configured = config.client.extra.get("eval_batch_size")
     if configured is None:
