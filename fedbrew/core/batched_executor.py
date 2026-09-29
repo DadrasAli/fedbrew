@@ -744,6 +744,10 @@ class _Rows:
 #: at once (``_Steps._gathered``); more are gathered a step at a time.
 _GATHER_AT_ONCE = 1 << 22
 
+#: At most this many elements of a period's batches are kept for the steps
+#: that repeat them (``_Steps._period``).
+_KEEP_AT_ONCE = 1 << 22
+
 
 class _Steps:
     """A group's batches, one step at a time, gathered from its rows.
@@ -752,7 +756,11 @@ class _Steps:
     of them, in the order of ``rows``' splits. A batch shorter than the step's
     widest is padded -- from the split's own rows, or its zero padding -- and
     masked. Where every order is unshuffled and the step starts at the same
-    row for all, the batch is a slice of the stacked rows, not a copy.
+    row for all, the batch is a slice of the stacked rows, not a copy. Where
+    the steps are gathered one at a time and repeat -- a loader that permutes
+    once and is iterated again, a single-batch loop taking its first batch
+    each time -- a step whose rows are an earlier step's for every split is
+    that step's batch again, not another gather of the same rows.
     """
 
     def __init__(
@@ -779,6 +787,49 @@ class _Steps:
         self.sliced = bool(orders.contiguous[where].all())
         self._on_device: tuple[Tensor, Tensor] | None = None
         self._every: tuple[Tensor, ...] | None = None
+        self._found: tuple[int | None] | None = None
+        self._repeated: dict[int, tuple[tuple[Tensor, ...], Tensor | None]] = {}
+
+    @property
+    def period(self) -> int | None:
+        """``_period``, found at the first step: when the rows a step reads are bound."""
+
+        if self._found is None:
+            self._found = (self._period(),)
+        return self._found[0]
+
+    def _period(self) -> int | None:
+        """The smallest ``p`` with every split's step ``t + p`` step ``t``'s rows, or None.
+
+        Only for a stack whose steps are gathered one at a time, each into a
+        tensor of its own: a step that repeats an earlier one is then that
+        step's tensor again, laid out as its own gather would be. Where every
+        step is gathered at once (``_small``), a step is a view at its own
+        place in that gather, and a view at another place is another address,
+        which the CPU's vectorised reductions can sum in another order. And
+        only where ``p`` steps of batches are few enough elements to hold
+        (``_KEEP_AT_ONCE``): what is kept is one period's.
+        """
+
+        indices, lengths = self._indices, self._lengths
+        if self.size < 2 or indices.dim() != 3 or indices.shape[1] < 2 or self.sliced:
+            return None
+        if self._small():
+            return None
+        steps, widest = indices.shape[1], indices.shape[2]
+        # A fingerprint a step: its indices weighted by position and summed,
+        # so only a step that may repeat step 0 is compared in full.
+        weights = torch.arange(1, self.size * widest + 1, dtype=torch.long).view(self.size, 1, -1)
+        prints = (indices * weights).sum(dim=(0, 2)) + lengths.sum(dim=0)
+        per_row = sum(tensor[0, :1].numel() for tensor in self.rows.tensors)
+        for candidate in torch.nonzero(prints == prints[0]).view(-1).tolist()[1:]:
+            if self.size * candidate * widest * per_row > _KEEP_AT_ONCE:
+                return None
+            if torch.equal(indices[:, candidate:], indices[:, : steps - candidate]) and (
+                torch.equal(lengths[:, candidate:], lengths[:, : steps - candidate])
+            ):
+                return int(candidate)
+        return None
 
     def _small(self) -> bool:
         """Whether every step's batches together are few enough elements to gather at once."""
@@ -823,6 +874,15 @@ class _Steps:
     def batch(self, step: int) -> tuple[tuple[Tensor, ...], Tensor | None]:
         """Step ``step``'s batch of every split, and the mask of its real rows."""
 
+        if self.period is not None:
+            first = step % self.period
+            held = self._repeated.get(first)
+            if held is None:
+                held = self._repeated[first] = self._batch(first)
+            return held
+        return self._batch(step)
+
+    def _batch(self, step: int) -> tuple[tuple[Tensor, ...], Tensor | None]:
         rows = self.rows
         width = self.widths[step]
         if not rows.stacked:

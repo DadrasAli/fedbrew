@@ -1,6 +1,6 @@
 """What the batched executor stopped doing a step changes no bit of what it computes.
 
-A per-step cost is gone from a stack's steps, and each is held here against
+Two per-step costs are gone from a stack's steps, and each is held here against
 the executor that still pays it -- the same run with the change turned off --
 bit for bit, in every CSV and every round's checkpoint:
 
@@ -10,6 +10,10 @@ bit for bit, in every CSV and every round's checkpoint:
   frozen weighting, local SGD with momentum, Nesterov and weight decay under a
   cosine schedule, AdamW, FedProx and SCAFFOLD, on the float64 linear example
   and on the float32 classification task, under both gradient forms;
+- a step whose rows are an earlier step's for every client -- a loader that
+  permutes once and is iterated again, a single-batch loop taking its first
+  batch each time -- reuses that step's gathered batch where steps are
+  gathered one at a time (``_Steps.period``), and nowhere else.
 """
 
 from __future__ import annotations
@@ -19,7 +23,10 @@ from contextlib import ExitStack, contextmanager, nullcontext
 from typing import Any
 from unittest import mock
 
+import torch
+
 from fedbrew.core import batched_executor
+from fedbrew.tasks.base import LoaderOrder
 from tests.test_batched_executor_tolerance import (
     ExecutorRuns,
     classification_rule_config,
@@ -66,6 +73,10 @@ def paying(stepwise: bool, repeats: bool) -> Iterator[None]:
             stack.enter_context(
                 mock.patch.object(batched_executor._Bucket, "_stepwise", lambda self: False)
             )
+        if not repeats:
+            stack.enter_context(
+                mock.patch.object(batched_executor._Steps, "_period", lambda self: None)
+            )
         yield
 
 
@@ -88,3 +99,63 @@ class NothingMovesTest(ExecutorRuns):
                 ):
                     now, before = self._pair(config, data, stepwise=False, repeats=True)
                     self.assertAgree(now, before, exact=True)
+
+    def test_a_repeated_step_reuses_its_gather(self) -> None:
+        """Gathered a step at a time, as a stack too large to gather at once is."""
+
+        cases = [
+            (f"fed-lasso-l2/{mode}", with_client(example_config("fed-lasso-l2"), update_mode=mode))
+            for mode in ("single_batch", "full_gradient", "sequential_epoch")
+        ]
+        # One graph per client, stepped three times a round: the steps repeat
+        # with period 1. Its reuse of a view into a gather of every step moved
+        # the last bits (vectorised sums at another address); it is kept to
+        # the per-step gathers, where a reused step is a gather of its own.
+        cases.append(("nonconvex-simplex", example_config("nonconvex-simplex")))
+        for label, config in cases:
+            for one_at_a_time in (True, False):
+                budget = 1 if one_at_a_time else batched_executor._GATHER_AT_ONCE
+                with (
+                    self.subTest(case=label, one_at_a_time=one_at_a_time),
+                    mock.patch.object(batched_executor, "_GATHER_AT_ONCE", budget),
+                ):
+                    now, before = self._pair(config, ragged_clients, stepwise=True, repeats=False)
+                    self.assertAgree(now, before, exact=True)
+
+    def test_the_period_is_found_only_where_the_steps_repeat(self) -> None:
+        from fedbrew.clients.batch_orders import LocalLoop, plan_orders
+
+        orders = [
+            LoaderOrder(12, 4, True, False, seed, per_epoch=False, keep_single_batch=True)
+            for seed in (1, 2, 3)
+        ]
+        planned = plan_orders(orders, [LocalLoop(epochs=5)] * 3)
+        stack = _FakeRows(3, 12)
+        # Small enough to gather every step at once: each step a view, none kept.
+        self.assertIsNone(batched_executor._Steps(stack, planned, [0, 1, 2], torch.float64).period)
+        # Found at the first step, against the rows then bound.
+        with mock.patch.object(batched_executor, "_GATHER_AT_ONCE", 1):
+            steps = batched_executor._Steps(stack, planned, [0, 1, 2], torch.float64)
+            self.assertEqual(steps.period, 3)
+        for step in range(15):
+            fresh = steps._batch(step)[0][0]
+            self.assertTrue(torch.equal(steps.batch(step)[0][0], fresh))
+        iid = [
+            LoaderOrder(12, 4, True, False, seed, per_epoch=False, replacement=True)
+            for seed in (1, 2, 3)
+        ]
+        drawn = plan_orders(iid, [LocalLoop(epochs=5, single_batch=True)] * 3)
+        with mock.patch.object(batched_executor, "_GATHER_AT_ONCE", 1):
+            iid_steps = batched_executor._Steps(stack, drawn, [0, 1, 2], torch.float64)
+            self.assertIsNone(iid_steps.period)
+
+
+class _FakeRows:
+    """A stack of ``size`` splits of ``rows`` numbered rows, as ``_Rows`` holds them."""
+
+    def __init__(self, size: int, rows: int) -> None:
+        self.stacked = True
+        self.device = torch.device("cpu")
+        self.longest = rows
+        numbers = torch.arange(size * rows, dtype=torch.float64).view(size, rows, 1)
+        self.tensors = (numbers, numbers.squeeze(2))

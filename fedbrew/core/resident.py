@@ -738,6 +738,8 @@ class ResidentRounds:
             # left tensors it recorded but never computed.
             bucket.train._every = bucket.evaluation._every = None
             bucket.train._on_device = bucket.evaluation._on_device = None
+            bucket.train._repeated.clear()
+            bucket.evaluation._repeated.clear()
             if bucket.kind != "single":
                 bucket.train._on_device = (
                     inputs[bucket.inputs["train_flat"]],
