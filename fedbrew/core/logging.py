@@ -184,6 +184,7 @@ def print_plan_header(
     resume_from: str | Path | None = None,
     surface: Surface | None = None,
     executor: Mapping[str, Any] | None = None,
+    config_path: str | Path | None = None,
 ) -> None:
     """Print what this run is about to do, before it does any of it.
 
@@ -209,7 +210,9 @@ def print_plan_header(
     otherwise assume was not the case.
 
     ``executor`` is ``select_executor``'s record: which executor runs and, if
-    ``batched`` was asked for and cannot run, why.
+    ``batched`` was asked for and cannot run, why. ``config_path`` is the file
+    the config was loaded from: an output directory or name that differs from
+    what that path would infer says so (``_marked``).
     """
 
     if _is_quiet(config):
@@ -220,7 +223,7 @@ def print_plan_header(
     blocks: list[tuple[str | None, list[Row]]] = [
         (
             None,
-            _identity_rows(config, resume_from, deterministic, deterministic_warn_only)
+            _identity_rows(config, resume_from, deterministic, deterministic_warn_only, config_path)
             + _executor_rows(executor),
         ),
         ("data", _data_rows(config, client_count)),
@@ -295,13 +298,21 @@ def _identity_rows(
     resume_from: str | Path | None,
     deterministic: bool,
     deterministic_warn_only: bool,
+    config_path: str | Path | None = None,
 ) -> list[Row]:
     experiment = config.experiment
     runtime_extra = config.runtime.extra
-    rows = [Row("Experiment", _marked(config, "experiment.name", experiment.name or "(unnamed)"))]
+    rows = [
+        Row(
+            "Experiment",
+            _marked(config, "experiment.name", experiment.name or "(unnamed)", config_path),
+        )
+    ]
     if experiment.run_id:
         rows.append(Row("Run", str(experiment.run_id)))
-    rows.append(Row("Output", _marked(config, "experiment.output_dir", experiment.output_dir)))
+    rows.append(
+        Row("Output", _marked(config, "experiment.output_dir", experiment.output_dir, config_path))
+    )
     note = _output_dir_note(config, resume_from)
     if note is not None:
         # Its own row rather than a trailing note on the one above: an output
@@ -348,11 +359,37 @@ def _identity_rows(
     return rows
 
 
-def _marked(config: FullConfig, key: str, value: object) -> str:
-    """``value``, with where it came from when the loader inferred it."""
+def _marked(
+    config: FullConfig, key: str, value: object, config_path: str | Path | None = None
+) -> str:
+    """``value``, with where it came from when the loader inferred it.
+
+    And, for an output directory or name the config states, what it overrides
+    when it differs from what the config's path would have inferred: a stated
+    value is kept rather than refused, so the header is where the difference
+    is visible. Compared before ``use_run_subdir``'s run directory is added.
+    """
 
     source = config.inferred.get(key)
-    return str(value) if source is None else f"{value} (inferred from {source})"
+    if source is not None:
+        return f"{value} (inferred from {source})"
+    if config_path is None:
+        return str(value)
+    from fedbrew.core.inferred import inferred_name, inferred_output_dir
+
+    path = Path(config_path)
+    stated = str(value)
+    if key == "experiment.output_dir":
+        inferred = inferred_output_dir(path)
+        if config.experiment.use_run_subdir:
+            stated = str(Path(stated).parent)
+    elif key == "experiment.name":
+        inferred = inferred_name(path)
+    else:
+        inferred = None
+    if inferred is None or Path(stated) == Path(inferred):
+        return str(value)
+    return f"{value} (overrides the inferred {inferred})"
 
 
 def _data_rows(config: FullConfig, client_count: int | None) -> list[Row]:

@@ -427,8 +427,8 @@ Four keys may be left out, because the loader can find them out
 | Key | Inferred from | When stated |
 | --- | --- | --- |
 | `model.input_dim`, `model.num_classes` | the manifest's own `input_dim` and `num_classes`, for a model registered as sized by that key (`models.register(..., shape_keys=)`: `mlp` both, `cnn`, `small_cnn`, `femnist_resnet18` and `openimage_shufflenet` `num_classes`, the four vector examples `input_dim`) | checked against the manifest at load, and refused if they disagree |
-| `experiment.output_dir` | `outputs/<the config's path under its nearest configs/ directory, without .yaml>`; required outside a `configs/` directory | kept: 13 shipped configs write to a directory of their own |
-| `experiment.name` | `<directory>-<file stem>` for a config in a directory under `configs/`, the file stem otherwise | kept; `tests/test_shipped_config_explicitness.py` refuses a stated name equal to the inferred one |
+| `experiment.output_dir` | `outputs/<the config's path under its nearest configs/ directory, without .yaml>`; required outside a `configs/` directory | kept as an override, and the plan header says `(overrides the inferred <value>)` where it differs: 13 shipped configs write to a directory of their own |
+| `experiment.name` | `<directory>-<file stem>` for a config in a directory under `configs/`, the file stem otherwise | kept as an override, marked in the plan header the same way; `tests/test_shipped_config_explicitness.py` refuses a stated name equal to the inferred one |
 
 An inferred value is written into the resolved config like a stated one, so
 `run.json` records it, and `config.inferred` there names each inferred key and

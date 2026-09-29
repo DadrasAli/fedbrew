@@ -156,6 +156,55 @@ class FromTheConfigPathTest(_Directory):
         self.assertEqual(rows["Experiment"], "study-arm (inferred from the config path)")
         self.assertEqual(rows["Output"], "outputs/study/arm (inferred from the config path)")
 
+    def test_a_stated_value_that_differs_says_what_it_overrides(self) -> None:
+        from fedbrew.core.logging import _identity_rows
+
+        def state(raw: dict[str, Any]) -> None:
+            raw["experiment"]["output_dir"] = "outputs/elsewhere"
+            raw["experiment"]["name"] = "my-run"
+
+        path = _write(self.root / "configs" / "study" / "arm.yaml", state)
+        rows = {
+            row.label: row.value
+            for row in _identity_rows(load_config(path), None, False, False, path)
+        }
+        self.assertEqual(rows["Experiment"], "my-run (overrides the inferred study-arm)")
+        self.assertEqual(
+            rows["Output"], "outputs/elsewhere (overrides the inferred outputs/study/arm)"
+        )
+
+    def test_a_stated_value_that_agrees_says_nothing(self) -> None:
+        from fedbrew.core.logging import _identity_rows
+
+        def state(raw: dict[str, Any]) -> None:
+            raw["experiment"]["output_dir"] = "outputs/study/arm"
+            raw["experiment"]["name"] = "study-arm"
+
+        path = _write(self.root / "configs" / "study" / "arm.yaml", state)
+        rows = {
+            row.label: row.value
+            for row in _identity_rows(load_config(path), None, False, False, path)
+        }
+        self.assertEqual(rows["Experiment"], "study-arm")
+        self.assertEqual(rows["Output"], "outputs/study/arm")
+
+    def test_the_run_directory_is_not_an_override(self) -> None:
+        """use_run_subdir adds the run's own directory below the stated one."""
+
+        from dataclasses import replace
+
+        from fedbrew.core.logging import _identity_rows
+
+        def state(raw: dict[str, Any]) -> None:
+            raw["experiment"]["output_dir"] = "outputs/study/arm"
+            raw["experiment"]["use_run_subdir"] = True
+
+        path = _write(self.root / "configs" / "study" / "arm.yaml", state)
+        config = load_config(path)
+        config.experiment = replace(config.experiment, output_dir="outputs/study/arm/run-1")
+        rows = {row.label: row.value for row in _identity_rows(config, None, False, False, path)}
+        self.assertEqual(rows["Output"], "outputs/study/arm/run-1")
+
     def test_a_config_may_not_write_the_record(self) -> None:
         def write(raw: dict[str, Any]) -> None:
             raw["inferred"] = {"experiment.name": "by hand"}
@@ -212,6 +261,10 @@ class FromTheManifestTest(_Directory):
             load_config(self._config({"name": "mlp", "hidden_dim": 8, "num_classes": 3}))
 
     def test_a_model_not_sized_by_a_key_gets_nothing_for_it(self) -> None:
+        # Registered first: registering the built-ins inside load_config would
+        # write mlp's real shape keys over the patch, so run on its own this
+        # test failed while it passed after any test that had registered them.
+        registry.register_builtin_components()
         with mock.patch.dict(registry.MODEL_SHAPE_KEYS, {"mlp": ("num_classes",)}):
             config = load_config(self._config({"name": "mlp", "hidden_dim": 8}))
         self.assertIsNone(config.model.input_dim)

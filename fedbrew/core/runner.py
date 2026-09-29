@@ -155,6 +155,7 @@ def run(
         client_count=roster,
         resume_from=config.runtime.extra.get("resume_from"),
         executor=run_metadata["executor"],
+        config_path=common_path,
     )
     # One object, both halves of the run surface. The live footer and the
     # settled block report the same rate and the same estimate because they
@@ -1219,6 +1220,7 @@ def _run_preflight(args: argparse.Namespace) -> bool:
             deterministic=config.numerics.deterministic,
             deterministic_warn_only=config.numerics.deterministic_warn_only,
             surface=surface,
+            config_path=args.config,
         )
     print_validation_verdict(report, surface)
     return bool(report.num_errors)
