@@ -60,7 +60,10 @@ def config_paths(setting: str, arm: str | None) -> list[Path]:
     directory = REPO_ROOT / "configs" / "examples" / setting
     if not directory.is_dir():
         raise SystemExit(f"no such setting: {setting} ({directory} does not exist)")
-    available = {path.stem: path for path in directory.glob("*.yaml")}
+    # Not the family base (_base.yaml), which every arm extends and is not run.
+    available = {
+        path.stem: path for path in directory.glob("*.yaml") if not path.name.startswith("_")
+    }
     if arm is not None:
         if arm not in available:
             raise SystemExit(f"unknown arm {arm!r}; {setting} has: {', '.join(sorted(available))}")

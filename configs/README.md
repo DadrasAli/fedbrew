@@ -8,6 +8,13 @@ One directory per dataset; one file per method. The path is the experiment:
 `configs/femnist/fedprox.yaml` is FedProx on FEMNIST. Nothing else in the
 filename, because the directory already says which dataset it is.
 
+`femnist/` and each directory under `examples/` also hold a `_base.yaml`: the
+keys every arm of that family shares, written once. An arm file names it under
+`extends:` and states only its own keys -- the rule, its rates, its tags -- so
+an arm file is not the whole run. `fedbrew config show configs/femnist/fedprox.yaml`
+prints one resolved, and `run.json` records it. A family base is not a run
+config and is refused by `fedbrew run`; chapter 04 §2.2 has the rules.
+
 ```
 femnist/     fedavg  fedavg_ft  fedprox  scaffold  delta_sgd  fedlalr
              fedadam  fedyogi  fedadagrad  centralized
@@ -38,8 +45,9 @@ except `openimage/`: there is no `openimage` generator, and its manifest has to
 be produced outside this repository from FedScale's OpenImage partition. The
 config says so, at the line naming the manifest. The SLURM
 sweep scripts in `SLURMs/` read one of these as their base and write the
-per-arm variants to `data/generated/slurm_configs/`, so a hyperparameter change
-that should apply to every arm belongs in the base file here.
+per-arm variants, resolved, to `data/generated/slurm_configs/`, so a
+hyperparameter change that should apply to every arm belongs in the base file
+here -- or, for a family, in its `_base.yaml`.
 
 ## The other three directories
 

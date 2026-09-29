@@ -52,7 +52,7 @@ import pytest
 import yaml
 
 from fedbrew.core import factory as factory_module
-from fedbrew.core.config import load_config
+from fedbrew.core.config import load_config, standalone_config_mapping
 from fedbrew.core.factory import (
     AMP_AWARE_TASKS,
     EXTENSION_TASK_KEYS,
@@ -73,7 +73,7 @@ def _load_without_data(path: str | Path) -> Any:
     preflight finds generated data whatever ``data/generated`` holds.
     """
 
-    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    raw = standalone_config_mapping(path)
     with tempfile.TemporaryDirectory() as directory:
         if isinstance(raw.get("data"), dict) and raw["data"].get("path"):
             raw["data"]["path"] = str(Path(directory) / "absent" / "manifest.json")

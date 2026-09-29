@@ -40,7 +40,7 @@ import yaml
 
 from fedbrew.clients.torch_sgd_client import TorchSGDClient
 from fedbrew.core import loop
-from fedbrew.core.config import evaluates_round
+from fedbrew.core.config import evaluates_round, standalone_config_mapping
 from fedbrew.core.refusal import RunRefused
 from fedbrew.core.runner import run
 from fedbrew.servers.fedavg import FedAvgServer
@@ -223,8 +223,8 @@ class ASkippedRoundCountsWithoutEvaluatingTest(_TempRoot):
                 generator_path.write_text(yaml.safe_dump(generator), encoding="utf-8")
                 manifest = generate_from_config(generator_path)
 
-                config = yaml.safe_load(
-                    (REPO_ROOT / "configs" / "examples" / name / "fedavg.yaml").read_text()
+                config = standalone_config_mapping(
+                    REPO_ROOT / "configs" / "examples" / name / "fedavg.yaml"
                 )
                 config["experiment"]["output_dir"] = str(self.root / "runs" / name)
                 config["data"]["path"] = str(manifest)

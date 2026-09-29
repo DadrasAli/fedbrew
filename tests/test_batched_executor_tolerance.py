@@ -45,6 +45,7 @@ import torch
 import yaml
 
 from fedbrew.core.checkpointing import load_checkpoint
+from fedbrew.core.config import standalone_config_mapping
 from fedbrew.core.runner import run
 from fedbrew.data.manifest_dataset import ManifestFederatedDataset
 from tests.test_reproducibility import TIMING
@@ -87,7 +88,7 @@ def example_manifest(name: str) -> Path:
 def example_config(name: str, arm: str = "fedavg") -> dict[str, Any]:
     """A shipped arm of a linear example, on this process's data, checkpointing every round."""
 
-    config = yaml.safe_load((REPO_ROOT / "configs" / "examples" / name / f"{arm}.yaml").read_text())
+    config = standalone_config_mapping(REPO_ROOT / "configs" / "examples" / name / f"{arm}.yaml")
     config["data"]["path"] = str(example_manifest(name))
     config["defaults"]["global_rounds"] = ROUNDS
     config["runtime"]["quiet"] = True

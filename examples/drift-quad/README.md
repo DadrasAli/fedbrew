@@ -58,8 +58,8 @@ fedbrew run --config configs/examples/drift-quad/scaffold.yaml --validate-only
 
 The problem is defined outside the package, in
 [`problem.py`](problem.py), and reaches the CLI because each config names it:
-`dataset.extensions` in the generator config, `experiment.extensions` in every
-arm config. Chapter 12 is the general form; this example is its worked case.
+`dataset.extensions` in the generator config, `experiment.extensions` in the family base every
+arm config extends. Chapter 12 is the general form; this example is its worked case.
 
 The two dials each have their own generator config, because a dial changes the
 data rather than the run:
@@ -380,7 +380,7 @@ composed a run config in Python and called `fedbrew.core.runner.run` directly
 and writing a `materialised_config.yaml` no other run in the repository has.
 
 A config now names the components it is built from. `experiment.extensions`
-in an arm config and `dataset.extensions` in the generator config each name
+in the family base an arm config extends and `dataset.extensions` in the generator config each name
 [`problem.py`](problem.py); the loader imports it and calls its `register()`
 before any name in the config is looked up. `run.json` records the file's
 SHA-256 beside the commit, and the plan header prints an amber `Extensions`

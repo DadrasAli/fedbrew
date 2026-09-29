@@ -181,6 +181,7 @@ _LABELLED_BLOCK = re.compile(r"^```(\w+) +(\S+)\n(.*?)^```", re.MULTILINE | re.D
 QUOTED_FILES = (
     "examples/drift-quad/problem.py",
     "data/configs/examples/drift-quad.yaml",
+    "configs/examples/drift-quad/_base.yaml",
     "configs/examples/drift-quad/fedavg.yaml",
 )
 

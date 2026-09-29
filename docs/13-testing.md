@@ -305,7 +305,7 @@ And two predate the set and set its pattern:
 
 | Guard | Protects |
 | --- | --- |
-| `tests/test_shipped_config_explicitness.py` | every shipped config states the settings that change the numbers |
+| `tests/test_shipped_config_explicitness.py` | every shipped config states the settings that change the numbers, in the file or in the family base it extends |
 | `tests/test_matmul_precision.py` | the value check, and that chapter 10 keeps saying the setting changes results |
 
 ## 5. Writing a documentation guard

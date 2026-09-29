@@ -1,7 +1,6 @@
+extends: _base.yaml
+
 experiment:
-  seed: 42
-  output_dir: outputs/femnist/fedavg_ft
-  use_run_subdir: false
   tags:
     - femnist
     - natural_non_iid
@@ -24,11 +23,9 @@ experiment:
 # fine-tuned at every evaluation whether or not it ever trained.
 server:
   strategy: fedavg
-
   # Example-weighted, matching the fedavg/fedprox/scaffold arms. NOT uniform:
   # this arm exists to be compared with them.
   participation_rate: 0.01
-
   metrics:
     - fit_loss
     - fit_accuracy
@@ -37,7 +34,6 @@ server:
 
 client:
   update_rule: fedavg_ft
-
   # Identical to the fedavg sweep's operating point so the two arms differ in
   # evaluation only. The sweep overrides batch_size / learning_rate /
   # local_iterations per run.
@@ -50,7 +46,6 @@ client:
   momentum: 0.0
   weight_decay: 0.0
   nesterov: false
-
   # How many chained local epochs of SGD to run on the client's own TRAIN
   # split before the personalized measurement. This is the arm's only new
   # hyperparameter and the only thing the sweep varies beyond the fedavg grid.
@@ -59,59 +54,24 @@ client:
   # val or test and then reporting a score there would be leakage, not a weak
   # baseline. See clients/fedavg_ft_client.py.
   finetune_epochs: 1
-
   # null means fine-tuning inherits client.learning_rate, which is the
   # conventional default for this baseline. Set a number to decouple the two.
   finetune_learning_rate: null
-
   metrics:
     - fit_loss
     - fit_accuracy
     - optimizer_steps
     - client_learning_rate
 
-data:
-  path: data/generated/femnist_natural/manifest.json
-
-model:
-  name: femnist_resnet18
-  input_channels: 1
-  base_channels: 32
-  blocks_per_stage: [2, 2, 2, 2]
-  group_norm_groups: 8
-  dropout: 0.1
-  num_classes: 62
-
 runtime:
-  deterministic: true
-  # Strict: raise on a nondeterministic kernel rather than warn once on
-  # stderr. Every CUDA kernel this model uses is deterministic on this stack
-  # (measured on an A100-40GB with torch 2.5.1 and CUDA 11.8, August 2026), so
-  # this costs nothing and catches a future op that is not.
-  deterministic_warn_only: false
-  device: auto
-  use_amp: false
   checkpointing:
-    enabled: true
-    interval: 100000
-    save_last: true
-    save_best: true
     # Selected on the PERSONALIZED validation metric, not the global one.
     # best.pt still stores the global model -- the fine-tuned copies are
     # transient -- so this picks the global model that personalizes best,
     # which is what this arm is for. Legal only because model_scope below
     # produces the personal pass; validation rejects the mismatch.
     best_metric: personal_val_accuracy_sample_weighted_avg
-    keep_last: 0
-    save_every_round: false
   performance:
-    # NOT throughput-only: TF32 (10 stored mantissa bits) or a bfloat16 pair
-    # (~16) instead of fp32's 24, in every matmul of every pass. Keep it
-    # identical across every arm of a comparison; a run at "highest" is not
-    # like-for-like with these. See docs/10-reproducibility.md.
-    matmul_precision: high
-    cudnn_benchmark: false
-    precision: reference
     # The three below are throughput-only and do not change results.
     # See docs/10-reproducibility.md.
     #
@@ -121,11 +81,7 @@ runtime:
     # model first and only then fine-tunes in place, which is why both columns
     # stay honest. Do not reorder that.
     reuse_model: true
-    fast_batching: true
     shard_cache_bytes: 4294967296
-    dataloader:
-      num_workers: 0
-      pin_memory: true
 
 evaluation:
   # global | personal | both. "both" writes the two column families side by
@@ -134,7 +90,6 @@ evaluation:
   # makes the personalization gain readable in one CSV. It costs two
   # evaluation passes plus the fine-tuning between them.
   model_scope: both
-
   # One block per split. `every` is in rounds and always pins both endpoints:
   # round 1 and the final round, plus every multiple in between -- every: 10
   # gives 1, 10, 20, ..., final. `clients` is all | participating |
@@ -180,7 +135,6 @@ evaluation:
     every: 10
     clients: participating
   val:
-    every: 5
     # sample:N, not resample:N. One draw for the whole run, deterministic from
     # experiment.seed and stable across a resume without being checkpointed,
     # so a round-over-round change in the metric can only come from the model.
@@ -210,8 +164,6 @@ evaluation:
   # no single owner, so there is no personalized counterpart to it.
   test:
     every: never
-  central_test:
-    every: 10
 
 client_statistics:
   # The aggregated personal_val_* columns below already carry the cross-client
@@ -219,38 +171,20 @@ client_statistics:
   # result is judged on. The per-client CSV is left off: its schema has
   # global-model columns only, so it would record just the global side.
   per_client_csv: false
-  std: true
-  variance: false
-  min: true
-  max: true
-  worst_percent: 10
 
-# Stop an arm that is no longer learning and record why. A stopped run exits
-# SUCCESSFULLY with status "diverged"/"stalled" in run.json and
-# runs_index.jsonl -- never non-zero, so a packed job cannot mistake it for a
-# crash. Grep the sweep afterwards with:
-#   jq -r 'select(.status!="completed")|[.status,.stopped_round,.run_id]|@tsv' \
-#     outputs/runs_index.jsonl
 divergence:
-
   # fit_loss is the global model's local training loss, produced every round.
   # It is unaffected by fine-tuning, so this detector measures exactly what it
   # measures on the fedavg arm.
   metric: fit_loss
-
-  non_finite: true
-  blowup_factor: 10.0
-
   # FEMNIST has 62 classes, so random-guess cross-entropy is ln(62) = 4.13 and
   # 41.3 is an order of magnitude worse than random. This is NOT the 23.0 used
   # on MNIST: that number is 10x ln(10) and would sit below FEMNIST's own
   # useful loss range.
   blowup_absolute: 41.3
-
   # Off: it is the only detector that can be wrong. A run can sit flat for a
   # long time and then improve, and a false stop would look like a result.
   patience: null
-  min_delta: 0.0
 
 defaults:
   global_rounds: 500

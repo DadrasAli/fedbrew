@@ -16,7 +16,7 @@ import unittest
 
 import pytest
 
-from fedbrew.core.config import load_config, validate_config
+from fedbrew.core.config import is_family_base, load_config, validate_config
 from fedbrew.core.factory import _dataloader_config
 from fedbrew.core.runner import apply_cli_overrides
 
@@ -161,7 +161,7 @@ class ShippedConfigTest(unittest.TestCase):
             with self.subTest(config=path):
                 # load_config raises on the removed key, so loading every
                 # shipped config is the assertion.
-                if path.startswith("configs/llm_assets/"):
+                if path.startswith("configs/llm_assets/") or is_family_base(path):
                     continue
                 load_config(path)
 

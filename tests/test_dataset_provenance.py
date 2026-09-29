@@ -32,13 +32,18 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
-from fedbrew.core.config import load_config
+from fedbrew.core.config import is_family_base, load_config
 from fedbrew.core.run_metadata import _DATASET_PROVENANCE_KEYS, build_dataset_provenance
 from fedbrew.data.femnist import generate_femnist_from_config
 from tests.test_femnist_support import _SPLITS, _fake_femnist_source, _generator_config
 
-FEMNIST_CONFIGS = sorted(glob.glob("configs/femnist/*.yaml"))
+FEMNIST_CONFIGS = sorted(
+    path for path in glob.glob("configs/femnist/*.yaml") if not is_family_base(path)
+)
+#: What every FEMNIST arm shares, the data block and its comments among it.
+FEMNIST_BASE = "configs/femnist/_base.yaml"
 
 
 def _generated_femnist(directory: Path) -> Path:
@@ -258,31 +263,34 @@ class TheFemnistConfigsDescribeTheGeneratorTest(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls._directory.cleanup()
 
-    def test_there_are_ten_of_them(self) -> None:
-        self.assertEqual(len(FEMNIST_CONFIGS), 10, "the comment lives in every FEMNIST config")
+    def test_there_are_ten_of_them_and_each_extends_the_base(self) -> None:
+        """The comment lives in the family base, so every arm must read it from there."""
 
-    def test_each_states_the_shard_format_the_generator_writes(self) -> None:
+        self.assertEqual(len(FEMNIST_CONFIGS), 10)
+        for path in FEMNIST_CONFIGS:
+            with self.subTest(path=path):
+                raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+                self.assertEqual(raw.get("extends"), "_base.yaml")
+                self.assertNotIn("data", raw, "an arm restating data would bypass the comment")
+
+    def test_the_base_states_the_shard_format_the_generator_writes(self) -> None:
         shard_format = self.manifest["client_shard_format"]
-        for path in FEMNIST_CONFIGS:
-            with self.subTest(path=path):
-                text = Path(path).read_text(encoding="utf-8")
-                self.assertIn(
-                    f"client_shard_format {shard_format}",
-                    text,
-                    f"{path} does not say the shards are {shard_format}",
-                )
+        text = Path(FEMNIST_BASE).read_text(encoding="utf-8")
+        self.assertIn(
+            f"client_shard_format {shard_format}",
+            text,
+            f"{FEMNIST_BASE} does not say the shards are {shard_format}",
+        )
 
-    def test_each_states_where_the_pooled_test_set_comes_from(self) -> None:
+    def test_the_base_states_where_the_pooled_test_set_comes_from(self) -> None:
         source = self.manifest["client_test_source"]
-        for path in FEMNIST_CONFIGS:
-            with self.subTest(path=path):
-                text = Path(path).read_text(encoding="utf-8")
-                self.assertIn(f"client_test_source: {source}", text)
+        text = Path(FEMNIST_BASE).read_text(encoding="utf-8")
+        self.assertIn(f"client_test_source: {source}", text)
 
     def test_none_of_them_still_calls_the_pool_the_eval_slice(self) -> None:
         """The specific false sentence, so it cannot come back by copy-paste."""
 
-        for path in FEMNIST_CONFIGS:
+        for path in [*FEMNIST_CONFIGS, FEMNIST_BASE]:
             with self.subTest(path=path):
                 text = Path(path).read_text(encoding="utf-8")
                 self.assertNotIn("concatenation of every\n  # client's eval slice", text)

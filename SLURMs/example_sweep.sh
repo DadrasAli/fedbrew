@@ -133,7 +133,9 @@ submitted=0
             # the ones that do as flags below. A sed pattern that stops matching
             # after a schema change fails silently, so keep this list short and
             # prefer a flag wherever one exists.
-            cp "${base_config}" "${exp_config}"
+            # The base resolved, not copied: an arm that extends a family base
+            # holds only its own keys, and a copy elsewhere would lose the rest.
+            fedbrew config show "${base_config}" > "${exp_config}"
             sed -i "s/^  batch_size:.*/  batch_size: ${bs}/"                 "${exp_config}"
             sed -i "s/^  learning_rate:.*/  learning_rate: ${lr}/"           "${exp_config}"
             sed -i "s/^  participation_rate:.*/  participation_rate: ${pr}/" "${exp_config}"

@@ -16,7 +16,7 @@ release, and `run.json` records the resolved config a run actually used.
 
 ```
 configs/<arm>.yaml
-  -> yaml.safe_load
+  -> load_config_mapping         yaml.safe_load, its extends chain laid under it (§2.2)
   -> _reject_restated_keys        removed keys fail by name, with the reason
   -> infer_experiment            output_dir and name from the config path, if unset
   -> dataclass split (_split_extra)  named fields bind; everything else -> extra
@@ -83,7 +83,8 @@ The last three have complete dataclass defaults, so a config may omit them
 entirely. The first six have required fields and cannot be omitted.
 
 The root is closed like every block. A top-level key that is none of these
-ten, and not `server_config` or `client_config` below, is refused at load,
+ten, and not `extends` (§2.2) or `server_config` or `client_config` below, is
+refused at load,
 before anything is built: the message names the key, suggests the closest
 block, and lists every key the root accepts (`root_config_keys`,
 `fedbrew/core/config.py`). Before this, `evaluaton:` loaded and the run took
@@ -163,6 +164,44 @@ wrong under `single_batch` and "updates" is wrong under `sequential_epoch`. A
 config that still writes `defaults.local_epochs` or `client.local_epochs` is
 refused (§10), and so is a checkpoint whose client states carry
 `local_epochs` (chapter 09 §5).
+
+
+### 2.2 `extends` and family bases
+
+A config may name another file under `extends:`, a path relative to its own
+directory. The loader reads that file first and lays this one over it
+(`load_config_mapping`, `fedbrew/core/config.py`): a mapping is merged key by
+key, and anything else -- a scalar, a list, `null` -- replaces the base's value
+whole. The base may itself extend another file; a chain that loops back is
+refused, and so is a base that is not there. Everything after that sees the
+merged mapping, as if it had been written in one file: removed and unknown
+keys are refused under the arm's name, validation runs on the whole, the path
+inferences of §6.1 read the arm's own path, and `run.json` records the run
+entire.
+
+A file whose name starts with `_` is a **family base**: the keys every arm of
+a family shares. It is not a run config -- it lacks what makes an arm one --
+so `fedbrew run` refuses it by name, and every listing of the shipped run
+configs skips it (`is_family_base`). `configs/femnist/` and nine of the
+directories under `configs/examples/` hold one `_base.yaml` each: the keys all
+of the directory's arms state with the same value. An arm file keeps the rest
+-- its rule, its rates, its tags, and a shared key it explains in a comment of
+its own -- so it holds 4 to 15 keys where it held about 60 (FEMNIST's, 14 to
+32). `examples/fed-lasso-smooth/fedavg.yaml`, the one arm in its directory,
+extends `examples/fed-lasso/_base.yaml` and states what differs from it.
+
+An arm file therefore no longer shows the whole run. `fedbrew config show
+<config>` prints it resolved: the chain merged and the inferred values filled
+in and marked, as one flat file that is itself a config -- written at the
+arm's place under `configs/`, it loads to the same run. The SLURM example
+sweeps write their per-point configs from it.
+
+The rules that were "every shipped config states X" -- the numerics settings,
+the run-metadata header, and the agreement of a family's arms on `save_best`
+-- are asserted on the resolved mapping, so a setting written once in a family
+base counts for every arm that extends it
+(`tests/test_shipped_config_explicitness.py`,
+`tests/test_comparison_arms_agree_on_save_best.py`).
 
 ## 3. `experiment`
 
@@ -787,7 +826,8 @@ python -m pytest tests/test_unknown_config_keys.py \
 4. **The absent-block checkpoint defaults are the opposite of the per-key
    ones.** Any change to one set must state what happens to the other.
 5. **`matmul_precision` and `deterministic` must be explicit in every shipped
-   config.** Guarded; a new config omitting either fails.
+   config, resolved.** Written in the config or in the family base it extends
+   (§2.2). Guarded; a new config omitting either fails.
 6. **`cudnn_benchmark` is ignored under `deterministic: true`.** Do not
    document it as an unconditional switch.
 7. **Validation runs twice** — before and after CLI overrides — so an override
@@ -801,6 +841,7 @@ python -m pytest tests/test_unknown_config_keys.py \
 | `tests/test_unknown_config_keys.py` | An unread key fails at load, in every block and at the root, through `load_config`, `fedbrew run` and `--validate-only`. |
 | `tests/test_preflight_runs_only_under_validate_only.py` | §1: an ordinary `fedbrew run` calls `validate_config` and never the ten-area preflight; `--validate-only` calls both and trains nothing; the ten areas are the ones §1 names. |
 | `tests/test_shipped_config_explicitness.py` | `matmul_precision` and `deterministic` are stated by every shipped config. |
+| `tests/test_config_extends.py` | §2.2: how `extends` merges, what it refuses, that a family base is not a run config, and that `fedbrew config show` prints a config that loads to the same run. |
 | `tests/test_shipped_configs_resolve_as_recorded.py` | Every shipped run config resolves to the `FullConfig` and planned columns recorded before the config was reshaped, except for keys marked inferred. |
 | `tests/test_inferred_config_values.py` | §6.1: each inferred key is filled, marked, and checked when stated; §5.1: `nesterov`, `min_learning_rate` and `frozen_gradient_weighting` are required only where they act. |
 | `tests/test_evaluation_schedule.py` | The `every` grammar, including `final` and `never`. |

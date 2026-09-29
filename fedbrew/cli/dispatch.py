@@ -20,6 +20,10 @@ COMMANDS: dict[str, tuple[str, str]] = {
         "Run several configs; those differing only in numeric hyperparameters run as one group.",
     ),
     "generate": ("fedbrew.data.generate", "Generate federated data manifests."),
+    "config": (
+        "fedbrew.cli.show_config",
+        "Print a run config resolved: its extends chain merged and inferred values filled.",
+    ),
     "report": ("fedbrew.cli.make_report", "Create fedbrew Markdown reports."),
     "inspect-data": (
         "fedbrew.cli.inspect_generated_data",

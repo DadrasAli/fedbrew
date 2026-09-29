@@ -35,8 +35,8 @@ fedbrew run --config configs/examples/pl-1d/scaffold.yaml --validate-only
 
 The problem is defined outside the package, in
 [`problem.py`](problem.py), and reaches the CLI because each config names it:
-`dataset.extensions` in the generator config, `experiment.extensions` in every
-arm config. Chapter 12 is the general form; [`drift-quad`](../drift-quad/) is
+`dataset.extensions` in the generator config, `experiment.extensions` in the family base every
+arm config extends. Chapter 12 is the general form; [`drift-quad`](../drift-quad/) is
 its worked case, and this example is the same shape with fewer dials.
 
 `run.py` is a convenience over those commands and nothing more — it runs the
@@ -133,7 +133,7 @@ called `fedbrew.core.runner.run` directly — past `--validate-only`, past the
 plan header, past every load-time guard.
 
 A config now names the components it is built from. `experiment.extensions`
-in an arm config and `dataset.extensions` in the generator config each name
+in the family base an arm config extends and `dataset.extensions` in the generator config each name
 [`problem.py`](problem.py); the loader imports it and calls its `register()`
 before any name in the config is looked up. `run.json` records the file's
 SHA-256 beside the commit, and the plan header prints an amber `Extensions`

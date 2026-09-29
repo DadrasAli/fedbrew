@@ -10,11 +10,14 @@ says how, and on what data).
 
 Two differences are allowed, both declared here rather than taken on trust:
 
-- a key the loader marks as inferred (``FullConfig.inferred``). Its value
-  comes from the data or the path now, not the file; the one that differs is
-  ``experiment.name`` of the 26 configs that never stated one, which were
+- a key the loader marks as inferred (``FullConfig.inferred``), whose value
+  comes from the data or the path now, not the file -- and of those only the
+  keys in ``INFERRED_AND_CHANGED`` may hold another value than recorded. That
+  is ``experiment.name`` of the 26 configs that never stated one, which were
   named after their file (``fedavg``) and are named after their directory and
-  file now (``femnist-fedavg``), as the 71 that did state one already were;
+  file now (``femnist-fedavg``), as the 69 example arms that did state one
+  already were. Every other inferred value, the 79 inferred output
+  directories among them, must equal the one the file used to state;
 - a key a step moved, under ``MOVED``: compared at its new place against the
   value recorded at its old one.
 """
@@ -32,13 +35,18 @@ from tests.shipped_resolved_configs import RECORD, resolved, shipped_run_configs
 #: Resolved keys that moved, new place -> the place the record has them at.
 MOVED: dict[str, str] = {}
 
+#: Inferred keys whose inferred value may differ from the recorded one.
+INFERRED_AND_CHANGED = frozenset({"experiment.name"})
+
 
 def _differences(before: dict[str, Any], now: dict[str, Any]) -> list[str]:
     inferred = {key[len("inferred.") :] for key in now if key.startswith("inferred.")}
     moved_back = {MOVED.get(key, key): value for key, value in now.items()}
     differences = []
     for key in sorted(set(before) | set(moved_back)):
-        if key == "inferred" or key.startswith("inferred.") or key in inferred:
+        if key == "inferred" or key.startswith("inferred."):
+            continue
+        if key in inferred and key in INFERRED_AND_CHANGED:
             continue
         if key not in moved_back:
             differences.append(f"{key}: {before[key]!r} -> (gone)")
@@ -73,13 +81,25 @@ class EveryShippedConfigResolvesAsRecordedTest(unittest.TestCase):
     def test_the_allowance_is_only_what_was_inferred(self) -> None:
         """A difference on a key nobody marked inferred is reported, not waved through."""
 
-        before = {"experiment.name": "fedavg", "client.batch_size": 32}
+        before = {
+            "experiment.name": "fedavg",
+            "experiment.output_dir": "outputs/femnist/fedavg",
+            "client.batch_size": 32,
+        }
         now = {
             "experiment.name": "femnist-fedavg",
             "inferred.experiment.name": "the config path",
+            "experiment.output_dir": "outputs/femnist/other",
+            "inferred.experiment.output_dir": "the config path",
             "client.batch_size": 64,
         }
-        self.assertEqual(_differences(before, now), ["client.batch_size: 32 -> 64"])
+        self.assertEqual(
+            _differences(before, now),
+            [
+                "client.batch_size: 32 -> 64",
+                "experiment.output_dir: 'outputs/femnist/fedavg' -> 'outputs/femnist/other'",
+            ],
+        )
 
 
 if __name__ == "__main__":

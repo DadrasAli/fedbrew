@@ -37,7 +37,13 @@ from typing import Any
 import yaml
 
 from fedbrew.core import runner
-from fedbrew.core.config import FullConfig, load_config, parse_evaluation_schedule
+from fedbrew.core.config import (
+    FullConfig,
+    is_family_base,
+    load_config,
+    parse_evaluation_schedule,
+    standalone_config_mapping,
+)
 from fedbrew.core.logging import _planned_metric_names
 from fedbrew.data.generate import generate_from_config
 from tests.test_planned_columns_are_written import BOOKKEEPING
@@ -74,7 +80,7 @@ def _signature(config: FullConfig) -> tuple[Any, ...]:
 def _shipped_groups() -> dict[tuple[Any, ...], list[Path]]:
     groups: dict[tuple[Any, ...], list[Path]] = {}
     for path in sorted((REPO / "configs").rglob("*.yaml")):
-        if "llm_assets" in path.parts:
+        if "llm_assets" in path.parts or is_family_base(path):
             continue
         groups.setdefault(_signature(load_config(path)), []).append(path)
     return groups
@@ -142,7 +148,7 @@ class _Data:
 def _runnable(path: Path, data: _Data, output: Path) -> Path:
     """The shipped config at `path`, on cheap data, for one round."""
 
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw = standalone_config_mapping(path)
     config = load_config(path)
     raw["experiment"]["output_dir"] = str(output)
     raw["experiment"]["use_run_subdir"] = False

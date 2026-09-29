@@ -36,7 +36,12 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from fedbrew.clients.local_update_modes import run_delta_sgd_update_mode, run_sgd_update_mode
 from fedbrew.core import registry
-from fedbrew.core.config import NON_EXAMPLE_MEAN_TASKS, FullConfig, load_config
+from fedbrew.core.config import (
+    NON_EXAMPLE_MEAN_TASKS,
+    FullConfig,
+    load_config,
+    standalone_config_mapping,
+)
 from fedbrew.core.refusal import RunRefused
 from fedbrew.tasks.base import TaskAdapter, loss_averages_over_examples
 
@@ -171,7 +176,7 @@ class _TokenMeanTask(_LinearTask):
 
 
 def _load_with_mode(source: str, mode: str) -> FullConfig:
-    document = yaml.safe_load((REPO_ROOT / source).read_text(encoding="utf-8"))
+    document = standalone_config_mapping(REPO_ROOT / source)
     document["client"]["update_mode"] = mode
     with tempfile.TemporaryDirectory() as scratch:
         path = Path(scratch) / "config.yaml"

@@ -65,7 +65,11 @@ from fedbrew.clients.torch_fedlalr_client import TorchFedLALRClient
 from fedbrew.clients.torch_fedprox_client import TorchFedProxClient
 from fedbrew.clients.torch_scaffold_client import TorchScaffoldClient
 from fedbrew.clients.torch_sgd_client import TorchSGDClient
-from fedbrew.core.config import amp_unsupported_sgd_engine_setting, load_config
+from fedbrew.core.config import (
+    amp_unsupported_sgd_engine_setting,
+    load_config,
+    standalone_config_mapping,
+)
 from fedbrew.core.protocol import FitRequest
 from fedbrew.core.refusal import RunRefused
 from fedbrew.tasks.base import TaskAdapter
@@ -322,7 +326,7 @@ class EqualToFrozenWhereThatIsExactTest(unittest.TestCase):
 
 
 def _config_with(source: str, change: Callable[[dict[str, Any]], None]) -> Any:
-    document = yaml.safe_load((REPO_ROOT / source).read_text(encoding="utf-8"))
+    document = standalone_config_mapping(REPO_ROOT / source)
     change(document)
     with tempfile.TemporaryDirectory() as scratch:
         path = Path(scratch) / "config.yaml"

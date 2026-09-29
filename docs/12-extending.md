@@ -257,15 +257,21 @@ generator that `dataset.name` selects:
     - examples/drift-quad/problem.py
 ```
 
-Its eight arm configs name the same file, so `fedbrew run` can find the task
-and the model:
+Its eight arm configs extend one family base, which names the same file, so
+`fedbrew run` can find the task and the model:
 
-```yaml configs/examples/drift-quad/fedavg.yaml
+```yaml configs/examples/drift-quad/_base.yaml
   # The task, the model and the generator are defined outside the package.
   # Loaded before any name below is looked up; run.json records the file's
   # SHA-256 beside the commit.
   extensions:
     - examples/drift-quad/problem.py
+```
+
+and each arm names the base, then states only what makes it that arm:
+
+```yaml configs/examples/drift-quad/fedavg.yaml
+extends: _base.yaml
 ```
 
 And then it is an ordinary dataset and an ordinary set of runs:

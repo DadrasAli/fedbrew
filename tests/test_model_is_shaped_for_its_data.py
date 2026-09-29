@@ -33,7 +33,7 @@ from typing import Any
 import pytest
 import yaml
 
-from fedbrew.core.config import load_config
+from fedbrew.core.config import is_family_base, load_config, load_config_mapping
 from fedbrew.core.factory import (
     SHARED_SHAPE_FIELDS,
     _model_config,
@@ -68,7 +68,9 @@ def _run_configs() -> list[Path]:
 
     paths = []
     for path in sorted(Path("configs").rglob("*.yaml")):
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if is_family_base(path):
+            continue
+        loaded = load_config_mapping(path)
         if isinstance(loaded, dict) and "runtime" in loaded:
             paths.append(path)
     return paths

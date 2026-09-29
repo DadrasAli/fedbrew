@@ -441,11 +441,102 @@ def load_yaml(path: str | Path) -> dict[str, Any]:
     return cast(dict[str, Any], data)
 
 
+#: The one root key that is not a block: a family base file whose keys this
+#: config is laid over (``load_config_mapping``).
+EXTENDS_KEY = "extends"
+
+#: A config file whose name starts with this is a family base: the keys every
+#: arm of a family shares, which each arm names under ``extends``. It is not a
+#: run config -- it lacks what makes an arm one -- so ``load_config`` refuses
+#: it by name, and everything that lists the shipped run configs skips it
+#: (``is_family_base``).
+FAMILY_BASE_PREFIX = "_"
+
+
+def is_family_base(path: str | Path) -> bool:
+    """Whether ``path`` names a family base file rather than a run config."""
+
+    return Path(path).name.startswith(FAMILY_BASE_PREFIX)
+
+
+def load_config_mapping(path: str | Path) -> dict[str, Any]:
+    """The config at ``path`` as one mapping: its ``extends`` chain laid under it.
+
+    An arm file that writes ``extends: <file>`` holds only its own keys; the
+    rest are the named file's, which may itself extend another. The files are
+    merged from the base up: a mapping is merged key by key, anything else --
+    a scalar, a list, ``null`` -- replaces the base's value whole. The path is
+    resolved against the directory of the file that names it. What comes back
+    is what the config would be as one flat file, without ``extends``, and it
+    is what ``load_config`` checks and builds, so every refusal names keys as
+    if they had been written in the arm.
+    """
+
+    return _merged(Path(path), ())
+
+
+def standalone_config_mapping(path: str | Path) -> dict[str, Any]:
+    """The config at ``path`` as one mapping that loads the same from anywhere.
+
+    ``load_config_mapping`` with what the path supplies written in: the
+    ``output_dir`` and ``name`` the loader would infer from where the file
+    sits (fedbrew/core/inferred.py). A copy written elsewhere -- a test's
+    temporary directory, a sweep's generated point -- would otherwise lose
+    both, and ``extends`` besides.
+    """
+
+    from fedbrew.core.inferred import infer_experiment
+
+    mapping = load_config_mapping(path)
+    experiment = mapping.get("experiment")
+    if isinstance(experiment, Mapping):
+        experiment = dict(experiment)
+        infer_experiment(experiment, Path(path), {})
+        mapping["experiment"] = experiment
+    return mapping
+
+
+def _merged(path: Path, chain: tuple[Path, ...]) -> dict[str, Any]:
+    resolved = path.resolve()
+    if resolved in chain:
+        loop = " -> ".join(str(item) for item in (*chain, resolved))
+        raise RunRefused(f"{EXTENDS_KEY} loops back on itself: {loop}")
+    mapping = load_yaml(path)
+    base_name = mapping.pop(EXTENDS_KEY, None)
+    if base_name is None:
+        return mapping
+    if not isinstance(base_name, str) or not base_name.strip():
+        raise RunRefused(
+            f"{path}: {EXTENDS_KEY} must name one base file, relative to this one, "
+            f"got {base_name!r}"
+        )
+    base_path = path.parent / base_name
+    if not base_path.is_file():
+        raise RunRefused(f"{path}: {EXTENDS_KEY} names {base_path}, which does not exist")
+    return _laid_over(_merged(base_path, (*chain, resolved)), mapping)
+
+
+def _laid_over(base: Mapping[str, Any], over: Mapping[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in over.items():
+        below = merged.get(key)
+        if isinstance(value, Mapping) and isinstance(below, Mapping):
+            merged[key] = _laid_over(below, value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def load_config(common_path: str | Path) -> FullConfig:
     """Load and validate a complete benchmark configuration."""
 
     common_config_path = Path(common_path)
-    common = load_yaml(common_config_path)
+    if is_family_base(common_config_path):
+        raise RunRefused(
+            f"{common_config_path} is a family base, the keys a family's arms share, "
+            f"not a run config: run one of the arm files that name it under {EXTENDS_KEY}"
+        )
+    common = load_config_mapping(common_config_path)
     # First: a misspelled server or client block would otherwise be reported
     # as a missing one, which names the wrong problem.
     _refuse_unknown_root_keys(common)
@@ -1199,15 +1290,15 @@ _COMPONENT_PATH_KEYS: frozenset[str] = frozenset({"server_config", "client_confi
 def root_config_keys() -> frozenset[str]:
     """Every top-level key a run config may write.
 
-    The blocks ``FullConfig`` stores, less the removed ones, plus the blocks
-    read at load and never stored, plus the component-path spellings. Derived
-    rather than listed, so a block added to ``FullConfig`` is accepted here
-    without a second edit.
+    The blocks ``FullConfig`` stores, less the removed ones and the loader's
+    own record, plus the blocks read at load and never stored, the
+    component-path spellings, and ``extends``. Derived rather than listed, so
+    a block added to ``FullConfig`` is accepted here without a second edit.
     """
 
     stored = {field.name for field in fields(FullConfig)} - set(_REMOVED_BLOCKS)
     stored -= RESOLVED_ONLY_FIELDS
-    return frozenset(stored | _LOAD_TIME_BLOCKS | _COMPONENT_PATH_KEYS)
+    return frozenset(stored | _LOAD_TIME_BLOCKS | _COMPONENT_PATH_KEYS | {EXTENDS_KEY})
 
 
 def _refuse_unknown_root_keys(common: Mapping[str, Any]) -> None:

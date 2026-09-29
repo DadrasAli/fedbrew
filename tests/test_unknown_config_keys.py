@@ -42,7 +42,13 @@ import yaml
 
 from fedbrew.cli import dispatch
 from fedbrew.core import extensions, registry
-from fedbrew.core.config import DEFAULTS_KEYS, load_config, root_config_keys, validate_config
+from fedbrew.core.config import (
+    DEFAULTS_KEYS,
+    is_family_base,
+    load_config,
+    root_config_keys,
+    validate_config,
+)
 from fedbrew.core.extensions import load_extensions
 from fedbrew.data.generate import _extensions_of, _load_yaml, _validate_generator_keys
 from fedbrew.models.config_keys import reject_unknown_model_keys
@@ -119,7 +125,7 @@ class RunConfigTest(unittest.TestCase):
         paths = sorted(glob.glob("configs/**/*.yaml", recursive=True))
         self.assertGreater(len(paths), 20)
         for path in paths:
-            if "llm_assets" in path:  # asset fragments, not run configs
+            if "llm_assets" in path or is_family_base(path):  # not run configs
                 continue
             with self.subTest(path=path):
                 validate_config(load_config(path))
@@ -222,6 +228,7 @@ class RootKeysTest(unittest.TestCase):
                 "divergence",
                 "server_config",
                 "client_config",
+                "extends",
             },
         )
 
@@ -371,8 +378,9 @@ class RootKeysThroughTheCliTest(unittest.TestCase):
             for path in sorted(
                 [*Path("configs").rglob("*.yaml"), *Path("examples").rglob("*.yaml")]
             )
-            if isinstance(loaded := yaml.safe_load(path.read_text(encoding="utf-8")), dict)
-            and "server" in loaded
+            if not is_family_base(path)
+            and isinstance(loaded := yaml.safe_load(path.read_text(encoding="utf-8")), dict)
+            and ("server" in loaded or "extends" in loaded)
         ]
         self.assertGreaterEqual(len(paths), 97)
         for path in paths:

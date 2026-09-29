@@ -28,6 +28,8 @@ from typing import Any
 import pytest
 import yaml
 
+from fedbrew.core.config import is_family_base, load_config_mapping
+
 pytestmark = pytest.mark.fast
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -49,7 +51,10 @@ def _run_configs() -> list[tuple[Path, dict[str, Any]]]:
 
     configs = []
     for path in sorted(CONFIG_ROOT.rglob("*.yaml")):
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if is_family_base(path):
+            continue
+        # Resolved, extends merged: an arm's save_best is usually its base's.
+        loaded = load_config_mapping(path)
         if isinstance(loaded, dict) and "runtime" in loaded:
             configs.append((path.relative_to(REPO_ROOT), loaded))
     return configs

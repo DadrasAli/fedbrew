@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 
+from fedbrew.core.config import is_family_base, load_config_mapping
 from fedbrew.core.runtime_setup import _enable_torch_determinism, seed_everything
 
 CONFIG_ROOT = Path(__file__).resolve().parent.parent / "configs"
@@ -50,7 +50,10 @@ class _FakeTorch:
 def _run_configs() -> list[tuple[Path, dict]]:
     configs = []
     for path in sorted(CONFIG_ROOT.rglob("*.yaml")):
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if is_family_base(path):
+            continue
+        # Resolved, extends merged: an arm's runtime block is its base's.
+        loaded = load_config_mapping(path)
         if isinstance(loaded, dict) and "runtime" in loaded:
             configs.append((path, loaded))
     return configs

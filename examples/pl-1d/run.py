@@ -56,7 +56,10 @@ def config_paths(arm: str | None) -> list[Path]:
     """The arm configs to run, in the README's order."""
 
     directory = REPO_ROOT / "configs" / "examples" / SETTING
-    available = {path.stem: path for path in directory.glob("*.yaml")}
+    # Not the family base (_base.yaml), which every arm extends and is not run.
+    available = {
+        path.stem: path for path in directory.glob("*.yaml") if not path.name.startswith("_")
+    }
     if arm is not None:
         if arm not in available:
             raise SystemExit(f"unknown arm {arm!r}; {SETTING} has: {', '.join(sorted(available))}")

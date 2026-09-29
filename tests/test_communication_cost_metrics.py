@@ -27,8 +27,8 @@ import unittest
 from importlib import import_module
 
 import pytest
-import yaml
 
+from fedbrew.core.config import is_family_base, load_config_mapping
 from fedbrew.core.metrics import filter_metrics
 from fedbrew.core.registry import client_updates, register_builtin_components
 
@@ -94,8 +94,9 @@ def _measures_and_filters(client: type) -> bool:
 def _configs() -> list[tuple[str, dict]]:
     loaded = []
     for path in sorted(glob.glob("configs/**/*.yaml", recursive=True)):
-        with open(path, encoding="utf-8") as file:
-            document = yaml.safe_load(file)
+        if is_family_base(path):
+            continue
+        document = load_config_mapping(path)
         if isinstance(document, dict) and isinstance(document.get("client"), dict):
             loaded.append((path, document))
     return loaded

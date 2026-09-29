@@ -33,7 +33,7 @@ import pytest
 import yaml
 
 from fedbrew.core import extensions, registry
-from fedbrew.core.config import load_config
+from fedbrew.core.config import is_family_base, load_config, load_config_mapping
 from fedbrew.core.factory import build_components
 from fedbrew.core.validation import run_checks
 
@@ -79,7 +79,13 @@ def _generator_config(setting: str) -> dict:
 
 
 def _arm_paths(setting: str) -> list[Path]:
-    return sorted((REPO_ROOT / "configs" / "examples" / setting).glob("*.yaml"))
+    """The setting's arm configs: every YAML file but its family base."""
+
+    return _arms(REPO_ROOT / "configs" / "examples" / setting)
+
+
+def _arms(directory: Path) -> list[Path]:
+    return sorted(path for path in directory.glob("*.yaml") if not is_family_base(path))
 
 
 class ShippedConfigsTest(unittest.TestCase):
@@ -128,7 +134,7 @@ class ShippedConfigsTest(unittest.TestCase):
             problem = _generator_config(setting)["problem"]
             for path in _arm_paths(setting):
                 with self.subTest(config=str(path.relative_to(REPO_ROOT))):
-                    model = yaml.safe_load(path.read_text(encoding="utf-8"))["model"]
+                    model = load_config_mapping(path)["model"]
                     self.assertEqual(model["input_dim"], problem["dim"])
                     self.assertEqual(model["condition_number"], problem["condition_number"])
 
@@ -347,7 +353,7 @@ class EveryExampleIsAnExtensionTest(unittest.TestCase):
             for setting in settings:
                 directory = REPO_ROOT / "configs" / "examples" / setting
                 self.assertTrue(directory.is_dir(), f"{setting} ships no arm configs")
-                for path in sorted(directory.glob("*.yaml")):
+                for path in _arms(directory):
                     with self.subTest(config=str(path.relative_to(REPO_ROOT))):
                         config = load_config(path)
                         self.assertEqual(
@@ -376,8 +382,8 @@ class EveryExampleIsAnExtensionTest(unittest.TestCase):
         seen: dict[str, str] = {}
         for _, (_, _, settings) in EXAMPLES.items():
             for setting in settings:
-                for path in sorted((REPO_ROOT / "configs" / "examples" / setting).glob("*.yaml")):
-                    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+                for path in _arm_paths(setting):
+                    raw = load_config_mapping(path)
                     name = raw["experiment"].get("name") or inferred_name(path)
                     relative = str(path.relative_to(REPO_ROOT))
                     with self.subTest(config=relative):

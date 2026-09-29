@@ -24,6 +24,7 @@ import torch
 import yaml
 
 from fedbrew.core import runner
+from fedbrew.core.config import standalone_config_mapping
 from fedbrew.core.torch_utils import squared_l2_norm_model_state
 from fedbrew.data.generate import generate_from_config
 
@@ -68,8 +69,8 @@ class TheScaffoldArmThatOverflowedTest(unittest.TestCase):
             (root / "generator.yaml").write_text(yaml.safe_dump(generator))
             manifest = generate_from_config(root / "generator.yaml")
 
-            config = yaml.safe_load(
-                (REPO / "configs/examples/nonconvex-simplex/scaffold.yaml").read_text()
+            config = standalone_config_mapping(
+                REPO / "configs/examples/nonconvex-simplex/scaffold.yaml"
             )
             config["data"]["path"] = str(manifest)
             config["experiment"]["output_dir"] = str(root / "run")

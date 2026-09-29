@@ -19,12 +19,13 @@ from typing import Any
 
 import pytest
 import torch
-import yaml
 
 from fedbrew.core.config import (
     FEDOPT_STRATEGIES,
     fedopt_optimizer_name,
+    is_family_base,
     load_config,
+    load_config_mapping,
     validate_config,
 )
 from fedbrew.core.validation import validate_full_config
@@ -162,9 +163,12 @@ class TheConfigRefusesAPlaceholderTest(unittest.TestCase):
     def test_every_shipped_fedopt_config_sets_exactly_what_it_reads(self) -> None:
         seen = 0
         for path in sorted(Path("configs").rglob("*.yaml")):
-            # A run config is one with a runtime block; configs/llm_assets/
-            # holds asset-preparation configs, a different schema entirely.
-            loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+            # A run config is one with a runtime block, resolved; configs/llm_assets/
+            # holds asset-preparation configs, a different schema entirely, and a
+            # family base is not a run config.
+            if is_family_base(path):
+                continue
+            loaded = load_config_mapping(path)
             if not isinstance(loaded, dict) or "runtime" not in loaded:
                 continue
             config = load_config(str(path))

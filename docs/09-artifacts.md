@@ -631,7 +631,7 @@ python -m pytest tests/test_run_provenance.py \
 | --- | --- |
 | `tests/test_docs_artifacts.py` | The file list, `run.json` key set and fixed CSV schemas here match the writers. |
 | `tests/test_run_provenance.py` | The `reproducibility` blocks are recorded. |
-| `tests/test_dataset_provenance.py` | §3.4: a run records the manifest it read, and the FEMNIST configs describe the format the generator writes. |
+| `tests/test_dataset_provenance.py` | §3.4: a run records the manifest it read, and the FEMNIST family base, which every FEMNIST arm extends, describes the format the generator writes. |
 | `tests/test_runs_index_json_validity.py` | Every index line is valid JSON. |
 | `tests/test_run_json_resume_accounting.py` | `attempts`, `resumed`, `first_round` across attempts. |
 | `tests/test_run_json_is_written_after_each_round.py` | §2: no `run.json` exists before round 1 or after a run that fails inside it; it is rewritten with `status: "running"` after each completed round and replaced by the final record at the end. |

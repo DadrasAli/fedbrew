@@ -33,12 +33,18 @@ RECORD = Path(__file__).with_name("shipped_resolved_configs.json")
 
 
 def shipped_run_configs() -> list[Path]:
-    """Every run config under configs/, as paths relative to the repository."""
+    """Every run config under configs/, as paths relative to the repository.
+
+    Not the family bases, which are not run configs (``is_family_base``), and
+    not configs/llm_assets/, a different schema.
+    """
+
+    from fedbrew.core.config import is_family_base
 
     return [
         path.relative_to(REPO)
         for path in sorted((REPO / "configs").rglob("*.yaml"))
-        if "llm_assets" not in path.parts
+        if "llm_assets" not in path.parts and not is_family_base(path)
     ]
 
 

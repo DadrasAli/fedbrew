@@ -21,7 +21,12 @@ from typing import Any
 import pytest
 
 from fedbrew.core.checkpointing import validate_selection_metric
-from fedbrew.core.config import ClientStatisticsConfig, client_metric_names, load_config
+from fedbrew.core.config import (
+    ClientStatisticsConfig,
+    client_metric_names,
+    is_family_base,
+    load_config,
+)
 from fedbrew.core.logging import _planned_metric_names, classify_metric
 from fedbrew.core.loop import _aggregate_client_split_metrics
 from fedbrew.core.metrics import metric_gloss
@@ -30,7 +35,9 @@ from fedbrew.core.protocol import EvalResult
 pytestmark = pytest.mark.fast
 
 SPLITS = ("train", "val", "test")
-FEMNIST = sorted(Path("configs/femnist").glob("*.yaml"))
+FEMNIST = sorted(
+    path for path in Path("configs/femnist").glob("*.yaml") if not is_family_base(path)
+)
 
 
 def _result(client_id: str, *, count: int, split: str = "val") -> EvalResult:

@@ -13,7 +13,10 @@ config would silently not be comparable with the FEMNIST baselines.
 false. A run that is not deterministic should say so.
 
 This walks the shipped tree rather than a hand-kept list, so a new config
-cannot quietly reintroduce either gap. It also pins the three Delta-SGD
+cannot quietly reintroduce either gap. It reads each config resolved -- its
+``extends`` chain merged (``load_config_mapping``), which is what the run
+gets -- so a setting stated once in a family base counts for every arm that
+extends it, and a family base is not itself a config it checks. It also pins the three Delta-SGD
 constants that were written into their config in the same pass, against the
 drift that omitting them was meant to avoid.
 """
@@ -32,8 +35,13 @@ from fedbrew.clients.torch_delta_sgd_client import (
     DEFAULT_GAMMA,
     DEFAULT_THETA_0,
 )
-from fedbrew.core.config import MATMUL_PRECISIONS, NUMERICS_PERFORMANCE_KEYS
-from fedbrew.core.inferred import inferred_name
+from fedbrew.core.config import (
+    MATMUL_PRECISIONS,
+    NUMERICS_PERFORMANCE_KEYS,
+    is_family_base,
+    load_config_mapping,
+)
+from fedbrew.core.inferred import inferred_name, inferred_output_dir
 
 pytestmark = pytest.mark.fast
 
@@ -42,7 +50,7 @@ CONFIG_ROOT = REPO_ROOT / "configs"
 
 
 def _run_configs() -> list[tuple[Path, dict[str, Any]]]:
-    """Every shipped run config: the ones carrying a `runtime` block.
+    """Every shipped run config, resolved: the ones carrying a `runtime` block.
 
     configs/llm_assets/ holds asset-preparation configs, a different schema
     with no runtime section, and is excluded by that test rather than by name.
@@ -50,7 +58,9 @@ def _run_configs() -> list[tuple[Path, dict[str, Any]]]:
 
     configs = []
     for path in sorted(CONFIG_ROOT.rglob("*.yaml")):
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if is_family_base(path):
+            continue
+        loaded = load_config_mapping(path)
         if isinstance(loaded, dict) and "runtime" in loaded:
             configs.append((path.relative_to(REPO_ROOT), loaded))
     return configs
@@ -77,12 +87,21 @@ class ExperimentHeaderConventionTest(unittest.TestCase):
         self.configs = _run_configs()
 
     def test_every_config_states_the_run_metadata_fields(self) -> None:
+        """``output_dir`` may be the one the config's path gives instead.
+
+        79 arms wrote exactly ``outputs/<their path under configs/>``, which
+        the loader infers (fedbrew/core/inferred.py); a config stating it
+        states a directory of its own.
+        """
+
         for path, config in self.configs:
             for field in ("seed", "output_dir", "use_run_subdir", "tags", "notes"):
                 with self.subTest(config=str(path), field=field):
-                    self.assertIn(
-                        field,
-                        config["experiment"],
+                    stated = field in config["experiment"]
+                    if field == "output_dir" and not stated:
+                        stated = inferred_output_dir(REPO_ROOT / path) is not None
+                    self.assertTrue(
+                        stated,
                         "every run config carries the same header; a run "
                         "missing tags or notes is one that cannot be found "
                         "again in runs_index.jsonl",

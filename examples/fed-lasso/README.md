@@ -72,7 +72,7 @@ fedbrew run --config configs/examples/fed-lasso/fedavg_decay.yaml --validate-onl
 
 The problem is defined outside the package, in [`problem.py`](problem.py), and
 reaches the CLI because each config names it: `dataset.extensions` in the
-generator config, `experiment.extensions` in every arm config. Chapter 12 is the
+generator config, `experiment.extensions` in the family base every arm config extends. Chapter 12 is the
 general form and [`drift-quad`](../drift-quad/) is its worked case.
 
 Each control has its own generator config, because λ and the penalty form are

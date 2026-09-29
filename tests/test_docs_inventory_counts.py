@@ -27,6 +27,8 @@ from pathlib import Path
 import pytest
 from docs_sections import fenced_block_after
 
+from fedbrew.core.config import is_family_base, load_config_mapping
+
 pytestmark = pytest.mark.fast
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -66,11 +68,20 @@ def _test_modules() -> list[Path]:
 
 
 def _run_configs() -> list[Path]:
-    """Configs that carry a `runtime` block, which is what makes one a run config."""
+    """Configs that carry a `runtime` block, which is what makes one a run config.
+
+    Not the family bases: they carry one for their arms, and are not run.
+    """
 
     return sorted(
-        path for path in (REPO_ROOT / "configs").rglob("*.yaml") if "llm_assets" not in path.parts
+        path
+        for path in (REPO_ROOT / "configs").rglob("*.yaml")
+        if "llm_assets" not in path.parts and not is_family_base(path)
     )
+
+
+def _family_bases() -> list[Path]:
+    return sorted(path for path in (REPO_ROOT / "configs").rglob("*.yaml") if is_family_base(path))
 
 
 def _asset_configs() -> list[Path]:
@@ -142,13 +153,21 @@ class IndexInventoryTest(unittest.TestCase):
         without = sorted(
             path.relative_to(REPO_ROOT).as_posix()
             for path in _run_configs()
-            if not re.search(r"^runtime:", path.read_text(encoding="utf-8"), flags=re.MULTILINE)
+            if "runtime" not in load_config_mapping(path)
         )
         self.assertEqual(
             without,
             [],
             "docs/00-index.md defines a run config as one carrying a `runtime` "
             f"block; these are counted as run configs and have none: {without}",
+        )
+
+    def test_the_family_base_count_is_the_directory_listing(self) -> None:
+        count = len(_family_bases())
+        self.assertGreater(count, 0)
+        self.assertTrue(
+            _states_count(self.text, count, "family bases"),
+            f"docs/00-index.md must say {count} family bases",
         )
 
     def test_the_asset_config_count_is_the_directory_listing(self) -> None:
@@ -197,7 +216,9 @@ class ConfigsReadmeListingTest(unittest.TestCase):
             with self.subTest(directory=directory):
                 listed = sorted(entry for entries, _ in lines for entry in entries)
                 on_disk = sorted(
-                    path.stem for path in (REPO_ROOT / "configs" / directory).glob("*.yaml")
+                    path.stem
+                    for path in (REPO_ROOT / "configs" / directory).glob("*.yaml")
+                    if not is_family_base(path)
                 )
                 self.assertGreater(len(on_disk), 0)
                 self.assertEqual(listed, on_disk, f"configs/README.md's {directory}/ line")
@@ -210,7 +231,7 @@ class ConfigsReadmeListingTest(unittest.TestCase):
             for pair in _arm_counts(entries, note)
         )
         on_disk = sorted(
-            (path.name, len(list(path.glob("*.yaml"))))
+            (path.name, len([arm for arm in path.glob("*.yaml") if not is_family_base(arm)]))
             for path in (REPO_ROOT / "configs" / "examples").iterdir()
             if path.is_dir()
         )
