@@ -538,13 +538,6 @@ class ResidentRounds:
         #: Per chunk of clients, their rules and record plans (``_record_plans``).
         self._records: dict[tuple[int, ...], tuple[list[Any], list[_MemberPlan]]] = {}
         self.graphs = RoundGraphs(self.device, executor.cuda_graphs, executor.record)
-        #: Whether a bucket of the same clients as the round before takes the
-        #: rows it gathered then. On the host, where a round's gather is a new
-        #: tensor the size of its clients' rows -- page-faulted in, ~200 ms a
-        #: round for the MNIST MLP's 1000 clients -- and not under CUDA graphs,
-        #: whose rounds read their rows at fixed addresses from the round's
-        #: inputs. A device's caching allocator makes the gather cheap there.
-        self.keeps_rows = self.device.type == "cpu" and not self.graphs.on
         #: The dtypes the fold sums the model's tensors in, in order of first use.
         self.accumulation_dtypes = list(
             dict.fromkeys(
@@ -698,8 +691,6 @@ class ResidentRounds:
             self.model,
             lambda inputs, model: self._execute(plan, device_round, inputs, model),
         )
-        if self.keeps_rows and self.rows is not None:
-            self.rows.round_done()
         results, mean, finite = outputs
         for index, (start, stop) in enumerate(plan.chunks):
             parts, columns, layout = staged_chunk(
@@ -1029,10 +1020,6 @@ class ResidentRounds:
             return rows.single(bucket.rows_index[0])
         if bucket.kind == "everyone":
             return rows.everyone()
-        if self.keeps_rows:
-            # The same clients' rows as the round before are those rows again
-            # (ResidentRows.bucket), not another gather into a new tensor.
-            return rows.bucket(bucket.places)
         return rows.gathered(inputs[bucket.inputs["index"]], bucket.longest)
 
     def _costs(self, planned: PlannedRound, device_round: DeviceRound, program: Any) -> list[int]:
