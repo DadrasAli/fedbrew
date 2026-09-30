@@ -69,6 +69,7 @@ from fedbrew.clients.batched_update import (
     initial_optimizer_state,
     plan_round,
     update_weights,
+    values_at,
 )
 from fedbrew.clients.torch_sgd_client import trainable_parameter_count
 from fedbrew.core.config import GRADIENT_FORMS
@@ -1188,14 +1189,15 @@ class _Bucket:
         #: stacked losses' sum rather than vmap(grad): the form the task
         #: declares, by measurement (``batched_gradient``); one client is
         #: never vmapped, and takes the sequential gradient either way.
-        #: Compiled, the step is always vmap(grad), which compiles whole.
+        #: Compiled, a summed step is vmap(grad), which compiles whole.
         form = gradient_form(task, self.context.gradient_form)
         self.summed = self.stacked and form == "summed" and not self.compiled
         #: Whether each step's gradients are the task's closed form
         #: (``closed_form_gradient``), for the whole stack at once, rather than
         #: autograd's: a run's opt-in (``runtime.performance.gradient_form``).
-        #: Compiled, the step is vmap(grad) as for the other forms.
-        self.closed = form == "closed_form" and not self.compiled
+        #: Compiled, the closed form of one client is vmapped over the stack
+        #: inside the compiled loop.
+        self.closed = form == "closed_form"
 
     # -- the tensors every client starts from --------------------------------
 
@@ -1311,7 +1313,9 @@ class _Bucket:
 
         program = self.program
         if self.compiled:
-            steps = self.context.functions(self.task, self.model, self.buffers, program)
+            steps = self.context.functions(
+                self.task, self.model, self.buffers, program, closed=self.closed
+            )
         else:
             steps = step_functions(
                 self.task,
@@ -1339,7 +1343,11 @@ class _Bucket:
         outputs: list[dict[str, Tensor]] = []
 
         self.model.train()
-        if self.summed or (self.closed and self.stacked):
+        if self.compiled and self.context.compiling:
+            looped = self._compiled_loop(steps, params, state, corrections)
+            if looped is not None:
+                return looped
+        if self.summed or (self.closed and self.stacked and not self.compiled):
             return self._run_summed(params, state, corrections, outputs)
         if self._stepwise():
             return self._run_stepwise(params, state, corrections, outputs)
@@ -1392,6 +1400,51 @@ class _Bucket:
             )
 
         return params, outputs, step
+
+    def _compiled_loop(
+        self,
+        functions: tuple[Callable[..., Any], Callable[..., Any], Callable[..., Any]],
+        params: dict[str, Tensor],
+        state: Any,
+        corrections: list[tuple[Any, int | None]],
+    ) -> tuple[dict[str, Tensor], list[dict[str, Tensor]], int] | None:
+        """Every step of the round in one compiled call (``local_loop``); None if not compiled.
+
+        The call's inputs are the round's tensors -- the stack's rows, each
+        step's row indices and lengths, the combination weights, the program's
+        values -- and its shape (``LoopShape``) is a constant it is
+        specialised to, so dynamo's guards and wrappers run once a round, not
+        once a step.
+        """
+
+        flat, lengths = self.steps._device()
+        if self._weights_on_device is None:
+            self._weights_on_device = uploaded(self.weights, self.device)
+        shape = LoopShape(
+            structure=tuple(self.structure),
+            combine=self.program.combine,
+            widths=tuple(self.steps.widths),
+            full=tuple(self.steps.full),
+            size=self.size,
+            mask_dtype=self.dtype,
+            dims=tuple(None if value is None else dim for value, dim in corrections),
+        )
+        looped = self.context.loop(
+            shape,
+            functions,
+            params,
+            state,
+            tuple(self.steps.rows.tensors),
+            flat,
+            lengths,
+            self._weights_on_device,
+            tuple(value for value, _ in corrections),
+            self.values.parts(),
+        )
+        if looped is None:
+            return None
+        params, _, outputs = looped
+        return params, outputs, len(outputs)
 
     def _finish(
         self, params: dict[str, Tensor], outputs: list[dict[str, Tensor]], step: int
@@ -1882,6 +1935,7 @@ class StepContext:
         self._modules: dict[tuple[Any, ...], nn.Module] = {}
         self._functions: dict[tuple[Any, ...], Any] = {}
         self._compiled: Callable[..., Any] | None = None
+        self._loop: Callable[..., Any] | None = None
 
     def train_dtype(self, dtype: torch.dtype) -> torch.dtype:
         """The dtype a model of ``dtype`` is stepped in."""
@@ -1920,21 +1974,45 @@ class StepContext:
         return self._modules.setdefault(key, template)
 
     def functions(
-        self, task: Any, model: nn.Module, buffers: Mapping[str, Tensor], program: Any
+        self,
+        task: Any,
+        model: nn.Module,
+        buffers: Mapping[str, Tensor],
+        program: Any,
+        closed: bool = False,
     ) -> tuple[Callable[..., Any], Callable[..., Any], Callable[..., Any]]:
-        """``step_functions``, made once per task, module and program shape for the run.
+        """``step_functions``, made once per task, module, program shape and form for the run.
 
-        The compiled step is specialised to the functions it is handed, so
+        The compiled loop is specialised to the functions it is handed, so
         they must be the same objects every round.
         """
 
-        key = (id(task), id(model), program.shape)
+        key = (id(task), id(model), program.shape, closed)
         if key not in self._functions:
             device = next(model.parameters()).device
             self._functions[key] = step_functions(
-                task, model, buffers, program, self.autocast(device)
+                task, model, buffers, program, self.autocast(device), closed=closed
             )
         return self._functions[key]
+
+    def loop(self, shape: LoopShape, *arguments: Any) -> Any:
+        """``local_loop(shape, *arguments)``, compiled; None once compiling has failed.
+
+        A loop that does not compile leaves the round to the eager steps, as
+        every later round, with a notice and the record's fallback.
+        """
+
+        try:
+            return self._loop_compiler()(shape, *arguments)
+        except Exception as error:
+            self._fail(error)
+            return None
+
+    def _loop_compiler(self) -> Callable[..., Any]:
+        if self._loop is None:
+            self._configure_dynamo()
+            self._loop = torch.compile(local_loop)
+        return self._loop
 
     def call(self, function: Callable[..., Any], dims: tuple[Any, ...], values: list[Any]) -> Any:
         """``function`` vmapped over ``values``: compiled, or eagerly once compiling has failed."""
@@ -1951,19 +2029,23 @@ class StepContext:
 
     def _compiler(self) -> Callable[..., Any]:
         if self._compiled is None:
-            import torch._dynamo
-
-            config = torch._dynamo.config
-            # Each step function specialises on its step (first or later),
-            # its mask and its shapes; the rounds of a run stay within this.
-            config.cache_size_limit = max(config.cache_size_limit, 64)
-            config.accumulated_cache_size_limit = max(config.accumulated_cache_size_limit, 512)
-            if hasattr(config, "fail_on_cache_limit_hit"):
-                # Past the limit dynamo would run the step eagerly and say so
-                # only in a log; raising lets the record say what ran.
-                config.fail_on_cache_limit_hit = True
+            self._configure_dynamo()
             self._compiled = torch.compile(_vmapped)
         return self._compiled
+
+    @staticmethod
+    def _configure_dynamo() -> None:
+        import torch._dynamo
+
+        config = torch._dynamo.config
+        # Each loop specialises on its shape (LoopShape) and each step
+        # function on its step, mask and shapes; a run's rounds stay within this.
+        config.cache_size_limit = max(config.cache_size_limit, 64)
+        config.accumulated_cache_size_limit = max(config.accumulated_cache_size_limit, 512)
+        if hasattr(config, "fail_on_cache_limit_hit"):
+            # Past the limit dynamo would run the step eagerly and say so
+            # only in a log; raising lets the record say what ran.
+            config.fail_on_cache_limit_hit = True
 
     def _fail(self, error: BaseException) -> None:
         reason = _first_line(error)
@@ -1993,6 +2075,98 @@ def _vmapped(function: Callable[..., Any], dims: tuple[Any, ...], *values: Any) 
     """What a compiled step is: ``function`` vmapped over ``values``."""
 
     return torch.func.vmap(function, in_dims=dims)(*values)
+
+
+@dataclass(frozen=True)
+class LoopShape:
+    """What a compiled local loop is specialised to: a bucket's steps, fixed for its shape.
+
+    The updates' batch counts (``structure``), how they combine, each step's
+    batch width and whether every split fills it, the clients, the mask's
+    dtype, and each correction's client dimension (None where it is shared
+    or absent). Dynamo treats it as a constant, so one shape is one graph.
+    """
+
+    structure: tuple[int, ...]
+    combine: str
+    widths: tuple[int, ...]
+    full: tuple[bool, ...]
+    size: int
+    mask_dtype: torch.dtype
+    dims: tuple[int | None, ...]
+
+
+def local_loop(
+    shape: LoopShape,
+    functions: tuple[Callable[..., Any], Callable[..., Any], Callable[..., Any]],
+    params: dict[str, Tensor],
+    state: Any,
+    rows: tuple[Tensor, ...],
+    flat: Tensor,
+    lengths: Tensor,
+    weights: Tensor,
+    corrections: tuple[Any, ...],
+    values: tuple[dict[str, Tensor], Tensor | None, Tensor | None],
+) -> tuple[dict[str, Tensor], Any, list[dict[str, Tensor]]]:
+    """A stack's whole round of local steps: ``_Bucket._train``'s loop as one function.
+
+    Each step's batches are gathered from ``rows`` by ``flat`` (split ``k``'s
+    row ``r`` at ``k * longest + r``) and masked past ``lengths``; the step is
+    the rule's per-client function vmapped over the clients, and a pass's
+    combination is weighted by ``weights`` and divided by their sum, as the
+    eager steps take them. Compiled whole (``StepContext.loop``).
+    """
+
+    batch_update, gradient_sum, combined_update = functions
+    vmap = torch.func.vmap
+    outputs: list[dict[str, Tensor]] = []
+    step = 0
+    for number, count in enumerate(shape.structure, start=1):
+        at = values_at(values, number)
+        if shape.combine == "batch":
+            batch, mask = _loop_batch(shape, rows, flat, lengths, step)
+            step += 1
+            dims = (0, 0, 0, None if mask is None else 0, *shape.dims, 0, None)
+            params, state, step_outputs = vmap(batch_update, in_dims=dims)(
+                params, state, batch, mask, *corrections, at, number
+            )
+            outputs.append(step_outputs)
+            continue
+        total: Any = None
+        first = step
+        for _ in range(count):
+            batch, mask = _loop_batch(shape, rows, flat, lengths, step)
+            dims = (None if total is None else 0, 0, 0, None if mask is None else 0, 0)
+            total, step_outputs = vmap(gradient_sum, in_dims=dims)(
+                total, params, batch, mask, weights[:, step]
+            )
+            outputs.append(step_outputs)
+            step += 1
+        denominator = weights[:, first : first + count].sum(dim=1)
+        dims = (0, 0, 0, 0, *shape.dims, 0, None)
+        params, state = vmap(combined_update, in_dims=dims)(
+            params, state, total, denominator, *corrections, at, number
+        )
+    return params, state, outputs
+
+
+def _loop_batch(
+    shape: LoopShape, rows: tuple[Tensor, ...], flat: Tensor, lengths: Tensor, step: int
+) -> tuple[tuple[Tensor, ...], Tensor | None]:
+    """Step ``step``'s batch of every split, and the mask of its real rows: ``_Steps.batch``'s."""
+
+    width = shape.widths[step]
+    index = flat[:, step, :width].reshape(-1)
+    batch = tuple(
+        tensor.reshape(-1, *tensor.shape[2:])
+        .index_select(0, index)
+        .reshape(shape.size, width, *tensor.shape[2:])
+        for tensor in rows
+    )
+    if shape.full[step]:
+        return batch, None
+    positions = torch.arange(width, device=flat.device).unsqueeze(0)
+    return batch, (positions < lengths[:, step].unsqueeze(1)).to(shape.mask_dtype)
 
 
 def _placed(value: Tensor, like: Tensor) -> Tensor:

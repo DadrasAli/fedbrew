@@ -671,7 +671,7 @@ computes, bit for bit on the same device:
   naming the client and tensor it names; a client with no training batches is
   refused after the rounds before it are recorded.
 
-It applies when the run is batched with a planner (§9); does not compile;
+It applies when the run is batched with a planner (§9);
 uses FedAvg's server, fold and payload (or SCAFFOLD's, with its rule), the
 streaming aggregator and the batched evaluator at the global scope; trains
 `fedavg`, `local_sgd`, `local_adamw` or `scaffold`; holds every client's rows
@@ -798,15 +798,28 @@ the way the reference measures it. `run.json` records what ran
 (`reproducibility.executor`, chapter 09 §3.3), and the plan header prints it,
 in amber when it is not what was asked for.
 
-**`compile: on`** hands each stacked step -- a batch's gradient and update, a
-pass's gradient sum, a combined update -- to `torch.compile`. The step
-functions are made once per task, model structure and program shape for the
-run, and a step is told only whether it is the first, so each compiles to a
-few graphs that every later round reuses. The summed gradient form (§9) is
-not compiled; a compiled step always takes `vmap(grad)`, which compiles
-whole. A step that does not compile -- no C++ compiler for inductor, an
-operation dynamo does not trace, more recompilations than the limit -- runs
-eagerly, as does every later one; the run prints why on stderr and records it
+**`compile: on`** compiles a stack's whole round of local steps as one
+function (`local_loop`, through `StepContext.loop`): every step's batches
+gathered from the stack's rows by the round's row indices, the rule's
+per-client step -- a batch's gradient and update, a pass's gradient sum, a
+combined update -- vmapped over the clients, and the combination's weights,
+all in one graph. Its inputs are the round's tensors; its shape (`LoopShape`:
+the updates' batch counts, each step's width and whether it is full, the
+clients, the corrections' dimensions) is a constant it is specialised to, so
+one shape is one graph that every later round of that shape reuses, and
+dynamo's guards and wrappers run once a round rather than once a step. The
+step functions are made once per task, model structure, program shape and
+gradient form for the run. The summed gradient form (§9) is compiled as
+`vmap(grad)`; the closed form is compiled as the task's closed form of one
+client, vmapped. Resident runs (§9.1) take it, their compiled rounds run
+eagerly rather than replayed from CUDA graphs. Compiling costs once per shape
+-- 12 s for ten steps of fed-logistic-l1's 32 clients on a loaded login node,
+where the round then took 0.77 ms against 5.7 eager (measured 2026-09-30) --
+and a run whose rounds keep changing shape (Bernoulli participation over
+clients of different sizes) reaches the recompilation limit. A loop that
+does not compile -- no C++ compiler for inductor, an operation dynamo does
+not trace, more recompilations than the limit -- leaves that round and
+every later one to the eager steps; the run prints why on stderr and records it
 (`compile: {used: off, fallback: ...}`), and is then the reference run bit for
 bit. Inductor needs a C++ compiler: on Berzelius the `g++` first on `PATH` is
 a wrapper that refuses to run without a build-environment module, so set
@@ -931,7 +944,7 @@ python tools/bench_compare_runs.py --help
 | `tests/test_batched_executor.py` | §9: the keys, the fallback and its record, client isolation, the refusals, the generator, and one chunk at a time. |
 | `tests/test_batch_orders.py` | §9: every planned order is its loader's own, for every task, update mode, shuffle, `drop_last` and `max_local_steps`, 520 clients at once included; the bulk seeds are `dataloader_seed`'s. |
 | `tests/test_batched_evaluator.py` | §9: ragged, shuffled and missing evaluation splits through both evaluators, the refusal's words, and the central pass's kept model and shard. |
-| `tests/test_compile_mode.py` | §11: a compiled step is held to §9's bounds on fed-lasso (FedAvg, local_sgd in both modes, local_adamw, SCAFFOLD) and the MLP, dynamo having made its graphs; a step that does not compile runs eagerly, bit for bit the reference, and run.json says why; the key needs the batched executor. |
+| `tests/test_compile_mode.py` | §11: a compiled loop is held to §9's bounds on fed-lasso (FedAvg, local_sgd in both modes, local_adamw, SCAFFOLD) and the MLP, dynamo having made its graphs; a resident run makes one compiled call a round, under `vmap_grad` and `closed_form`, within the executor's tolerance; a loop that does not compile runs eagerly, bit for bit the reference, and run.json says why; the key needs the batched executor. |
 | `tests/test_precision_modes.py` | §11: `f32_f64` within `1e-4` on the smooth examples, and in a group of settings each as alone; `bf16` within `5e-2` on the MLP; `tf32` within `1e-3` on CUDA; each mode trained otherwise than the reference; a mode that does not apply runs the reference bit for bit and says why; the key needs the batched executor. |
 | `tests/test_program_values.py` | §9: a bucket shares its program's shape, not its values; a client stepped beside clients with other values is the client stepped alone, bit for bit, in every shape and both float widths, and a client alone is `torch.optim`'s SGD and AdamW step. |
 | `tests/test_sweep.py` | §10: `fedbrew sweep` groups the configs equal but for the run's name and the numeric hyperparameters it lists, runs any other config alone and one that does not load alone, keeps two configs that would write one directory apart, `--plan` runs nothing, `--run-group` refuses configs that are not one group, and a sweep of a group and a config alone writes both, the group recorded; the exit status. |

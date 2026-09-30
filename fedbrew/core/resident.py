@@ -130,8 +130,6 @@ def resident_unsupported(context: Any) -> str | None:
     executor = context.executor
     if executor.planner is None:
         return "the run's orders are not planned from its roster"
-    if executor.context is not None and executor.context.compiling:
-        return "runtime.performance.compile compiles the per-round step"
     for check in (_server_unsupported, _pipeline_unsupported, _rule_unsupported):
         reason = check(context)
         if reason is not None:
@@ -783,12 +781,16 @@ class ResidentRounds:
 
         A round folded on the CPU, one with a bucket of one client, one
         whose update combines a pass's gradients (its weights uploaded as it
-        steps), and SCAFFOLD's, whose controls live outside the round's
-        inputs, run eagerly.
+        steps), SCAFFOLD's, whose controls live outside the round's inputs,
+        and a compiled one (``runtime.performance.compile``), which is its
+        own graph, run eagerly.
         """
 
         program = device_round.program
         if plan.host_fold or program.combine != "batch" or self.scaffold:
+            return None
+        context = self.executor.context
+        if context is not None and context.compiling:
             return None
         if any(bucket.kind == "single" for bucket in plan.buckets):
             return None
@@ -1005,7 +1007,11 @@ class ResidentRounds:
         key = (repr(program), size, steps, dtype)
         values = self._values.get(key)
         if values is None:
-            values = self._values[key] = ProgramValues([program] * size, steps, dtype, self.device)
+            # Compiled, a step's own values are read per step, as the bucket reads them.
+            per_step = bool(context and context.compiling) and size > 1
+            values = self._values[key] = ProgramValues(
+                [program] * size, steps, dtype, self.device, per_step=per_step
+            )
         return values
 
     @property

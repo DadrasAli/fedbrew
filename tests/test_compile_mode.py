@@ -1,4 +1,8 @@
-"""``runtime.performance.compile: on`` compiles the batched step, within the executor's tolerance.
+"""``runtime.performance.compile: on`` compiles a bucket's local loop, within the tolerance.
+
+A bucket's whole round of steps is one compiled call (``local_loop``): its
+batches gathered, the rule's step vmapped, a pass's combination, every step,
+so dynamo's guards and wrappers run once a round. Resident runs take it too.
 
 ``torch.compile`` fuses the step's operations, which rounds them in another
 order and nothing else, so a compiled run is held where the batched executor
@@ -114,6 +118,51 @@ class CompiledStepTest(CompiledRuns):
         self.assertAgree(compiled, reference, tolerance=FLOAT32_TOLERANCE)
 
 
+class TheLoopIsCompiledWholeTest(CompiledRuns):
+    """One compiled call a bucket a round, resident or not, in each gradient form."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        CompiledStepTest.setUpClass()
+
+    def test_one_call_a_round_within_the_executor_tolerance(self) -> None:
+        from tests.test_closed_form_gradients import CASES, _config
+
+        loop = StepContext.loop
+        hetero = CASES["heterogeneous quadratic"]
+        logistic = CASES["l1-regularized logistic regression"]
+        for label, (arm, setting), form in (
+            ("heterogeneous-quadratic, vmap_grad", hetero, None),
+            ("heterogeneous-quadratic, closed_form", hetero, "closed_form"),
+            ("fed-logistic-l1, closed_form", logistic, "closed_form"),
+        ):
+            config = _config(arm, setting, self.root)
+            config["schedule"]["rounds"] = 4
+            config["runtime"]["quiet"] = True
+            config["runtime"]["checkpointing"].update(
+                enabled=True, save_last=True, save_every_round=True, keep_last=None
+            )
+            forms = {} if form is None else {"gradient_form": form}
+            with self.subTest(run=label):
+                calls: list[int] = []
+
+                def counted(
+                    context: StepContext, *args: Any, calls: list[int] = calls, loop: Any = loop
+                ) -> Any:
+                    calls.append(1)
+                    return loop(context, *args)
+
+                with mock.patch.object(StepContext, "loop", counted):
+                    compiled = self.run_config(config, "batched", compile=True, **forms)
+                reference = self.run_config(config, "batched", **forms)
+                record = executor_record(compiled)
+                self.assertEqual(record["compile"], {"used": "on"})
+                self.assertEqual(record["rounds"], {"used": "resident"})
+                # One bucket a round: every round's steps in one call.
+                self.assertEqual(len(calls), 4)
+                self.assertAgree(compiled, reference)
+
+
 class AStepThatDoesNotCompileRunsEagerlyTest(CompiledRuns):
     def test_the_reference_bit_for_bit_and_the_record(self) -> None:
         def no_compiler(self: StepContext) -> Any:
@@ -123,7 +172,10 @@ class AStepThatDoesNotCompileRunsEagerlyTest(CompiledRuns):
             return fail
 
         config = classification_rule_config({"update_rule": "local_sgd"})
-        with mock.patch.object(StepContext, "_compiler", no_compiler):
+        with (
+            mock.patch.object(StepContext, "_compiler", no_compiler),
+            mock.patch.object(StepContext, "_loop_compiler", no_compiler),
+        ):
             compiled, reference = self.compiled_and_reference(config)
         self.assertAgree(compiled, reference, exact=True)
         self.assertEqual(

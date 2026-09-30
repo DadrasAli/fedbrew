@@ -562,12 +562,26 @@ class ProgramValues:
     def at(self, step: int) -> dict[str, Tensor]:
         """Every value the ``step``-th applied update reads (from 1), per client."""
 
-        if self._step_sizes is None:
-            return self._values
-        values = {**self._values, "step_size": self._step_sizes[step - 1]}
-        if self._corrections is not None:
-            values["bias_correction2_sqrt"] = self._corrections[step - 1]
+        return values_at(self.parts(), step)
+
+    def parts(self) -> tuple[dict[str, Tensor], Tensor | None, Tensor | None]:
+        """What ``at`` reads: the values every step shares, and the per-step ones, or None."""
+
+        return self._values, self._step_sizes, self._corrections
+
+
+def values_at(
+    parts: tuple[dict[str, Tensor], Tensor | None, Tensor | None], step: int
+) -> dict[str, Tensor]:
+    """``ProgramValues.at`` from its ``parts``, as a compiled loop reads it."""
+
+    values, step_sizes, corrections = parts
+    if step_sizes is None:
         return values
+    at = {**values, "step_size": step_sizes[step - 1]}
+    if corrections is not None:
+        at["bias_correction2_sqrt"] = corrections[step - 1]
+    return at
 
 
 def _per_client(value: Tensor, like: Tensor) -> Tensor:
