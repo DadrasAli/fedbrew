@@ -84,6 +84,41 @@ class _SeededFork:
         return bool(self._fork.__exit__(*exc))
 
 
+def _check_step_options(
+    learning_rate: float,
+    momentum: float | None,
+    weight_decay: float | None,
+    nesterov: bool | None,
+    learning_rate_schedule: str | None,
+    min_learning_rate: float | None,
+    total_rounds: int | None,
+    max_local_steps: int | None,
+) -> None:
+    """Refuse a local-step option outside its bounds (``TorchSGDClient``'s Raises)."""
+
+    if learning_rate <= 0.0:
+        raise ValueError("learning_rate must be positive")
+    if momentum is not None and not 0.0 <= momentum < 1.0:
+        raise ValueError("momentum must be in [0, 1)")
+    if weight_decay is not None and weight_decay < 0.0:
+        raise ValueError("weight_decay must be non-negative")
+    if nesterov is True and (momentum is None or momentum <= 0.0):
+        raise ValueError("nesterov requires positive momentum")
+    if learning_rate_schedule is not None and learning_rate_schedule not in {
+        "constant",
+        "cosine",
+    }:
+        raise ValueError("learning_rate_schedule must be constant or cosine")
+    if min_learning_rate is not None and (
+        min_learning_rate < 0.0 or min_learning_rate > learning_rate
+    ):
+        raise ValueError("min_learning_rate must be in [0, learning_rate]")
+    if total_rounds is not None and total_rounds <= 0:
+        raise ValueError("total_rounds must be positive when set")
+    if max_local_steps is not None and (isinstance(max_local_steps, bool) or max_local_steps <= 0):
+        raise ValueError("max_local_steps must be positive when set")
+
+
 class TorchSGDClient(ClientUpdate, Generic[TaskT]):
     """Train a PyTorch model locally on one client's data.
 
@@ -203,29 +238,16 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
             raise ValueError("eval_batch_size must be positive when set")
         self.eval_batch_size = int(eval_batch_size or batch_size)
         self.learning_rate = learning_rate
-        if self.learning_rate <= 0.0:
-            raise ValueError("learning_rate must be positive")
-        if momentum is not None and not 0.0 <= momentum < 1.0:
-            raise ValueError("momentum must be in [0, 1)")
-        if weight_decay is not None and weight_decay < 0.0:
-            raise ValueError("weight_decay must be non-negative")
-        if nesterov is True and (momentum is None or momentum <= 0.0):
-            raise ValueError("nesterov requires positive momentum")
-        if learning_rate_schedule is not None and learning_rate_schedule not in {
-            "constant",
-            "cosine",
-        }:
-            raise ValueError("learning_rate_schedule must be constant or cosine")
-        if min_learning_rate is not None and (
-            min_learning_rate < 0.0 or min_learning_rate > self.learning_rate
-        ):
-            raise ValueError("min_learning_rate must be in [0, learning_rate]")
-        if total_rounds is not None and total_rounds <= 0:
-            raise ValueError("total_rounds must be positive when set")
-        if max_local_steps is not None and (
-            isinstance(max_local_steps, bool) or max_local_steps <= 0
-        ):
-            raise ValueError("max_local_steps must be positive when set")
+        _check_step_options(
+            learning_rate,
+            momentum,
+            weight_decay,
+            nesterov,
+            learning_rate_schedule,
+            min_learning_rate,
+            total_rounds,
+            max_local_steps,
+        )
         self.momentum = None if momentum is None else float(momentum)
         self.weight_decay = None if weight_decay is None else float(weight_decay)
         self.nesterov = nesterov

@@ -199,6 +199,12 @@ class ProblemSpec:
     sigma: float = 0.0
 
     def __post_init__(self) -> None:
+        self._check_shape()
+        self._check_values()
+
+    def _check_shape(self) -> None:
+        """The member, and the sizes the Hadamard construction needs."""
+
         if self.member not in MEMBERS:
             raise ValueError(f"problem.member must be one of {MEMBERS}, not {self.member!r}")
         for name, value in (("num_clients", self.num_clients), ("dim", self.dim)):
@@ -209,6 +215,10 @@ class ProblemSpec:
                 "the construction needs 2 dim <= num_clients - 1: every coordinate takes two "
                 "Hadamard columns of its own beside the constant one"
             )
+
+    def _check_values(self) -> None:
+        """Each parameter in its range, and only the member's own set."""
+
         if self.kappa < 1.0:
             raise ValueError("problem.kappa is a condition number, at least 1")
         if self.zeta_star < 0.0 or self.sigma < 0.0:

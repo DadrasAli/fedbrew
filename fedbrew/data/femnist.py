@@ -73,21 +73,7 @@ def generate_femnist_from_config(
     dataset_config = _mapping(config["dataset"])
     partition_config = _mapping(config["partition"])
     femnist_config = _mapping(config.get("femnist", {}))
-    strategy = str(partition_config.get("strategy", "natural"))
-    if strategy not in {"natural", "similarity_mix"}:
-        raise ValueError(
-            "FEMNIST requires partition.strategy=natural or partition.strategy=similarity_mix"
-        )
-    similarity = None
-    if strategy == "similarity_mix":
-        similarity = partition_config.get("similarity")
-        if isinstance(similarity, bool) or not isinstance(similarity, int | float):
-            raise ValueError("partition.similarity must be a number in [0, 1]")
-        similarity = float(similarity)
-        if not 0.0 <= similarity <= 1.0:
-            raise ValueError("partition.similarity must be in [0, 1]")
-    elif "similarity" in partition_config:
-        raise ValueError("partition.similarity is similarity_mix's; natural takes none")
+    strategy, similarity = _partition_strategy(partition_config)
 
     requested_clients = _optional_positive_int(partition_config.get("num_clients"))
     # Three, not two: every writer now yields a train, an eval AND a test
@@ -121,13 +107,7 @@ def generate_femnist_from_config(
     )
 
     writer_indices = _group_indices_by_writer(source_dataset, writer_column)
-    eligible_writer_indices = {
-        writer_id: indices
-        for writer_id, indices in writer_indices.items()
-        if len(indices) >= min_samples
-    }
-    if not eligible_writer_indices:
-        raise ValueError("FEMNIST source contains no eligible writers")
+    eligible_writer_indices = _eligible_writers(writer_indices, min_samples)
     selected_writer_ids = _select_writer_ids(
         eligible_writer_indices,
         requested_clients,
@@ -138,18 +118,7 @@ def generate_femnist_from_config(
     shards_dir = output_dir / "shards"
     shards_dir.mkdir(parents=True, exist_ok=True)
 
-    train_ratio = float(client_splits["train_ratio"])
-    eval_ratio = float(client_splits["eval_ratio"])
-    test_ratio = float(client_splits.get("test_ratio", 0.0))
-    if eval_ratio <= 0.0:
-        raise ValueError("FEMNIST requires client_splits.eval_ratio > 0 for model selection")
-    if test_ratio <= 0.0:
-        raise ValueError(
-            "FEMNIST requires client_splits.test_ratio > 0. FEMNIST has no "
-            "external test set, and this generator cuts one as a third "
-            "per-writer slice; without it global_test.pt is a copy of the eval "
-            "data and central_test_* is the validation metric under another name"
-        )
+    train_ratio, eval_ratio, test_ratio = _split_ratios(client_splits)
 
     clients_metadata: list[dict[str, Any]] = []
     client_stats: list[dict[str, object]] = []
@@ -271,21 +240,7 @@ def generate_femnist_from_config(
             on_progress(f"preparing writer {position + 1:,}/{len(selected_writer_ids):,}")
 
     if similarity is not None:
-        mixed = [[] for _ in held]
-        for split, (image_at, label_at) in enumerate(((0, 1), (2, 3), (4, 5))):
-            pool_x = torch.cat([slices[image_at] for _, slices in held])
-            pool_y = torch.cat([slices[label_at] for _, slices in held])
-            dealt = similarity_mix(
-                pool_y,
-                [len(slices[label_at]) for _, slices in held],
-                similarity,
-                torch.Generator().manual_seed(
-                    derive_seed(seed, "femnist_similarity_mix", str(split))
-                ),
-            )
-            for client, positions in enumerate(dealt):
-                mixed[client].extend((pool_x[positions], pool_y[positions]))
-        for (writer_id, _), slices in zip(held, mixed, strict=True):
+        for writer_id, slices in _mixed_slices(held, similarity, seed):
             write_client(writer_id, *slices, torch.cat([slices[1], slices[3], slices[5]]))
 
     test_x = torch.cat(global_test_x, dim=0)
@@ -349,6 +304,84 @@ def generate_femnist_from_config(
         num_examples=total_examples,
         num_test_examples=len(test_y),
     )
+
+
+def _eligible_writers(
+    writer_indices: Mapping[str, list[int]], min_samples: int
+) -> dict[str, list[int]]:
+    """The writers with at least ``min_samples`` examples, in source order; refused if none."""
+
+    eligible = {
+        writer_id: indices
+        for writer_id, indices in writer_indices.items()
+        if len(indices) >= min_samples
+    }
+    if not eligible:
+        raise ValueError("FEMNIST source contains no eligible writers")
+    return eligible
+
+
+def _partition_strategy(partition_config: Mapping[str, Any]) -> tuple[str, float | None]:
+    """``partition.strategy``, and ``similarity`` for ``similarity_mix`` (None for ``natural``)."""
+
+    strategy = str(partition_config.get("strategy", "natural"))
+    if strategy not in {"natural", "similarity_mix"}:
+        raise ValueError(
+            "FEMNIST requires partition.strategy=natural or partition.strategy=similarity_mix"
+        )
+    if strategy == "natural":
+        if "similarity" in partition_config:
+            raise ValueError("partition.similarity is similarity_mix's; natural takes none")
+        return strategy, None
+    similarity = partition_config.get("similarity")
+    if isinstance(similarity, bool) or not isinstance(similarity, int | float):
+        raise ValueError("partition.similarity must be a number in [0, 1]")
+    similarity = float(similarity)
+    if not 0.0 <= similarity <= 1.0:
+        raise ValueError("partition.similarity must be in [0, 1]")
+    return strategy, similarity
+
+
+def _split_ratios(client_splits: Mapping[str, float]) -> tuple[float, float, float]:
+    """The train, eval and test ratios each writer is cut by; eval and test must be positive."""
+
+    train_ratio = float(client_splits["train_ratio"])
+    eval_ratio = float(client_splits["eval_ratio"])
+    test_ratio = float(client_splits.get("test_ratio", 0.0))
+    if eval_ratio <= 0.0:
+        raise ValueError("FEMNIST requires client_splits.eval_ratio > 0 for model selection")
+    if test_ratio <= 0.0:
+        raise ValueError(
+            "FEMNIST requires client_splits.test_ratio > 0. FEMNIST has no "
+            "external test set, and this generator cuts one as a third "
+            "per-writer slice; without it global_test.pt is a copy of the eval "
+            "data and central_test_* is the validation metric under another name"
+        )
+    return train_ratio, eval_ratio, test_ratio
+
+
+def _mixed_slices(
+    held: Sequence[tuple[str, tuple[Tensor, ...]]], similarity: float, seed: int
+) -> list[tuple[str, list[Tensor]]]:
+    """Each writer's six slices dealt from the pools of every writer's (``similarity_mix``).
+
+    Per split, the pooled images are dealt into the writers' natural slice
+    sizes, with a generator seeded for that split.
+    """
+
+    mixed: list[list[Tensor]] = [[] for _ in held]
+    for split, (image_at, label_at) in enumerate(((0, 1), (2, 3), (4, 5))):
+        pool_x = torch.cat([slices[image_at] for _, slices in held])
+        pool_y = torch.cat([slices[label_at] for _, slices in held])
+        dealt = similarity_mix(
+            pool_y,
+            [len(slices[label_at]) for _, slices in held],
+            similarity,
+            torch.Generator().manual_seed(derive_seed(seed, "femnist_similarity_mix", str(split))),
+        )
+        for client, positions in enumerate(dealt):
+            mixed[client].extend((pool_x[positions], pool_y[positions]))
+    return [(writer_id, slices) for (writer_id, _), slices in zip(held, mixed, strict=True)]
 
 
 def _load_source_dataset(
