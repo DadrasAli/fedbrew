@@ -668,6 +668,7 @@ class PL1DTask(TaskAdapter):
         buffers: Mapping[str, Tensor] | None,
         batch: tuple[Tensor, ...],
         mask: Tensor | None = None,
+        outputs: bool = True,
     ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
         """``functional_loss``'s gradient for a stack of clients, in closed form (BatchableTask).
 
@@ -678,10 +679,13 @@ class PL1DTask(TaskAdapter):
         del model, buffers
         shifts = batch[0]
         x = params["x"]
-        per_row = x * x + 3.0 * torch.sin(x) ** 2 + shifts * x
-        weights = stacked_row_weights(per_row, mask)
         slope = 2.0 * x + 3.0 * torch.sin(2.0 * x) + shifts
+        # The rows' weights read only the stack's shape and dtype.
+        weights = stacked_row_weights(slope, mask)
         gradient = (weights * slope).sum(1, keepdim=True)
+        if not outputs:
+            return {"x": gradient}, {}
+        per_row = x * x + 3.0 * torch.sin(x) ** 2 + shifts * x
         return {"x": gradient}, {"loss": stacked_row_mean(per_row, mask)}
 
     def functional_eval(

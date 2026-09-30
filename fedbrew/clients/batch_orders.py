@@ -371,8 +371,11 @@ def _draw_with_replacement(
     """
 
     generator = torch.Generator()
+    counts = steps.tolist()
+    drawn: list[int] = []
+    draws: list[Tensor] = []
     for client in torch.nonzero(oracle).view(-1).tolist():
-        order, count = orders[client], int(steps[client])
+        order, count = orders[client], counts[client]
         if not order.shuffle:
             raise ValueError("an iid oracle's order is declared shuffled")
         seed = all_seeds[client]
@@ -381,9 +384,19 @@ def _draw_with_replacement(
         if count == 0:
             continue
         generator.manual_seed(int(seed))
-        indices[client, :count, : order.batch_size] = torch.randint(
-            order.rows, (count, order.batch_size), generator=generator, dtype=_LONG
+        drawn.append(client)
+        draws.append(
+            torch.randint(order.rows, (count, order.batch_size), generator=generator, dtype=_LONG)
         )
+    if not draws:
+        return
+    if all(draw.shape == draws[0].shape for draw in draws):
+        # Every client's draws one shape: written in one assignment.
+        count, size = draws[0].shape
+        indices[torch.tensor(drawn, dtype=_LONG), :count, :size] = torch.stack(draws)
+        return
+    for client, draw in zip(drawn, draws, strict=True):
+        indices[client, : draw.shape[0], : draw.shape[1]] = draw
 
 
 def _permutations(

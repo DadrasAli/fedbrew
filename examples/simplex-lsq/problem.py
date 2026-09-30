@@ -866,6 +866,7 @@ class SimplexLSQTask(TaskAdapter):
         buffers: Mapping[str, Tensor] | None,
         batch: tuple[Tensor, ...],
         mask: Tensor | None = None,
+        outputs: bool = True,
     ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
         """``functional_loss``'s gradient for a stack of clients, in closed form (BatchableTask).
 
@@ -878,6 +879,8 @@ class SimplexLSQTask(TaskAdapter):
         residual = torch.bmm(x.unsqueeze(1), features.transpose(1, 2)).squeeze(1) - targets
         weights = stacked_row_weights(residual, mask)
         gradient = torch.bmm((weights * residual).unsqueeze(1), features).squeeze(1)
+        if not outputs:
+            return {"x": gradient}, {}
         return {"x": gradient}, {"loss": 0.5 * stacked_row_mean(residual * residual, mask)}
 
     def functional_eval(

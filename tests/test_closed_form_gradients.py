@@ -10,7 +10,8 @@ each example and each of its problems:
   ``torch.func.grad`` of the task's own ``functional_loss`` within ``1e-12`` of
   its largest entry, and each step output (the loss) within ``1e-12``
   relative -- an l1 term included, whose subgradient at exactly 0 is 0 both
-  ways;
+  ways; asked for no outputs, as a training step asks, the gradients are the
+  same bits and no loss is computed;
 - a run of the shipped arm with ``closed_form`` agrees with the same run on
   ``vmap_grad`` within the batched executor's tolerance, in every CSV cell
   and checkpoint, and run.json records the form.
@@ -143,6 +144,11 @@ class TheClosedFormIsAutogradTest(unittest.TestCase):
     def _check(self, task, model, buffers, x, batch, mask, where) -> None:  # type: ignore[no-untyped-def]
         with torch.no_grad():
             grads, outputs = task.closed_form_gradient(model, {"x": x}, buffers, batch, mask)
+            bare, none = task.closed_form_gradient(
+                model, {"x": x}, buffers, batch, mask, outputs=False
+            )
+        self.assertTrue(torch.equal(bare["x"], grads["x"]), f"{where} without outputs")
+        self.assertNotIn("loss", none, where)
         for client in range(CLIENTS):
 
             def loss(params: Any, client: int = client) -> Any:

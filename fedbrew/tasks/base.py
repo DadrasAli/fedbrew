@@ -87,11 +87,14 @@ class BatchableTask(Protocol):
     and the result is the unpadded batch's, up to summation order.
 
     One more is optional and opt-in:
-    ``closed_form_gradient(model, params, buffers, batch, mask)`` gives the
-    gradient of ``functional_loss`` in closed form for a whole stack at once --
-    ``params``, ``batch`` and ``mask`` each with a leading client dimension --
-    as ``(gradients, outputs)``: the gradients stacked like ``params``, and the
-    outputs ``functional_loss`` returns, each stacked over the clients. A run
+    ``closed_form_gradient(model, params, buffers, batch, mask, outputs=True)``
+    gives the gradient of ``functional_loss`` in closed form for a whole stack
+    at once -- ``params``, ``batch`` and ``mask`` each with a leading client
+    dimension -- as ``(gradients, outputs)``: the gradients stacked like
+    ``params``, and the outputs ``functional_loss`` returns, each stacked over
+    the clients. With ``outputs=False`` -- how a training step asks, which
+    reads no output but ``total`` -- only ``total`` is returned, where the
+    task has one, and the gradients are the same tensors. A run
     takes it with ``runtime.performance.gradient_form: closed_form``, which a
     task without it refuses. It is the same gradient to rounding: an ``l1``
     term takes ``lam * sign(x)``, 0 at exactly 0, as autograd does.
@@ -215,11 +218,11 @@ def row_mean(values: Tensor, mask: Tensor | None = None) -> Tensor:
 
 
 def stacked_row_weights(values: Tensor, mask: Tensor | None = None) -> Tensor:
-    """Each row's weight in its client's ``row_mean``, for a stack of ``(clients, rows)``.
+    """Each row's weight in its client's ``row_mean``, for a stack of ``(clients, rows, ...)``.
 
     ``row_mean``'s derivative with respect to each row's value: ``1 / rows``,
-    or under ``mask`` the row's mask over its client's real rows. In
-    ``values``' dtype and device.
+    or under ``mask`` the row's mask over its client's real rows, ``(clients,
+    rows)``. In ``values``' dtype and device; only their shape is read.
     """
 
     if mask is None:

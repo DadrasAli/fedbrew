@@ -837,6 +837,7 @@ class NonconvexSimplexTask(TaskAdapter):
         buffers: Mapping[str, Tensor] | None,
         batch: tuple[Tensor, ...],
         mask: Tensor | None = None,
+        outputs: bool = True,
     ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
         """``functional_loss``'s gradient for a stack of clients, in closed form (BatchableTask).
 
@@ -846,12 +847,15 @@ class NonconvexSimplexTask(TaskAdapter):
         del model, buffers
         graphs = batch[0]
         x = params["x"]
-        per_row = -0.5 * torch.einsum("cj,cnjk,ck->cn", x, graphs, x)
-        weights = stacked_row_weights(per_row, mask)
+        # The rows' weights read only the stack's shape and dtype.
+        weights = stacked_row_weights(graphs, mask)
         weighted = torch.einsum("cn,cnjk->cjk", weights, graphs)
         gradient = -0.5 * (
             torch.einsum("cjk,ck->cj", weighted, x) + torch.einsum("ckj,ck->cj", weighted, x)
         )
+        if not outputs:
+            return {"x": gradient}, {}
+        per_row = -0.5 * torch.einsum("cj,cnjk,ck->cn", x, graphs, x)
         return {"x": gradient}, {"loss": stacked_row_mean(per_row, mask)}
 
     def functional_eval(

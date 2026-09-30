@@ -857,6 +857,7 @@ class DriftQuadTask(TaskAdapter):
         buffers: Mapping[str, Tensor] | None,
         batch: tuple[Tensor, ...],
         mask: Tensor | None = None,
+        outputs: bool = True,
     ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
         """``functional_loss``'s gradient for a stack of clients, in closed form (BatchableTask).
 
@@ -868,12 +869,15 @@ class DriftQuadTask(TaskAdapter):
         offsets = batch[0]
         x = params["x"]
         curvature = (buffers or {}).get("curvature", model.curvature)
-        per_row = 0.5 * (curvature * x * x).sum(-1, keepdim=True) - torch.bmm(
-            x.unsqueeze(1), offsets.transpose(1, 2)
-        ).squeeze(1)
-        weights = stacked_row_weights(per_row, mask)
+        # The rows' weights read only the stack's shape and dtype.
+        weights = stacked_row_weights(offsets, mask)
         gradient = weights.sum(1, keepdim=True) * (curvature * x) - torch.bmm(
             weights.unsqueeze(1), offsets
+        ).squeeze(1)
+        if not outputs:
+            return {"x": gradient}, {}
+        per_row = 0.5 * (curvature * x * x).sum(-1, keepdim=True) - torch.bmm(
+            x.unsqueeze(1), offsets.transpose(1, 2)
         ).squeeze(1)
         return {"x": gradient}, {"loss": stacked_row_mean(per_row, mask)}
 

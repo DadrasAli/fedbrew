@@ -1892,6 +1892,7 @@ class FedLogisticL1Task(TaskAdapter):
         buffers: Mapping[str, Tensor] | None,
         batch: tuple[Tensor, ...],
         mask: Tensor | None = None,
+        outputs: bool = True,
     ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
         """``functional_loss``'s gradient for a stack of clients, in closed form (BatchableTask).
 
@@ -1906,15 +1907,17 @@ class FedLogisticL1Task(TaskAdapter):
         x = params["x"]
         signed = -labels * torch.bmm(x.unsqueeze(1), features.transpose(1, 2)).squeeze(1)
         weights = stacked_row_weights(signed, mask)
-        if model.loss_form == "logistic":
-            smooth = stacked_row_mean(torch.nn.functional.softplus(signed), mask)
-        else:
-            smooth = 1.0 + stacked_row_mean(torch.tanh(signed), mask)
         slope = LOSSES[model.loss_form][1](signed)
         coefficients = (-labels * slope * weights).unsqueeze(1)
         lam = model.penalty_strength
         gradient = torch.bmm(coefficients, features).squeeze(1)
         gradient = gradient + PENALTIES[model.penalty_form][1](x, lam)
+        if not outputs:
+            return {"x": gradient}, {}
+        if model.loss_form == "logistic":
+            smooth = stacked_row_mean(torch.nn.functional.softplus(signed), mask)
+        else:
+            smooth = 1.0 + stacked_row_mean(torch.tanh(signed), mask)
         return {"x": gradient}, {"loss": smooth + _stacked_penalty(x, lam, model.penalty_form)}
 
     def functional_eval(

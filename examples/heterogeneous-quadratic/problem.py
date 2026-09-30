@@ -1092,6 +1092,7 @@ class HeterogeneousQuadraticTask(TaskAdapter):
         buffers: Mapping[str, Tensor] | None,
         batch: tuple[Tensor, ...],
         mask: Tensor | None = None,
+        outputs: bool = True,
     ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
         """``functional_loss``'s gradient for a stack of clients, in closed form (BatchableTask).
 
@@ -1106,16 +1107,20 @@ class HeterogeneousQuadraticTask(TaskAdapter):
         dim = x.shape[-1]
         u = x - self._centre
         curvature, linear = features[..., :dim], features[..., dim:]
-        per_row = (curvature * profile(self.member, u, self.theta).unsqueeze(1)).sum(-1) + (
-            linear * u.unsqueeze(1)
-        ).sum(-1)
-        weights = stacked_row_weights(per_row, mask).unsqueeze(2)
+        # The rows' weights read only the stack's shape and dtype.
+        weights = stacked_row_weights(features, mask).unsqueeze(2)
         gradient = (weights * curvature).sum(1) * profile_slope(self.member, u, self.theta) + (
             weights * linear
         ).sum(1)
-        loss = stacked_row_mean(per_row, mask)
         if self.member == LASSO:
             gradient = gradient + self.lam * torch.sign(x)
+        if not outputs:
+            return {"x": gradient}, {}
+        per_row = (curvature * profile(self.member, u, self.theta).unsqueeze(1)).sum(-1) + (
+            linear * u.unsqueeze(1)
+        ).sum(-1)
+        loss = stacked_row_mean(per_row, mask)
+        if self.member == LASSO:
             loss = loss + self.lam * x.abs().sum(-1)
         return {"x": gradient}, {"loss": loss}
 

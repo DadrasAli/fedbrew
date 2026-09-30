@@ -789,6 +789,8 @@ class _Steps:
         self.sliced = bool(orders.contiguous[where].all())
         self._on_device: tuple[Tensor, Tensor] | None = None
         self._every: tuple[Tensor, ...] | None = None
+        #: Each step's views into ``_every``, made with it (``_step_views``).
+        self._views: tuple[tuple[Tensor, ...] | None, list[tuple[Tensor, ...]]] = (None, [])
         self._found: tuple[int | None] | None = None
         self._repeated: dict[int, tuple[tuple[Tensor, ...], Tensor | None]] = {}
 
@@ -860,6 +862,18 @@ class _Steps:
             )
         return self._every
 
+    def _step_views(self) -> list[tuple[Tensor, ...]]:
+        """Each step's batches, views into ``_gathered``, taken for all steps in one ``unbind``.
+
+        Step ``t``'s is ``gathered[:, t]``, the same view (storage, offset and
+        strides) as indexing it a step at a time.
+        """
+
+        every = self._gathered()
+        if self._views[0] is not every:
+            self._views = (every, list(zip(*(tensor.unbind(1) for tensor in every), strict=True)))
+        return self._views[1]
+
     def _device(self) -> tuple[Tensor, Tensor]:
         """The indices, as rows of the flattened stack, and the lengths, on the rows' device."""
 
@@ -898,7 +912,9 @@ class _Steps:
             first = self.first_starts[step]
             batch = tuple(tensor[:, first : first + width] for tensor in rows.tensors)
         elif self._every is not None or self._small():
-            batch = tuple(gathered[:, step, :width] for gathered in self._gathered())
+            batch = self._step_views()[step]
+            if width != self._indices.shape[2]:
+                batch = tuple(view[:, :width] for view in batch)
         else:
             indices, _ = self._device()
             index = indices[:, step, :width].reshape(-1)
@@ -1513,6 +1529,26 @@ class _Bucket:
                 values=values,
             )
 
+        # A closed form's steps record nothing for autograd: one no_grad for
+        # all of them, not one a step.
+        with torch.no_grad() if self.closed else nullcontext():
+            return self._summed_steps(
+                params, state, corrections, outputs, update, combine, full_update
+            )
+
+    def _summed_steps(
+        self,
+        params: dict[str, Tensor],
+        state: Any,
+        corrections: list[tuple[Any, int | None]],
+        outputs: list[dict[str, Tensor]],
+        update: Any,
+        combine: Any,
+        full_update: Any,
+    ) -> tuple[dict[str, Tensor], list[dict[str, Tensor]], int]:
+        """``_run_summed``'s steps."""
+
+        program = self.program
         step = 0
         for number, count in enumerate(self.structure, start=1):
             if program.combine == "batch":
@@ -1586,11 +1622,13 @@ class _Bucket:
     def _stack_gradients(
         self, params: dict[str, Tensor], batch: tuple[Tensor, ...], mask: Tensor | None
     ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
-        """Every client's gradient and step outputs, in the stack's form: closed or summed."""
+        """Every client's gradient and step outputs, in the stack's form: closed or summed.
+
+        A closed form's steps run under ``_run_summed``'s one ``no_grad``.
+        """
 
         if self.closed:
-            with torch.no_grad():
-                return closed_gradients(self.task, self.model, params, self.buffers, batch, mask)
+            return closed_gradients(self.task, self.model, params, self.buffers, batch, mask)
         return self._summed_gradients(params, batch, mask)
 
     def _summed_gradients(
@@ -1762,10 +1800,11 @@ def closed_gradients(
 
     ``params``, ``batch`` and ``mask`` carry a leading client dimension; what
     comes back is each client's gradient of its batch's ``functional_loss``,
-    stacked like ``params``, and each client's outputs, stacked over clients.
+    stacked like ``params``, and the step outputs a training step reads --
+    ``total``, where the task has one -- stacked over clients.
     """
 
-    grads, outputs = task.closed_form_gradient(model, params, buffers, batch, mask)
+    grads, outputs = task.closed_form_gradient(model, params, buffers, batch, mask, outputs=False)
     return dict(grads), dict(outputs)
 
 

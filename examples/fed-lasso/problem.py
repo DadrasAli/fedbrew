@@ -1159,6 +1159,7 @@ class FedLassoTask(TaskAdapter):
         buffers: Mapping[str, Tensor] | None,
         batch: tuple[Tensor, ...],
         mask: Tensor | None = None,
+        outputs: bool = True,
     ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
         """``functional_loss``'s gradient for a stack of clients, in closed form (BatchableTask).
 
@@ -1176,6 +1177,8 @@ class FedLassoTask(TaskAdapter):
         level, form = model.penalty_strength, model.penalty_form
         gradient = torch.bmm((weights * residual).unsqueeze(1), features).squeeze(1)
         gradient = gradient + penalty_gradient(x, level, form, rows)
+        if not outputs:
+            return {"x": gradient}, {}
         if form == "l1":
             penalty = level * x.abs().sum(-1)
         else:
