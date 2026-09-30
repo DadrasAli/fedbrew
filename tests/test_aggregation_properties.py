@@ -134,16 +134,27 @@ class AggregationInvarianceTests(unittest.TestCase):
         dropped from the numerator but not the denominator, or when the
         denominator is a roster rather than the participating set -- all of
         which leave the result finite and none of which stay inside the hull.
+
+        Inside it up to float32's own rounding, which scales with the values'
+        magnitude, not the hull's width: the running sum rounds once a client
+        and the division once more, so a mean of values near 1e3 can sit a few
+        ulps (6.1e-5 each there) outside a hull narrower than one. Hypothesis
+        found weights 9125.6875, 0.125 and 0.1 over 988.75, 988.0 and 988.0:
+        the exact mean is 988.74998, the float32 sum gives 988.75018, 1.9e-7
+        relative above, where a fixed 1e-4 allowed 1.0e-7.
         """
 
         result = _mean(clients)
         states = [_state(values) for _, values in clients]
+        eps = torch.finfo(torch.float32).eps
         for key in SHAPES:
             stacked = torch.stack([state[key] for state in states])
             lower, upper = stacked.min(dim=0).values, stacked.max(dim=0).values
             span = (upper - lower).clamp(min=1.0)
-            self.assertTrue(bool((result[key] >= lower - 1e-4 * span).all()))
-            self.assertTrue(bool((result[key] <= upper + 1e-4 * span).all()))
+            magnitude = torch.maximum(lower.abs(), upper.abs())
+            slack = 1e-4 * span + (len(clients) + 2) * eps * magnitude
+            self.assertTrue(bool((result[key] >= lower - slack).all()))
+            self.assertTrue(bool((result[key] <= upper + slack).all()))
 
     @SETTINGS
     @given(clients=CLIENTS, duplicates=st.integers(min_value=2, max_value=4))
