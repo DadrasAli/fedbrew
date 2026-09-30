@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 import torch
-from torch import optim
+from torch import Tensor, optim
 
 from fedbrew.clients.batch_orders import LocalLoop
 from fedbrew.clients.batched_update import (
@@ -33,6 +33,7 @@ from fedbrew.core.protocol import ClientInfo, FitRequest, FitResult
 from fedbrew.core.torch_utils import (
     StateDict,
     add_model_states,
+    as_cpu_tensor,
     clone_model_state,
     get_model_state,
     load_model_state,
@@ -196,15 +197,26 @@ class TorchScaffoldClient(TorchSGDClient[TaskAdapter]):
     ) -> StateDict:
         """Option II's new ``c_i``, kept, and the delta it made."""
 
-        correction = scale_model_state(
-            subtract_model_states(global_state, local_state),
-            1.0 / (local_steps * self.learning_rate),
-        )
-        new_client_control = add_model_states(
-            subtract_model_states(old_client_control, server_control),
-            correction,
-        )
-        control_delta = subtract_model_states(new_client_control, old_client_control)
+        # Each step the helpers' own operation; the three that follow the two
+        # differences write into those differences' own tensors, which this
+        # method made, where the dtypes leave nothing to promote.
+        correction = subtract_model_states(global_state, local_state)
+        scale = 1.0 / (local_steps * self.learning_rate)
+        new_client_control = subtract_model_states(old_client_control, server_control)
+        if not _same_dtypes(correction, new_client_control):
+            correction = scale_model_state(correction, scale)
+            new_client_control = add_model_states(new_client_control, correction)
+            control_delta = subtract_model_states(new_client_control, old_client_control)
+        else:
+            control_delta = {}
+            for key, value in correction.items():
+                value.mul_(float(scale))
+                total = new_client_control[key].add_(value)
+                old = as_cpu_tensor(key, old_client_control[key])
+                if old.dtype != total.dtype:
+                    control_delta[key] = total - old
+                else:
+                    control_delta[key] = torch.sub(total, old, out=value)
         self._client_control = new_client_control
         return control_delta
 
@@ -429,3 +441,9 @@ def _control_tensor(value: Any, name: str, device: torch.device) -> torch.Tensor
     if not isinstance(value, torch.Tensor):
         raise TypeError(f"control variate for {name} is not a tensor")
     return value.detach().to(device)
+
+
+def _same_dtypes(first: Mapping[str, Tensor], second: Mapping[str, Tensor]) -> bool:
+    """Whether two states' tensors share a dtype name by name."""
+
+    return all(first[key].dtype == second[key].dtype for key in first)

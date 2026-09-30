@@ -11,12 +11,14 @@ from fedbrew.core.torch_utils import (
     StateDict,
     WeightedStateAccumulator,
     add_model_states,
+    as_cpu_tensor,
     clone_model_state,
     copy_state_into,
     load_model_state,
     refuse_non_finite_state,
     scale_model_state,
     squared_l2_norm_model_state,
+    validate_matching_keys,
     zeros_like_model_state,
 )
 from fedbrew.servers.fedavg import FedAvgServer, WeightedMetricAccumulator
@@ -198,10 +200,7 @@ class ScaffoldServer(FedAvgServer):
             metric_accumulator.add(result.metrics, result.num_examples)
             if summed_control_delta is None:
                 summed_control_delta = zeros_like_model_state(control_delta)
-            summed_control_delta = add_model_states(
-                summed_control_delta,
-                control_delta,
-            )
+            summed_control_delta = _added_into(summed_control_delta, control_delta)
             total_control_delta_norm += squared_l2_norm_model_state(control_delta) ** 0.5
             num_results += 1
 
@@ -315,3 +314,22 @@ class ScaffoldServer(FedAvgServer):
         elif self._model_state is not None:
             self._server_control = zeros_like_model_state(self._model_state)
         self._num_clients = int(state.get("num_clients", self._num_clients))
+
+
+def _added_into(total: StateDict, state: Mapping[str, Any]) -> StateDict:
+    """``add_model_states(total, state)``, the sum written into ``total``, which the caller owns.
+
+    The same additions: in place where the two tensors share a dtype, and
+    ``add_model_states``' own, promoting, where they do not. A new sum per
+    client was most of the fold's cost for a thousand clients' deltas.
+    """
+
+    validate_matching_keys(total, state)
+    for key in total:
+        right = as_cpu_tensor(key, state[key])
+        left = total[key]
+        if left.dtype == right.dtype:
+            left.add_(right)
+        else:
+            total[key] = left + right
+    return total
