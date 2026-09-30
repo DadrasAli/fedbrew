@@ -629,6 +629,11 @@ def _per_client(value: Tensor, like: Tensor) -> Tensor:
     shaped = value.to(like.dtype)
     shaped = shaped.reshape(tuple(shaped.shape) + (1,) * (like.dim() - shaped.dim()))
     if held is not None:
+        if shaped.untyped_storage().data_ptr() == value.untyped_storage().data_ptr():
+            # A view of ``value`` kept in ``value``'s own __dict__ holds it
+            # through its base, a cycle the collector cannot see: ``value``
+            # would never be freed. A copy holds nothing of it.
+            shaped = shaped.clone()
         held[key] = shaped
     return shaped
 

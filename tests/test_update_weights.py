@@ -12,7 +12,9 @@ against the slice at a time and a fresh shaping, bit for bit.
 
 from __future__ import annotations
 
+import gc
 import unittest
+import weakref
 
 import pytest
 import torch
@@ -119,6 +121,16 @@ class TheValuesShapesTest(unittest.TestCase):
                 self.assertIs(first, again)
                 self.assertTrue(torch.equal(first, fresh))
                 self.assertEqual(first.dtype, like.dtype)
+
+    def test_a_kept_shape_does_not_keep_its_value(self) -> None:
+        for dtype in (torch.float64, torch.float32):
+            with self.subTest(dtype=dtype):
+                value = torch.tensor([0.5, -0.25, 3.0], dtype=torch.float64)
+                _per_client(value, torch.zeros(3, 4, dtype=dtype))
+                held = weakref.ref(value)
+                del value
+                gc.collect()
+                self.assertIsNone(held())
 
 
 if __name__ == "__main__":
