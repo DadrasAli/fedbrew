@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import io
 import os
 import re
 import struct
@@ -12,6 +13,7 @@ from typing import Any, cast
 
 import torch
 
+from fedbrew.core import writes
 from fedbrew.core.refusal import RunRefused
 
 _CHECKPOINT_NAME_PATTERN = re.compile(r"round_(\d+)\.pt$")
@@ -137,8 +139,18 @@ def get_latest_checkpoint_path(output_dir: str | Path) -> Path:
     return Path(output_dir) / "checkpoints" / "latest.pt"
 
 
-def _stage(payload: Mapping[str, Any], path: Path) -> Path:
+def serialized(payload: Mapping[str, Any]) -> bytes:
+    """What ``torch.save`` writes for ``payload``: a flush serialises on the loop (writes.py)."""
+
+    buffer = io.BytesIO()
+    torch.save(dict(payload), buffer)
+    return buffer.getvalue()
+
+
+def _stage(payload: Mapping[str, Any] | bytes, path: Path) -> Path:
     """Write `payload` beside `path` as "<name>.tmp", flushed and fsynced; return it.
+
+    ``payload`` is the checkpoint, or its bytes as ``serialized`` made them.
 
     Nothing at `path` changes. A write that fails removes its temp file; one
     killed outright leaves it for clear_stale_temp_files to sweep at the next
@@ -149,7 +161,10 @@ def _stage(payload: Mapping[str, Any], path: Path) -> Path:
     temp_path = path.with_name(path.name + ".tmp")
     try:
         with temp_path.open("wb") as handle:
-            torch.save(dict(payload), handle)
+            if isinstance(payload, bytes):
+                handle.write(payload)
+            else:
+                torch.save(dict(payload), handle)
             handle.flush()
             os.fsync(handle.fileno())
     except BaseException:
@@ -199,7 +214,7 @@ class StagedCheckpoints:
     def __init__(self) -> None:
         self._pending: list[tuple[Path, Path]] = []
 
-    def stage(self, payload: Mapping[str, Any], path: Path) -> None:
+    def stage(self, payload: Mapping[str, Any] | bytes, path: Path) -> None:
         """Write ``payload`` for ``path``; a path staged again replaces the earlier payload.
 
         Between two flushes (runtime.flush_every) best.pt can improve twice;
@@ -215,7 +230,7 @@ class StagedCheckpoints:
 
         while self._pending:
             temp_path, path = self._pending.pop(0)
-            os.replace(temp_path, path)
+            writes.replace(temp_path, path)
 
 
 def _write(payload: Mapping[str, Any], path: Path, staged: StagedCheckpoints | None) -> None:

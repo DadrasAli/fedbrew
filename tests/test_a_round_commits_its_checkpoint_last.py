@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from fedbrew.core import loop
+from fedbrew.core import loop, writes
 from fedbrew.core.artifacts import round_metrics_gap
 from fedbrew.core.checkpointing import (
     find_latest_checkpoint,
@@ -61,18 +61,29 @@ class WhileTheRoundIsRecordedItsCheckpointIsStagedTest(unittest.TestCase):
     def test_neither_write_can_see_this_rounds_checkpoint(self) -> None:
         seen: dict[str, list[tuple[int, list[str]]]] = {"csv": [], "run.json": []}
         real_flush = loop.flush_round_artifacts
+        real_writes = writes.run_all
+        flushing: list[int] = []
 
         with tempfile.TemporaryDirectory() as directory:
             output_dir = Path(directory)
 
             def flush(history: Any, *args: Any, **kwargs: Any) -> None:
-                seen["csv"].append((history[-1].round_id, _visible(output_dir)))
+                # Formatted on the loop; the rows are written by the writer
+                # (fedbrew/core/writes.py), where they are observed.
+                flushing.append(history[-1].round_id)
                 real_flush(history, *args, **kwargs)
+
+            def written(collected: Any) -> None:
+                seen["csv"].append((flushing[-1], _visible(output_dir)))
+                real_writes(collected)
 
             def write_run_json(state: Any) -> None:
                 seen["run.json"].append((state.metrics_history[-1].round_id, _visible(output_dir)))
 
-            with mock.patch.object(loop, "flush_round_artifacts", flush):
+            with (
+                mock.patch.object(loop, "flush_round_artifacts", flush),
+                mock.patch.object(writes, "run_all", written),
+            ):
                 _run(output_dir, 3, on_round_flush=write_run_json, checkpointing=_EVERY_ROUND)
 
             final = _visible(output_dir)

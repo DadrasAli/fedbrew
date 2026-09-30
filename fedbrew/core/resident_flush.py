@@ -105,10 +105,10 @@ class RoundClock:
 class WriterStaged:
     """``StagedCheckpoints`` whose temporary files the writer writes, each as it is staged.
 
-    The writer stages them into one ``StagedCheckpoints``, in the order
-    staged, so a path staged again rewrites its one temporary file and keeps
-    its place; the flush commits it (``written``). A payload is held only
-    until the writer has written it.
+    A payload is serialised on the loop as it is staged; the writer writes its
+    bytes into one ``StagedCheckpoints``, in the order staged, so a path
+    staged again rewrites its one temporary file and keeps its place; the
+    flush commits it (``written``). The bytes are held only until written.
     """
 
     def __init__(self, writer: FlushWriter) -> None:
@@ -118,8 +118,12 @@ class WriterStaged:
         self.staged = StagedCheckpoints()
 
     def stage(self, payload: Mapping[str, Any], path: Path) -> None:
-        payload = dict(payload)
-        self.writer.submit(lambda: self.staged.stage(payload, Path(path)))
+        # Serialised here, on the loop: the writer is handed bytes to write,
+        # which is I/O and releases the GIL (fedbrew/core/writes.py).
+        from fedbrew.core.checkpointing import serialized
+
+        data = serialized(payload)
+        self.writer.submit(lambda: self.staged.stage(data, Path(path)))
 
     def written(self) -> Any:
         """The ``StagedCheckpoints`` to commit, once the writer has reached the flush."""

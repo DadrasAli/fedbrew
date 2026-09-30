@@ -12,6 +12,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from fedbrew.core import writes
 from fedbrew.core.config import FullConfig
 from fedbrew.core.metrics import json_safe
 from fedbrew.core.state import (
@@ -74,7 +75,7 @@ def prepare_output_dir(output_dir: str | Path) -> Path:
 
 @contextmanager
 def _atomic_text_writer(path: Path) -> Iterator[Any]:
-    """Yield a file handle for `path`, renamed into place only on clean exit.
+    """Yield a text buffer for `path`, written to it atomically only on clean exit.
 
     The CSVs and run.json are rewritten at the end of every round, so a process
     killed mid-write is no longer a rare event -- it is how a preempted or
@@ -85,18 +86,11 @@ def _atomic_text_writer(path: Path) -> Iterator[Any]:
     checkpoints get the same treatment in checkpointing._save_atomically.
     """
 
-    temp_path = path.with_name(path.name + ".tmp")
-    file = temp_path.open("w", encoding="utf-8", newline="")
-    try:
-        yield file
-        file.flush()
-        os.fsync(file.fileno())
-        file.close()
-    except BaseException:
-        file.close()
-        temp_path.unlink(missing_ok=True)
-        raise
-    os.replace(temp_path, path)
+    buffer = io.StringIO()
+    yield buffer
+    # The text is fixed now; the write is made now, or by the writer thread
+    # when a flush collects it (fedbrew/core/writes.py).
+    writes.write_text_atomically(path, buffer.getvalue())
 
 
 def save_round_metrics_csv(
@@ -209,10 +203,7 @@ def _append_csv_rows(
     payload = buffer.getvalue()
     if not payload:
         return
-    with path.open("a", encoding="utf-8", newline="") as file:
-        file.write(payload)
-        file.flush()
-        os.fsync(file.fileno())
+    writes.append_text(path, payload)
 
 
 def _csv_header(path: Path) -> list[str] | None:

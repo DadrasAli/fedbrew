@@ -220,7 +220,11 @@ class AtomicityClaimTest(unittest.TestCase):
         self.assertTrue(_says("`round_metrics.csv` is appended to every round."))
 
     def test_a_full_rewrite_is_still_atomic(self) -> None:
-        self.assertIn("os.replace(temp_path, path)", self.source)
+        # The writer's text is fixed by _atomic_text_writer and written, to a
+        # temporary file then renamed over the target, by fedbrew/core/writes.py.
+        writes = (REPO_ROOT / "fedbrew" / "core" / "writes.py").read_text(encoding="utf-8")
+        self.assertIn("writes.write_text_atomically(path, buffer.getvalue())", self.source)
+        self.assertIn("os.replace(temp_path, path)", writes)
         self.assertTrue(_says("atomically through `_atomic_text_writer`"))
 
     def test_the_per_client_files_are_appended(self) -> None:

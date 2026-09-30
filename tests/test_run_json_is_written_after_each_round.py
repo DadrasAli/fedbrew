@@ -25,7 +25,7 @@ from unittest import mock
 import yaml
 
 from fedbrew.clients.torch_sgd_client import TorchSGDClient
-from fedbrew.core import runner
+from fedbrew.core import runner, writes
 
 
 def _config(directory: Path, rounds: int) -> Path:
@@ -60,18 +60,32 @@ class RunJsonIsWrittenAfterEachCompletedRoundTest(unittest.TestCase):
                     at_first_fit.append(run_json.exists())
                 return fit(self, request)
 
+            formatted: list[bool] = []
+
             def recording_json_writer(*args: Any, **kwargs: Any) -> Any:
                 write = json_writer(*args, **kwargs)
 
                 def written(state: Any) -> None:
                     write(state)
-                    after_round.append(_read(run_json))
+                    formatted.append(True)
 
+                # Formatted on the loop; the flush's writer writes it after the rows.
+                written.formats_on_loop = write.formats_on_loop  # type: ignore[attr-defined]
                 return written
+
+            run_all = writes.run_all
+
+            def recording_writes(collected: Any) -> None:
+                # A flush's writes -- the rows, then run.json -- read once made.
+                run_all(collected)
+                if formatted:
+                    formatted.clear()
+                    after_round.append(_read(run_json))
 
             with (
                 mock.patch.object(TorchSGDClient, "fit", recording_fit),
                 mock.patch.object(runner, "_run_json_writer", recording_json_writer),
+                mock.patch.object(writes, "run_all", recording_writes),
                 redirect_stdout(StringIO()),
             ):
                 runner.run(config, runner.parse_args(["--quiet"]))

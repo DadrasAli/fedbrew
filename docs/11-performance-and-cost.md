@@ -228,9 +228,10 @@ real `DataLoader`. Chapter 10.
 Both default to 1, every round, and neither changes a number.
 `runtime.flush_every: N` writes the CSV rows, `run.json` and `latest.pt`, each
 with one `fsync`, every N rounds instead of every round; an `fsync` on `/proj`'s
-NFS costs ~7 ms against ~0.7 on `/tmp`, and a round does five. Every write
-runs on one writer thread behind the loop, so the next round trains while a
-flush is written. A kill loses at most the rounds since the last flush the
+NFS costs ~7 ms against ~0.7 on `/tmp`, and a round does five. Every write's
+I/O runs on one writer thread behind the loop, so the next round trains while a
+flush is written; its Python half, formatting and serialising, runs on the
+loop, where it does not contend for the GIL (chapter 09 §2). A kill loses at most the rounds since the last flush the
 writer finished. Chapter 09 §2.
 `evaluation.fit.every: n` runs the post-fit pass behind the `fit_` metrics on
 scheduled rounds only; it was 18% of an MNIST MLP round at 1000 clients. The

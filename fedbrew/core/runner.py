@@ -729,6 +729,9 @@ def _run_json_writer(
             client_update_history=state.client_update_metrics_history,
         )
 
+    # Formatted on the loop as a flush is handed over; its write is made by
+    # the flush's writer after the rows (fedbrew/core/writes.py).
+    write.formats_on_loop = True  # type: ignore[attr-defined]
     return write
 
 

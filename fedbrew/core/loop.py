@@ -124,7 +124,10 @@ def run_fl_loop(
     # on_round_end fires when a round's records are complete; the writer may
     # still be writing that round's flush then, so the disk holds that round
     # or the one before. on_round_flush fires on the writer once a flush's
-    # CSV rows are written -- the hook for files on disk (chapter 09 §2).
+    # CSV rows are written -- the hook for files on disk (chapter 09 §2) --
+    # unless it declares ``formats_on_loop``: then it is called on the loop as
+    # the flush is handed over, and what it writes through
+    # fedbrew/core/writes.py is written after the rows (the runner's run.json).
     on_round_end: Callable[[MetricRecord], None] | None = None,
     on_round_flush: Callable[[ExperimentState], None] | None = None,
     # Fires as each client finishes fit or evaluation within a round --
@@ -1394,24 +1397,39 @@ def _submit_flush(
     writer writes in order ahead of this flush, are not waited for.
     """
 
+    from fedbrew.core import writes
     from fedbrew.core.resident_flush import frozen_state
 
     writer.wait_flush()
-    frozen = frozen_state(state)
-    written = None if staged is None else staged.written()
-    writer.submit(
-        lambda: _flush_rounds(
-            True,
-            frozen,
+    # The rows are formatted here, from the records as they are, and the
+    # writer is handed the writes (fedbrew/core/writes.py): the Python half of
+    # a flush on the loop, its I/O behind it. A hook that formats on the loop
+    # (``formats_on_loop``: the runner's run.json) is called here too, its
+    # writes made after the rows'; any other fires on the writer once the rows
+    # are on disk, with a copy of the records.
+    on_loop = on_round_flush is not None and getattr(on_round_flush, "formats_on_loop", False)
+    with writes.collected() as flush_writes:
+        flush_round_artifacts(
+            state.metrics_history,
+            state.client_metrics_history,
+            state.client_update_metrics_history,
             output_dir,
             per_client_csv,
             csv_cursor,
-            on_round_flush,
-            written,
-            checkpoint_policy,
-        ),
-        flush=True,
-    )
+        )
+        if on_loop:
+            on_round_flush(state)  # type: ignore[misc]
+    observer = None if on_loop else on_round_flush
+    frozen = frozen_state(state) if observer is not None else state
+    written = None if staged is None else staged.written()
+
+    def flush() -> None:
+        writes.run_all(flush_writes)
+        if observer is not None:
+            observer(frozen)
+        _commit_checkpoints(written, output_dir, checkpoint_policy)
+
+    writer.submit(flush, flush=True)
 
 
 def _require_positive_global_rounds(global_rounds: int) -> None:
