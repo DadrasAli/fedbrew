@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import copy
 import csv
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,6 +35,7 @@ import pytest
 import torch
 import yaml
 
+from fedbrew.core import extensions
 from fedbrew.core.batched_evaluator import BatchedEvaluator
 from fedbrew.core.config import divergence_direction, load_config
 from fedbrew.core.factory import build_components
@@ -149,7 +149,10 @@ class AtRandomPointsTest(_Examples):
         components = self.components("fed-lasso")
         server, dataset, task = components.server, components.dataset, components.task
         server.initialize()
-        problem = sys.modules[type(task).__module__]
+        # The example's own file, not sys.modules: whether the module the
+        # extension loader put there is still there depends on what else the
+        # worker ran before this test.
+        problem = extensions._import_file(REPO / "examples" / "fed-lasso" / "problem.py")
         level = task.spec.penalty_strength
         generator = torch.Generator().manual_seed(11)
         for _ in range(3):
