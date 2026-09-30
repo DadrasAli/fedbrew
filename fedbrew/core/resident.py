@@ -521,6 +521,8 @@ class ResidentRounds:
                 )
                 for name, parameter in self.parameters.items()
             }
+        if self.unsupported is None:
+            self._check_broadcast(context.server)
         self.copier = HostCopy(self.device)
         self._client_states: tuple[Any, dict[str, Any] | None] | None = None
         #: The server's model before the round the flush records, on the host.
@@ -570,6 +572,24 @@ class ResidentRounds:
             name: state[name].detach().to(device=parameter.device, dtype=parameter.dtype)
             for name, parameter in self.parameters.items()
         }
+
+    def _check_broadcast(self, server: Any) -> None:
+        """The rule's own check of what the server broadcasts (``batched_start``), once.
+
+        The per-round path makes it for each round's first client, so a rule
+        that cannot train this model -- an adapter-scoped one under a
+        full-state rule -- refuses before the first update; the resident
+        round's broadcast is its server's model throughout, and SCAFFOLD's
+        control, which is what ``configure_round`` hands each client.
+        """
+
+        payload = server._federated_payload()
+        if self.scaffold:
+            payload["server_control"] = server._server_control
+        self.representative.batched_start(
+            FitRequest(round_id=1, client_id=self.representative.client_id, payload=payload),
+            self.template,
+        )
 
     # -- a round -------------------------------------------------------------
 
