@@ -53,10 +53,13 @@ class LazyClientPool(Mapping[str, ClientUpdate]):
         self._clients: dict[str, ClientUpdate] = {}
         self._client_infos: dict[str, ClientInfo] = {}
         self._saved_states: dict[str, dict[str, Any]] = {}
+        #: Clients built to be asked about (:meth:`ask`) and not used since.
+        self._asked: set[str] = set()
 
     def __getitem__(self, client_id: str) -> ClientUpdate:
         if client_id not in self._client_id_set:
             raise KeyError(client_id)
+        self._asked.discard(client_id)
         existing = self._clients.get(client_id)
         if existing is not None:
             if self._keep_resident is None or self._keep_resident(client_id):
@@ -83,21 +86,26 @@ class LazyClientPool(Mapping[str, ClientUpdate]):
     def __contains__(self, client_id: object) -> bool:
         return client_id in self._client_id_set
 
-    def is_built(self, client_id: str) -> bool:
-        """Whether ``client_id``'s client is built now."""
+    def ask(self, client_id: str) -> ClientUpdate:
+        """The client, built if need be, for a question about its rule.
 
-        return client_id in self._clients
-
-    def forget(self, client_id: str) -> None:
-        """Drop a built client and keep nothing of it: for one built only to be asked about.
-
-        Unlike :meth:`evict_client`, no snapshot of it is kept, so the
-        checkpoints (:meth:`get_state_snapshot`) hold what they would have held
-        had it never been built. A state it was given (:meth:`load_state_snapshot`)
-        stays.
+        A client built for that and never used since leaves nothing in the
+        checkpoints (:meth:`get_state_snapshot`), which hold the state of
+        every client the run used: the run is the one it would have been had
+        nobody asked. Any other access to it (:meth:`__getitem__`), or
+        :meth:`used`, makes it a client like any other, built once.
         """
 
-        self._clients.pop(client_id, None)
+        new_or_asked = client_id not in self._clients or client_id in self._asked
+        client = self[client_id]
+        if new_or_asked:
+            self._asked.add(client_id)
+        return client
+
+    def used(self, client_id: str) -> None:
+        """Count a client asked about as used: its state is the run's from here."""
+
+        self._asked.discard(client_id)
 
     @property
     def materialized_client_ids(self) -> list[str]:
@@ -146,7 +154,7 @@ class LazyClientPool(Mapping[str, ClientUpdate]):
         snapshot = {}
         for client_id in self._client_ids:
             client = self._clients.get(client_id)
-            if client is not None:
+            if client is not None and client_id not in self._asked:
                 snapshot[client_id] = dict(client.get_state())
             elif client_id in self._saved_states:
                 snapshot[client_id] = dict(self._saved_states[client_id])
@@ -176,5 +184,8 @@ class LazyClientPool(Mapping[str, ClientUpdate]):
         """
 
         client = self._clients.pop(client_id, None)
-        if client is not None:
+        if client_id in self._asked:
+            # Built to be asked about, never used: nothing of it to keep.
+            self._asked.discard(client_id)
+        elif client is not None:
             self._saved_states[client_id] = dict(client.get_state())

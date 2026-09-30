@@ -126,6 +126,18 @@ class ARunAsWrittenTest(unittest.TestCase):
                         else:
                             self.assertEqual(states[client][key], value)
 
+    def test_a_stated_batched_executor_that_falls_back_keeps_the_first_client(self) -> None:
+        # Asked for and refused, the run used the client the choice built to ask,
+        # as it always has: its state is in the checkpoint, where the default's
+        # is not (the test above).
+        config = example_config("fed-lasso", "fedlalr")
+        config["server"]["participation_rate"] = 0.25
+        config["evaluation"]["test"] = {"every": "never"}
+        output = self.run_as(config, executor="batched")
+        self.assertIn("fallback", _record(output))
+        states = load_checkpoint(output / "checkpoints" / "round_001.pt")["client_states"]
+        self.assertIn("client_0", states)
+
     def test_the_sequential_reference_stated(self) -> None:
         config = example_config("fed-lasso")
         record = _record(self.run_as(config, executor="sequential"))

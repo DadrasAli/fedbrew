@@ -97,7 +97,7 @@ by the guard merely passing.
 | `fedbrew/` | The package. Subpackages: `core/`, `clients/`, `servers/`, `models/`, `tasks/`, `data/`, `cli/`. |
 | `fedbrew/cli/dispatch.py` | The `COMMANDS` dict: the single source of truth for what subcommands exist. |
 | `configs/` | 139 run configs (they carry a `runtime` block, written or through `extends`), 12 family bases (`_base.yaml`, the keys a family's arms share) and 4 asset-preparation configs under `configs/llm_assets/`. |
-| `tests/` | 249 test modules. Several exist only to keep documentation and code in agreement. |
+| `tests/` | 250 test modules. Several exist only to keep documentation and code in agreement. |
 | `AUDIT/` | **Local-only and gitignored — absent in a fresh clone.** Audit reports describing the code as it was when each was written; they are **not** updated after a fix, and several findings they raise were resolved by deleting the option entirely. Never cite one as current behaviour, and never reference an `AUDIT/` path from a chapter: a reader cannot open it. |
 
 **Commands**

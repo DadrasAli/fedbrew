@@ -343,7 +343,8 @@ It is the default: a run that states no `executor` takes it wherever its task
 and rule can be batched, and the sequential executor where they cannot, which
 the plan header and `run.json` record as the default, with the reason, not as
 a fallback. That run is the sequential run: the client built to ask whether
-its rule can be batched is dropped again, so its checkpoints hold the client
+its rule can be batched is not counted as one the run used until it fits or
+evaluates it (`LazyClientPool.ask`), so its checkpoints hold the client
 states the stated sequential run's hold. `sequential`, stated, is the
 reference it is held to, and every test holds the batched paths to it on
 autograd.
@@ -949,6 +950,7 @@ python tools/bench_compare_runs.py --help
 | `tests/test_shard_cache.py` | The cache is bounded, and serves without handing over what it keeps. |
 | `tests/test_data_staging.py` | An unresolvable root stages nothing. |
 | `tests/test_lazy_client_pool_selection.py` | The lazy pool follows from the dataset. |
+| `tests/test_lazy_client_pool_ask.py` | A client built to be asked about (`LazyClientPool.ask`) is built once, and is in the checkpoints' client states only once the run uses it. |
 | `tests/test_fast_batching.py` | `fast_batching` matches the real `DataLoader`. |
 | `tests/test_evaluation_client_scope.py` | The four client scopes. |
 | `tests/test_round_timing.py` | The six phase timings. |

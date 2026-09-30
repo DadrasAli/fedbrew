@@ -2454,7 +2454,8 @@ def _batched_check(components: Any) -> tuple[str | None, nn.Module | None]:
     client_ids = list(components.clients)
     if not client_ids:
         return "the run has no clients", None
-    client = components.clients[client_ids[0]]
+    ask = getattr(components.clients, "ask", None)
+    client = ask(client_ids[0]) if callable(ask) else components.clients[client_ids[0]]
     unsupported = getattr(client, "batched_unsupported", None)
     if not callable(unsupported):
         return f"update rule {type(client).__name__} declares no batched update", None
@@ -2510,18 +2511,15 @@ def select_executor(
     if asked_executor(performance) == "sequential":
         return None, _sequential(components, performance, {"default": False})
     compile_asked = compile_mode(performance.get("compile"))
-    pool = components.clients
-    first = next(iter(pool), None)
-    is_built = getattr(pool, "is_built", None)
-    asked_about = first is not None and callable(is_built) and not is_built(first)
     reason, model = _batched_check(components)
+    used = getattr(components.clients, "used", None)
+    if callable(used) and (stated or reason is None):
+        # A run that stated batched, or takes it, uses the client the check
+        # asked; one that only fell back by default is the sequential run it
+        # was before there was a default, which used no client it did not fit
+        # or evaluate.
+        used(next(iter(components.clients)))
     if reason is not None:
-        if not stated and asked_about:
-            # Only the default asked, and the run is the sequential run it was
-            # before there was a default: the client built to be asked leaves
-            # nothing in its checkpoints, where a run's states are every built
-            # client's (a stated batched executor always built it).
-            pool.forget(first)
         # Asked for and refused is a fallback; taken by default, it is only why.
         record = {"default": not stated, "fallback" if stated else "reason": reason}
         record = _sequential(components, performance, record)
