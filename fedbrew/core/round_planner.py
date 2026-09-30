@@ -490,18 +490,26 @@ def roster_plan(components: Any) -> tuple[RosterPlan | None, str | None]:
     """The run's :class:`RosterPlan`, or None and why its rounds cannot be planned ahead.
 
     Planned ahead only where every round's orders are a function of the
-    roster: FedAvg's own sampling, a rule whose loop and loaders are its
-    class's (``batched_loop``, ``train_order``), one configuration for
+    roster: FedAvg's own sampling (SCAFFOLD's server samples through it), a
+    rule whose loop and loaders are its class's (``batched_loop``,
+    ``train_order``; SCAFFOLD's plan takes its loop from ``batched_loop``), one configuration for
     every client -- the factory builds each from the run's one config -- and a
     task that declares what its loaders yield. Each client's data is read
     once, here, for its training split's row count.
     """
 
     from fedbrew.clients.fedavg_client import FedAvgClient
+    from fedbrew.clients.torch_scaffold_client import TorchScaffoldClient
     from fedbrew.clients.torch_sgd_client import TorchSGDClient, _get_train_data
     from fedbrew.servers.fedavg import FedAvgServer
+    from fedbrew.servers.scaffold import ScaffoldServer
 
-    reason = _unplannable(components, FedAvgServer, (FedAvgClient, TorchSGDClient))
+    reason = _unplannable(
+        components,
+        FedAvgServer,
+        (FedAvgServer.configure_round, ScaffoldServer.configure_round),
+        (FedAvgClient, TorchSGDClient, TorchScaffoldClient),
+    )
     if reason is not None:
         return None, reason
     clients, dataset, server = components.clients, components.dataset, components.server
@@ -536,14 +544,24 @@ def roster_plan(components: Any) -> tuple[RosterPlan | None, str | None]:
     )
 
 
-def _unplannable(components: Any, server_class: type, rule_classes: tuple[type, ...]) -> str | None:
-    """Why a run's rounds cannot be planned from its roster, or None."""
+def _unplannable(
+    components: Any,
+    server_class: type,
+    configure: tuple[Any, ...],
+    rule_classes: tuple[type, ...],
+) -> str | None:
+    """Why a run's rounds cannot be planned from its roster, or None.
+
+    ``configure`` holds the ``configure_round`` s that sample through
+    ``server_class.sample_clients`` and nothing else.
+    """
 
     server = components.server
     cls = type(server)
-    if not isinstance(server, server_class) or any(
-        getattr(cls, name) is not getattr(server_class, name)
-        for name in ("sample_clients", "configure_round")
+    if (
+        not isinstance(server, server_class)
+        or cls.sample_clients is not server_class.sample_clients
+        or cls.configure_round not in configure
     ):
         return f"server {cls.__name__} does not sample as FedAvg samples"
     client_ids = list(components.dataset.list_clients())

@@ -15,7 +15,10 @@ different sizes under ``sequential_epoch`` (a FEMNIST-like round: several
 buckets, some of one client, whose fold is the CPU's), the own-loop rules,
 uniform weighting, a post-fit pass on some rounds only, a flush every third
 round, and stops inside a flush window: a stall verdict and an aggregate that
-is not finite.
+is not finite. SCAFFOLD, whose controls the round holds on the device, is
+held to the same: one bucket and several, runs of one client folded on the
+CPU, both modes, its norms reported, a float64 example, a control that stops
+being finite, and a resume from inside a flush window.
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ from tests.test_batched_executor_tolerance import (
     classification_config,
     classification_rule_config,
     example_config,
+    ragged_clients,
 )
 from tests.test_reproducibility import TIMING
 from tests.test_round_planner import ragged
@@ -102,6 +106,52 @@ def arms() -> Iterator[tuple[str, dict[str, Any], Any]]:
         ),
         ragged,
     )
+
+
+SCAFFOLD = {"update_rule": "scaffold"}
+
+#: Every column SCAFFOLD adds, client's and server's, and the divergence metric.
+SCAFFOLD_METRICS = [
+    "fit_loss",
+    "control_delta_norm",
+    "client_control_norm",
+    "local_steps",
+    "communicated_parameters",
+    "communicated_bytes",
+    "server_control_norm",
+    "mean_client_control_delta_norm",
+]
+
+
+def scaffold_arms() -> Iterator[tuple[str, dict[str, Any], Any]]:
+    """(label, config, data context) for SCAFFOLD's runs."""
+
+    def config(client: dict[str, Any], **edits: Any) -> dict[str, Any]:
+        built = classification_rule_config({**SCAFFOLD, **client})
+        built["runtime"]["checkpointing"].update(save_every_round=True)
+        for section, values in edits.items():
+            built.setdefault(section, {}).update(values)
+        return built
+
+    yield "one bucket", config({}), nullcontext
+    yield (
+        "several buckets, runs of one",
+        config({}, server={"participation_rate": None, "participation_probability": 0.6}),
+        ragged,
+    )
+    yield (
+        "full_gradient, flush every 3, fit every 2, its norms",
+        config(
+            {"update_mode": "full_gradient"},
+            runtime={"flush_every": 3},
+            evaluation={"fit": {"every": 2}},
+            reporting={"fit_metrics": SCAFFOLD_METRICS},
+        ),
+        ragged,
+    )
+    lasso = example_config("fed-lasso-l2", "scaffold")
+    lasso["reporting"]["fit_metrics"] = SCAFFOLD_METRICS
+    yield "fed-lasso-l2, float64", lasso, ragged_clients
 
 
 def _clean(config: dict[str, Any]) -> dict[str, Any]:
@@ -399,6 +449,52 @@ class AResumeFromAnAsynchronousFlushIsTheRunTest(ResidentRuns):
                 )
                 runner.run(path, args=argparse.Namespace(resume_latest=True))
                 self.assertSameRun(output, whole)
+
+
+class SCAFFOLDIsHeldOnTheDeviceTest(ResidentRuns):
+    """SCAFFOLD's controls on the device: the per-round path's run, bit for bit."""
+
+    def test_every_arm(self) -> None:
+        for label, config, data in scaffold_arms():
+            with self.subTest(arm=label):
+                seen = _fold_sites()
+                with seen:
+                    held, reference = self.pair(config, data)
+                self.assertSameRun(held, reference)
+                if label.startswith("several"):
+                    self.assertIn(True, seen.hosts)
+
+    def test_a_control_that_is_not_finite(self) -> None:
+        config = classification_rule_config({**SCAFFOLD, "learning_rate": 1e38})
+        config["runtime"]["flush_every"] = 3
+        config["runtime"]["checkpointing"].update(save_every_round=True)
+        held, reference = self.pair(config)
+        self.assertEqual(_run(held)["status"], "diverged")
+        self.assertSameRun(held, reference)
+
+    def test_resumed_from_inside_a_flush_window(self) -> None:
+        import argparse
+
+        from fedbrew.core import runner
+
+        config = _clean(classification_rule_config(dict(SCAFFOLD)))
+        config["schedule"]["rounds"] = 6
+        config["runtime"]["flush_every"] = 4
+        config["runtime"]["checkpointing"].update(save_every_round=True)
+        whole = self.run_config(config, "batched")
+        self.assertEqual(_executor(whole)["rounds"], {"used": "resident"})
+        path = self.root / "stopped.yaml"
+        config["experiment"]["output_dir"] = str(self.root / "stopped")
+        config["runtime"].setdefault("performance", {})["executor"] = "batched"
+        path.write_text(yaml.safe_dump(config), encoding="utf-8")
+        # Stopped at round 5: latest.pt is round 4's flush, with every c_i as round 4 left it.
+        with mock.patch.object(runner, "_round_progress_reporter", _stopping(5)):
+            with self.assertRaises(KeyboardInterrupt):
+                runner.run(path, args=None)
+        output = Path(config["experiment"]["output_dir"])
+        self.assertEqual(load_checkpoint(output / "checkpoints" / "latest.pt")["round_id"], 4)
+        runner.run(path, args=argparse.Namespace(resume_latest=True))
+        self.assertSameRun(output, whole)
 
 
 def _stopping(round_id: int) -> Any:

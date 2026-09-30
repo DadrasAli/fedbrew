@@ -272,6 +272,15 @@ class TorchScaffoldClient(TorchSGDClient[TaskAdapter]):
             scaffold=True,
         )
 
+    def batched_loop(self) -> LocalLoop:
+        """``fit``'s loop: every batch of each pass, or one step a pass on the whole split.
+
+        SCAFFOLD takes no ``max_local_steps``; the round planner reads this.
+        """
+
+        full = self.update_mode == FULL_GRADIENT_UPDATE_MODE
+        return LocalLoop(epochs=self.local_iterations, per_update="epoch" if full else "batch")
+
     def batched_start(self, request: FitRequest, model: torch.nn.Module) -> Mapping[str, Any]:
         """The broadcast state, checked as ``fit`` checks it."""
 
@@ -300,7 +309,7 @@ class TorchScaffoldClient(TorchSGDClient[TaskAdapter]):
             request,
             program,
             start,
-            LocalLoop(epochs=self.local_iterations, per_update="epoch" if full else "batch"),
+            self.batched_loop(),
             (lambda: no_training_batches(self.client_id))
             if full
             else (lambda: ValueError("SCAFFOLD local_steps must be positive")),

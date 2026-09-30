@@ -412,8 +412,9 @@ cover, both about values whose exact answer is 0:
 **Planned ahead.** A round's orders depend on the roster and the round's
 number, never on what a round trains: FedAvg samples from
 `derive_seed(seed, "participation", round)` (`sampled_client_ids`,
-`fedbrew/servers/fedavg.py`, which `sample_clients` itself calls), and each
-loader is seeded from the round and the client. So a batched run plans them
+`fedbrew/servers/fedavg.py`, which `sample_clients` itself calls; SCAFFOLD's
+server samples through it too), and each loader is seeded from the round and
+the client. So a batched run plans them
 from the roster read once at the start (`fedbrew/core/round_planner.py`),
 with the calls `plan_round` makes, and the round adopts them as `plan_round`
 would (`adopt_orders`) after checking they are its plans' -- the same clients,
@@ -603,6 +604,21 @@ computes, bit for bit on the same device:
   evaluation, verdict, checkpoints and flush, as `run_fl_loop` does them.
   A client is taken from the pool when the round would first touch it, so a
   checkpoint lists the clients it lists on the per-round path.
+- **SCAFFOLD's controls.** Every client's `c_i` is a row of one table on the
+  device, filled from its rule the round it first trains, and `c` a state
+  beside the model. A bucket's clients read their rows and the shared `c`,
+  and their new rows are written back as Option II computes them,
+  `c_i - c + (x - y_i) / (K * learning_rate)`; the control deltas are summed
+  a client at a time in the round's order, from zeros, into `c + sum / N`, as
+  `ScaffoldServer` sums them -- elementwise arithmetic, the same on either
+  device. The server is handed its results one by one, so its models are
+  folded as its accumulator folds them: each run of consecutive clients of one
+  bucket together, a run of one on the CPU. Each round's trained states wait
+  for the flush, where every client's result is its rule's own
+  `batched_result` -- its control update, kept in the rule, and its norms --
+  and `c`'s update the server's own code (`ScaffoldServer.aggregate_folded`),
+  so the host's `c_i` and `c` are what the per-round path's checkpoint of that
+  round holds. Its rounds run eagerly.
 - **Evaluation.** The round's due client splits are measured at the round,
   on the device, at the mean the fold left: every split's clients in the
   batched evaluator's order and chunks, their rows gathered from stacks held
@@ -642,7 +658,7 @@ computes, bit for bit on the same device:
   buffers and replays it: the same kernels on the same inputs, in the same
   order, bit for bit the eager round. The client and central evaluations run
   eagerly after it. A round folded on the CPU, one with a bucket of one
-  client, and a combined-gradient update run eagerly; so does every round
+  client, a combined-gradient update and SCAFFOLD's run eagerly; so does every round
   after a capture or a replay fails, with a notice and a record
   (`executor.cuda_graphs`: `used`, `captured`, `replayed`, or `fallback`),
   and a run that is not resident or not on CUDA records `used: off` and why.
@@ -654,10 +670,11 @@ computes, bit for bit on the same device:
   refused after the rounds before it are recorded.
 
 It applies when the run is batched with a planner (§9); does not compile;
-uses FedAvg's server, fold and payload, the streaming aggregator and the
-batched evaluator at the global scope; trains `fedavg`, `local_sgd` or
-`local_adamw` (no per-client state); holds every client's rows in a quarter of
-the device's free memory; and has a client pool that cannot release a client
+uses FedAvg's server, fold and payload (or SCAFFOLD's, with its rule), the
+streaming aggregator and the batched evaluator at the global scope; trains
+`fedavg`, `local_sgd`, `local_adamw` or `scaffold`; holds every client's rows
+-- and, for SCAFFOLD, the control table and a flush window's trained states --
+in a quarter of the device's free memory; and has a client pool that cannot release a client
 behind the round's back -- built clients, or a manifest dataset whose shard
 cache holds every client's shard. Otherwise the per-round path runs it.
 `run.json` records which: `executor.rounds`, `used: resident` or
@@ -668,7 +685,10 @@ run ended: full and Bernoulli participation, clients of different sizes and
 several buckets (some of one client), the own-loop rules, uniform weighting,
 a post-fit pass on some rounds, a flush every third round, a manifest
 dataset, a stall and a non-finite aggregate inside a flush window, and a run
-stopped at a flush and between two and resumed from its `latest.pt`; and of
+stopped at a flush and between two and resumed from its `latest.pt`; SCAFFOLD
+in one bucket and several, with runs of one client, under both of its modes,
+with its norms reported, on a float64 example, with a control that stops
+being finite, and resumed from inside a flush window; and of
 the evaluation, that it is measured on the device, under mixed schedules and
 client scopes, a shuffled evaluation loader, a client without a `val` split,
 and a missing `test` split refused in the per-round path's words.

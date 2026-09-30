@@ -141,22 +141,53 @@ class ScaffoldServer(FedAvgServer):
             ValueError: If no results arrive, or if N is unknown.
         """
 
+        return self._aggregate(round_info, results, None)
+
+    def aggregate_folded(
+        self,
+        round_info: RoundInfo,
+        results: Iterable[FitResult],
+        mean: StateDict,
+    ) -> dict[str, Any]:
+        """``aggregate_stream`` of results whose models were already folded into ``mean``.
+
+        The resident round (``fedbrew/core/resident.py``) folds a round's
+        models on the device as ``WeightedStateAccumulator`` folds them, and
+        refuses a round whose mean, control deltas or updated control are not
+        finite by running it again through ``aggregate_stream``; everything
+        else -- the control deltas' sum, ``c``'s update, the metrics and the
+        payload -- is this method's, the same code as ``aggregate_stream``'s.
+        """
+
+        return self._aggregate(round_info, results, mean)
+
+    def _aggregate(
+        self,
+        round_info: RoundInfo,
+        results: Iterable[FitResult],
+        mean: StateDict | None,
+    ) -> dict[str, Any]:
         if self._model_state is None or self._server_control is None:
             self.initialize()
         if self._model_state is None or self._server_control is None:
             raise ValueError("SCAFFOLD state was not initialized")
 
-        model_accumulator = WeightedStateAccumulator()
+        model_accumulator = WeightedStateAccumulator() if mean is None else None
         metric_accumulator = WeightedMetricAccumulator()
         summed_control_delta: StateDict | None = None
         total_control_delta_norm = 0.0
         num_results = 0
         for result in results:
-            model_state = self._compatible_model_state(result)
             control_delta = result.payload.get("control_delta")
-            if not isinstance(control_delta, dict):
+            if model_accumulator is not None:
+                model_state = self._compatible_model_state(result)
+                if not isinstance(control_delta, dict):
+                    raise ValueError("SCAFFOLD fit result payload must contain control_delta")
+                model_accumulator.add(
+                    model_state, self._result_weight(result), source=result.client_id
+                )
+            elif not isinstance(control_delta, dict):
                 raise ValueError("SCAFFOLD fit result payload must contain control_delta")
-            model_accumulator.add(model_state, self._result_weight(result), source=result.client_id)
             # The model state is checked by the accumulator; the control delta
             # is summed outside it and was not checked at all, so a finite
             # model beside a NaN delta put NaN into server_control, where it
@@ -199,7 +230,7 @@ class ScaffoldServer(FedAvgServer):
         # Both halves are computed and checked before either is assigned, so a
         # refused round leaves the model and c exactly as they were: finite
         # deltas can still sum, or add to c, past the float range.
-        new_model_state = model_accumulator.result()
+        new_model_state = model_accumulator.result() if model_accumulator is not None else mean
         refuse_non_finite_state(summed_control_delta, "summed control_delta")
         new_server_control = add_model_states(
             self._server_control,

@@ -19,7 +19,16 @@ the whole run:
 - **plans**: a round's sampled clients and orders come from the run's
   planner (``fedbrew/core/round_planner.py``) and its program from the
   first client's rule, which every client shares; no per-client plan exists
-  until the flush builds a client's record.
+  until the flush builds a client's record;
+- **SCAFFOLD's controls**: every client's ``c_i`` is a row of one table on
+  the device and ``c`` a state beside the model. A bucket's clients read
+  their rows, and their new ones are written back as Option II computes
+  them; the control deltas are summed in the clients' order, as the server
+  sums them, into the new ``c``. Each round's trained states wait for the
+  flush, where every client's result and ``c``'s update are built by the
+  rule's and the server's own code (``batched_result``,
+  ``ScaffoldServer.aggregate_folded``) -- the host's ``c_i`` and ``c`` are
+  what a checkpoint of that round holds.
 
 A round computes what the batched executor computes, bit for bit on the same
 device: the same chunks and buckets from the same costs and structures, the
@@ -77,6 +86,9 @@ from fedbrew.servers.fedavg import WeightedMetricAccumulator
 #: control).
 RESIDENT_RULES = ("fedavg", "local_sgd", "local_adamw")
 
+#: The rule whose per-client controls the resident round holds on the device.
+SCAFFOLD_RULE = "scaffold"
+
 #: The share of the device's free memory every client's rows may take.
 ROWS_FRACTION = 0.25
 
@@ -129,6 +141,7 @@ def resident_unsupported(context: Any) -> str | None:
 
 def _server_unsupported(context: Any) -> str | None:
     from fedbrew.servers.fedavg import FedAvgServer
+    from fedbrew.servers.scaffold import ScaffoldServer
 
     server = context.server
     cls = type(server)
@@ -138,8 +151,11 @@ def _server_unsupported(context: Any) -> str | None:
         "_accumulate_stacks",
         "_federated_payload",
     )
-    if not isinstance(server, FedAvgServer) or any(
-        getattr(cls, name) is not getattr(FedAvgServer, name) for name in own
+    base = ScaffoldServer if _scaffold(context) else FedAvgServer
+    if base is ScaffoldServer:
+        own = (*own, "_aggregate", "aggregate_folded", "save_state", "load_state")
+    if not isinstance(server, base) or any(
+        getattr(cls, name) is not getattr(base, name) for name in own
     ):
         return f"server {cls.__name__} folds its results its own way"
     if not server._folds_stacks():
@@ -160,15 +176,42 @@ def _pipeline_unsupported(context: Any) -> str | None:
     return None
 
 
+def _scaffold(context: Any) -> bool:
+    """Whether the run's clients are SCAFFOLD's, whose controls the round holds."""
+
+    roster = context.executor.planner.roster
+    return type(context.client[roster.client_ids[0]]).__dict__.get("_batched_rule") == SCAFFOLD_RULE
+
+
 def _rule_unsupported(context: Any) -> str | None:
     roster = context.executor.planner.roster
     representative = context.client[roster.client_ids[0]]
     rule = type(representative).__dict__.get("_batched_rule")
+    if rule == SCAFFOLD_RULE:
+        return _scaffold_unsupported(representative)
     if rule not in RESIDENT_RULES:
         return f"update rule {type(representative).__name__} keeps per-client state"
     supported = getattr(representative, "batched_stacked_supported", None)
     if not callable(supported) or not supported():
         return f"update rule {type(representative).__name__} builds its results one by one"
+    return None
+
+
+def _scaffold_unsupported(representative: Any) -> str | None:
+    """Why a SCAFFOLD client's results cannot be built from the resident round's, or None.
+
+    They are built by the rule's own ``batched_result``, whose control update
+    the round computes on the device with the same arithmetic.
+    """
+
+    from fedbrew.clients.torch_scaffold_client import TorchScaffoldClient
+
+    cls = type(representative)
+    own = ("batched_program", "batched_result", "_update_client_control", "_scaffold_result")
+    if not isinstance(representative, TorchScaffoldClient) or any(
+        getattr(cls, name) is not getattr(TorchScaffoldClient, name) for name in own
+    ):
+        return f"update rule {cls.__name__} updates its controls its own way"
     return None
 
 
@@ -297,8 +340,8 @@ class _MemberPlan:
     evaluate: bool
     eval_rows: int
     train_data: Any
-    client_control: None = None
-    server_control: None = None
+    client_control: Mapping[str, Tensor] | None = None
+    server_control: Mapping[str, Tensor] | None = None
 
 
 @dataclass(slots=True)
@@ -337,6 +380,8 @@ class _BucketPlan:
     train: Any
     evaluation: Any
     inputs: dict[Any, int] = field(default_factory=dict)
+    #: The clients' roster places, in the order of the bucket's rows.
+    places: list[int] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -352,6 +397,10 @@ class RoundPlan:
     uploads: list[Tensor] = field(default_factory=list)
     inputs: dict[Any, int] = field(default_factory=dict)
     key: Any = None
+    #: SCAFFOLD's fold, whose server is handed its clients' results one by
+    #: one: per run of consecutive clients in one bucket, the bucket's index
+    #: and the rows, in order (``_Fold.add_runs``); None for a fold by bucket.
+    runs: list[tuple[int, list[int]]] | None = None
 
     def add(self, tensor: Tensor) -> int:
         """Another tensor for the device half to read; its place among the inputs."""
@@ -409,6 +458,9 @@ class DeviceRound:
     #: flush's copy waits for.
     clock: Any = None
     end: Any = None
+    #: SCAFFOLD's trained states, per bucket its round positions and its
+    #: stack, for the flush to build each client's result from.
+    trained: list[tuple[list[int], dict[str, Tensor]]] = field(default_factory=list)
 
 
 class ResidentRounds:
@@ -444,6 +496,12 @@ class ResidentRounds:
             _train_split(context.dataset.get_client_data(client))
             for client in self.roster.client_ids
         ]
+        #: SCAFFOLD's: every client's ``c_i`` as a row of one table, filled
+        #: from its rule the round it first trains, and ``c``.
+        self.scaffold = _scaffold(context)
+        self.controls: dict[str, Tensor] = {}
+        self._controls_known = [False] * len(self.roster)
+        self.server_control: dict[str, Tensor] | None = None
         self.unsupported = self._memory_unsupported() or _pool_unsupported(
             context.client, context.dataset
         )
@@ -453,8 +511,22 @@ class ResidentRounds:
         if self.unsupported is None:
             self.rows = ResidentRows(self.task, self.splits)
         self.model = self._placed(context.server._model_state)
+        if self.scaffold and self.unsupported is None and context.server._server_control is None:
+            self.unsupported = "the SCAFFOLD server's control variate is not initialized"
+        if self.scaffold and self.unsupported is None:
+            self.server_control = self._placed(context.server._server_control)
+            self.controls = {
+                name: torch.zeros(
+                    (len(self.roster), *parameter.shape),
+                    dtype=parameter.dtype,
+                    device=parameter.device,
+                )
+                for name, parameter in self.parameters.items()
+            }
         self.copier = HostCopy(self.device)
         self._client_states: tuple[Any, dict[str, Any] | None] | None = None
+        #: The server's model before the round the flush records, on the host.
+        self._host_start: dict[str, Tensor] = {}
         #: Per chunk of clients, their rules and record plans (``_record_plans``).
         self._records: dict[tuple[int, ...], tuple[list[Any], list[_MemberPlan]]] = {}
         self.graphs = RoundGraphs(self.device, executor.cuda_graphs, executor.record)
@@ -480,6 +552,17 @@ class ResidentRounds:
                 f"every client's rows ({rows} bytes) exceed a quarter of the device's "
                 f"free memory ({free} bytes)"
             )
+        if self.scaffold and free is not None:
+            # The control table, and a flush window's trained states at most.
+            model = sum(p.numel() * p.element_size() for p in self.parameters.values())
+            window = min(self.context.flush_every, self.context.global_rounds)
+            controls = model * len(self.roster) * (1 + window)
+            if rows + controls > ROWS_FRACTION * free:
+                return (
+                    f"every client's rows and SCAFFOLD controls, with a flush window's "
+                    f"trained states ({rows + controls} bytes), exceed a quarter of the "
+                    f"device's free memory ({free} bytes)"
+                )
         return None
 
     def _placed(self, state: Mapping[str, Tensor]) -> dict[str, Tensor]:
@@ -570,6 +653,8 @@ class ResidentRounds:
         """
 
         plan = self._prepare(planned, device_round)
+        if self.scaffold:
+            self._fill_controls(planned.positions)
         for start, stop in plan.chunks:
             self.executor.record["largest_chunk_clients"] = max(
                 self.executor.record["largest_chunk_clients"], stop - start
@@ -613,10 +698,15 @@ class ResidentRounds:
         total_weight = 0.0
         for weight in weights:
             total_weight += float(weight)
+        runs = _runs(planned, chunks) if self.scaffold else None
         plan = RoundPlan(
             planned=planned,
             chunks=chunks,
-            host_fold=self._has_single_bucket(planned, chunks),
+            host_fold=(
+                any(len(rows) == 1 for _, rows in runs)
+                if runs is not None
+                else self._has_single_bucket(planned, chunks)
+            ),
             weights=weights,
             total_weight=total_weight,
         )
@@ -626,6 +716,8 @@ class ResidentRounds:
                 groups.setdefault(device_round.structures[slot], []).append(slot - start)
             for structure, members in groups.items():
                 plan.buckets.append(self._bucket_plan(plan, index, start, structure, members))
+        if runs is not None:
+            plan.runs = _bucket_runs(plan.buckets, runs)
         if not plan.host_fold:
             for dtype in self.accumulation_dtypes:
                 plan.inputs[("divisor", dtype)] = plan.add(torch.tensor(total_weight, dtype=dtype))
@@ -668,7 +760,10 @@ class ResidentRounds:
             longest=longest,
             train=_Steps(shape, plan.planned.train, slots, dtype),  # type: ignore[arg-type]
             evaluation=_Steps(shape, plan.planned.evaluation, slots, self.template_dtype),  # type: ignore[arg-type]
+            places=places,
         )
+        if self.scaffold:
+            bucket.inputs["places"] = plan.add(torch.tensor(places, dtype=torch.long))
         if kind == "gathered":
             bucket.inputs["index"] = plan.add(torch.tensor(index, dtype=torch.long))
         if size > 1:
@@ -686,13 +781,14 @@ class ResidentRounds:
     def _key(self, plan: RoundPlan, device_round: DeviceRound) -> Any:
         """What makes two rounds the same graph: None for a round only eager runs.
 
-        A round folded on the CPU, one with a bucket of one client, and one
+        A round folded on the CPU, one with a bucket of one client, one
         whose update combines a pass's gradients (its weights uploaded as it
-        steps) run eagerly.
+        steps), and SCAFFOLD's, whose controls live outside the round's
+        inputs, run eagerly.
         """
 
         program = device_round.program
-        if plan.host_fold or program.combine != "batch":
+        if plan.host_fold or program.combine != "batch" or self.scaffold:
             return None
         if any(bucket.kind == "single" for bucket in plan.buckets):
             return None
@@ -728,6 +824,7 @@ class ResidentRounds:
 
         fold = _Fold(self, plan, inputs)
         results = []
+        trained = []
         for bucket in plan.buckets:
             rows = self._rows_for(bucket, inputs)
             context = self.executor.context
@@ -761,6 +858,12 @@ class ResidentRounds:
                 )
                 for slot in bucket.slots
             ]
+            if self.scaffold:
+                places = inputs[bucket.inputs["places"]]
+                old = {name: table.index_select(0, places) for name, table in self.controls.items()}
+                for row, member in enumerate(members):
+                    member.client_control = {name: value[row] for name, value in old.items()}
+                    member.server_control = self.server_control
             stack, training, evaluated = _Bucket(
                 self.task,
                 self.template,
@@ -774,10 +877,89 @@ class ResidentRounds:
                 ),
                 steps=(bucket.train, bucket.evaluation),
             ).run()
-            fold.add(bucket, stack)
+            if self.scaffold:
+                deltas = self._new_controls(bucket, old, stack, model, device_round.program)
+                trained.append((bucket, stack, deltas))
+            else:
+                fold.add(bucket, stack)
             results.append((bucket.chunk, bucket.members, training, evaluated))
+        if self.scaffold:
+            fold.add_runs([stack for _, stack, _ in trained])
+            device_round.trained = [(bucket.slots, stack) for bucket, stack, _ in trained]
         mean, finite = fold.result()
+        if self.scaffold:
+            finite = torch.stack([finite, self._fold_controls(trained)]).all()
         return results, mean, finite
+
+    # -- SCAFFOLD's controls ----------------------------------------------------
+
+    def _fill_controls(self, positions: Sequence[int]) -> None:
+        """The table's rows of the clients training for the first time: their rules' ``c_i``.
+
+        A client's ``c_i`` changes only where the table holds it from then on;
+        its rule's copy is brought up to date as each round is recorded.
+        """
+
+        for place in positions:
+            if self._controls_known[place]:
+                continue
+            self._controls_known[place] = True
+            control = self.member(place)._client_control
+            if control is None:
+                continue
+            for name, table in self.controls.items():
+                table[place].copy_(control[name].detach())
+
+    def _new_controls(
+        self,
+        bucket: _BucketPlan,
+        old: Mapping[str, Tensor],
+        stack: Mapping[str, Tensor],
+        start: Mapping[str, Tensor],
+        program: Any,
+    ) -> dict[str, Tensor]:
+        """Option II's new ``c_i`` of a bucket's clients, written to the table; their deltas.
+
+        ``_update_client_control``'s arithmetic, a client per row:
+        ``c_i - c + (x - y_i) / (K * learning_rate)``, and the new minus the old.
+        """
+
+        scale = 1.0 / (len(bucket.structure) * program.optimizer.lr)
+        server = self.server_control
+        assert server is not None
+        index = uploaded(torch.tensor(bucket.places, dtype=torch.long), self.device)
+        deltas = {}
+        for name, table in self.controls.items():
+            new = (old[name] - server[name]) + (start[name] - stack[name]) * scale
+            deltas[name] = new - old[name]
+            table.index_copy_(0, index, new)
+        return deltas
+
+    def _fold_controls(self, trained: list[tuple[_BucketPlan, Any, dict[str, Tensor]]]) -> Tensor:
+        """``c``'s update from the round's control deltas; whether all of it is finite.
+
+        The deltas are summed a client at a time, in the round's order, from
+        zeros, and ``c + sum / N`` taken, as ``ScaffoldServer`` computes them;
+        what it refuses -- a delta, their sum or the new ``c`` not finite --
+        is what the flag says.
+        """
+
+        server = self.server_control
+        assert server is not None
+        rows: dict[int, tuple[dict[str, Tensor], int]] = {}
+        for bucket, _, deltas in trained:
+            for row, slot in enumerate(bucket.slots):
+                rows[slot] = (deltas, row)
+        summed = {name: torch.zeros_like(value) for name, value in server.items()}
+        for slot in range(len(rows)):
+            deltas, row = rows[slot]
+            summed = {name: summed[name] + deltas[name][row] for name in summed}
+        scale = 1.0 / len(self.context.client_infos)
+        updated = {name: server[name] + summed[name] * scale for name in server}
+        checks = [torch.isfinite(deltas[name]).all() for _, _, deltas in trained for name in deltas]
+        checks += [torch.isfinite(value).all() for value in (*summed.values(), *updated.values())]
+        self.server_control = updated
+        return torch.stack(checks).all()
 
     def _rows_for(self, bucket: _BucketPlan, inputs: Sequence[Tensor]) -> _Rows:
         rows = self.rows
@@ -890,6 +1072,8 @@ class ResidentRounds:
                 tensors.append(device_round.staged)
             if device_round.mean is not None:
                 tensors.extend(device_round.mean.values())
+            for _, stack in device_round.trained:
+                tensors.extend(stack.values())
         copies = iter(self.copier.copy(tensors, rounds[-1].end))
         read: list[tuple[list[float], dict[str, Tensor] | None]] = []
         for device_round in rounds:
@@ -897,6 +1081,11 @@ class ResidentRounds:
             mean = None
             if device_round.mean is not None:
                 mean = {name: next(copies) for name in device_round.mean}
+            # SCAFFOLD's trained states, now the host's.
+            device_round.trained = [
+                (slots, {name: next(copies) for name in stack})
+                for slots, stack in device_round.trained
+            ]
             read.append((values, mean))
         return read
 
@@ -993,14 +1182,22 @@ class ResidentRounds:
         round_info: RoundInfo,
         observer: Any,
         host_mean: dict[str, Tensor],
+        start: dict[str, Tensor] | None = None,
     ) -> dict[str, Any]:
         """What ``aggregate_stacked`` does with the round, from its staged values and its mean.
+
+        ``start`` is the model before the round, on the host: SCAFFOLD's
+        control update reads it.
 
         The observer is handed each chunk's stacked results as the executor
         hands them; the server's metrics are summed as ``_accumulate_stacks``
         sums them; its state becomes the round's mean.
         """
 
+        if self.scaffold:
+            assert start is not None
+            self._host_start = start
+            return self._scaffold_aggregate(device_round, values, round_info, observer, host_mean)
         server = self.context.server
         metric_accumulator = WeightedMetricAccumulator()
         done, total = 0, len(device_round.positions)
@@ -1022,6 +1219,101 @@ class ResidentRounds:
         round_info.metrics.update(metrics)
         return server._federated_payload(metrics=metrics)
 
+    def _scaffold_aggregate(
+        self,
+        device_round: DeviceRound,
+        values: list[float],
+        round_info: RoundInfo,
+        observer: Any,
+        host_mean: dict[str, Tensor],
+    ) -> dict[str, Any]:
+        """SCAFFOLD's round as the per-round path aggregates it, from the round's trained states.
+
+        Each client's result is its rule's ``batched_result`` -- the control
+        update, kept in the rule, and the metrics -- from its trained state,
+        the model and ``c`` before the round, and its post-fit outputs; the
+        observer is handed each in order, and the server folds the controls
+        (``aggregate_folded``) with the model the device folded.
+        """
+
+        from fedbrew.clients.batched_update import ClientBatchFit
+        from fedbrew.core.torch_utils import clone_model_state, zeros_like_model_state
+
+        context = self.context
+        server = context.server
+        server._num_clients = len(context.client_infos)
+        start = self._host_start
+        trained: dict[int, dict[str, Tensor]] = {}
+        for slots, stack in device_round.trained:
+            for row, slot in enumerate(slots):
+                trained[slot] = {name: value[row] for name, value in stack.items()}
+        results = []
+        offset = 0
+        for chunk, layout in zip(device_round.chunks, device_round.staged_layouts, strict=True):
+            size = _staged_size(layout)
+            groups, lists = finished_values(values[offset : offset + size], layout)
+            offset += size
+            fit = finished_chunk(
+                groups,
+                lists,
+                chunk.layout,
+                [self._stand_in(len(members)) for members, *_ in chunk.layout],
+                dict(self.metadata),
+                self.trainable,
+            )
+            members, plans = self._record_plans(device_round, chunk.start, chunk.stop)
+            built = time.perf_counter()
+            evaluations: list[Any] = [None] * len(members)
+            for bucket in fit.buckets:
+                for row, position in enumerate(bucket.positions):
+                    if bucket.eval_metrics is not None:
+                        assert bucket.eval_examples is not None
+                        evaluations[position] = (
+                            {name: column[row] for name, column in bucket.eval_metrics.items()},
+                            bucket.eval_examples[row],
+                        )
+                    elif bucket.eval_outputs is not None:
+                        evaluations[position] = bucket.eval_outputs[row]
+            chunk_results = []
+            for position, (member, plan) in enumerate(zip(members, plans, strict=True)):
+                if member._client_control is None:
+                    member._client_control = zeros_like_model_state(start)
+                evaluation = evaluations[position]
+                state = trained[chunk.start + position]
+                chunk_results.append(
+                    member.batched_result(
+                        FitRequest(round_id=device_round.round_id, client_id=member.client_id),
+                        _MemberPlan(
+                            program=plan.program,
+                            structure=plan.structure,
+                            slot=plan.slot,
+                            start=start,
+                            evaluate=plan.evaluate,
+                            eval_rows=plan.eval_rows,
+                            train_data=plan.train_data,
+                            client_control=clone_model_state(member._client_control),
+                            server_control=server._server_control,
+                        ),
+                        ClientBatchFit(
+                            model_state=state,
+                            training_outputs=[],
+                            eval_outputs=evaluation if isinstance(evaluation, list) else None,
+                            optimizer_steps=len(plan.structure),
+                            model_state_metadata=dict(self.metadata),
+                            trainable_parameters=self.trainable,
+                            start=start,
+                            eval_metrics=evaluation if isinstance(evaluation, tuple) else None,
+                        ),
+                    )
+                )
+            seconds = (chunk.seconds + time.perf_counter() - built) / max(1, len(members))
+            for result in chunk_results:
+                results.append((result, seconds))
+        total = len(results)
+        for done, (result, seconds) in enumerate(results, start=1):
+            observer.fitted(result, seconds, done, total)
+        return server.aggregate_folded(round_info, [result for result, _ in results], host_mean)
+
     def client_states(self) -> dict[str, Any] | None:
         """Every built client's state, stacked, as a checkpoint holds them: again only when needed.
 
@@ -1034,6 +1326,9 @@ class ResidentRounds:
 
         pool = self.context.client
         held = (len(getattr(pool, "_clients", pool)), len(getattr(pool, "_saved_states", ())))
+        if self.scaffold:
+            # SCAFFOLD's rules keep their controls, which a round changes.
+            return _stacked_client_states(pool)
         if self._client_states is None or self._client_states[0] != held:
             self._client_states = (held, _stacked_client_states(pool))
         return self._client_states[1]
@@ -1084,17 +1379,48 @@ class _Fold:
         weights = [self.plan.weights[slot] for slot in bucket.slots]
         for key in self.rounds.state_keys:
             tensor = stack[key]
-            flat = tensor.reshape(len(weights), -1)
             total = self._total(key, tensor)
-            if len(weights) == 1:
-                total.add_(tensor[0].detach().cpu(), alpha=weights[0])
-                continue
-            if self.host:
-                scale = uploaded(torch.tensor(weights, dtype=total.dtype), tensor.device)
-            else:
+            scale = None
+            if len(weights) > 1 and not self.host:
                 scale = self.inputs[bucket.inputs[("scale", total.dtype)]]
-            part = (scale @ flat.to(total.dtype)).reshape(total.shape)
-            total.add_(part.cpu() if self.host else part)
+            self._add_rows(total, tensor, weights, scale)
+
+    def add_runs(self, stacks: Sequence[Mapping[str, Tensor]]) -> None:
+        """Every bucket's rows, a run of consecutive clients at a time, in the round's order.
+
+        What ``WeightedStateAccumulator.add`` does with rows handed to it one
+        by one, as SCAFFOLD's server is handed them: the rows of one stack
+        that arrive together are folded together -- the stack itself when
+        they are all of it, else those rows selected -- and a run of one row
+        is added alone.
+        """
+
+        assert self.plan.runs is not None
+        for index, rows in self.plan.runs:
+            bucket = self.plan.buckets[index]
+            weights = [self.plan.weights[bucket.slots[row]] for row in rows]
+            stack = stacks[index]
+            every_row = rows == list(range(len(bucket.slots)))
+            for key in self.rounds.state_keys:
+                tensor = stack[key]
+                if not every_row:
+                    tensor = tensor.index_select(0, torch.tensor(rows, device=tensor.device))
+                total = self._total(key, tensor)
+                self._add_rows(total, tensor, weights, None)
+
+    def _add_rows(
+        self, total: Tensor, tensor: Tensor, weights: list[float], scale: Tensor | None
+    ) -> None:
+        """``weights @ rows`` added into ``total``; one row as ``add_(row, alpha=weight)``."""
+
+        if len(weights) == 1:
+            total.add_(tensor[0].detach().cpu(), alpha=weights[0])
+            return
+        if scale is None:
+            scale = uploaded(torch.tensor(weights, dtype=total.dtype), tensor.device)
+        flat = tensor.reshape(len(weights), -1)
+        part = (scale @ flat.to(total.dtype)).reshape(total.shape)
+        total.add_(part.cpu() if self.host else part)
 
     def _total(self, key: str, tensor: Tensor) -> Tensor:
         total = self.totals.get(key)
@@ -1118,6 +1444,37 @@ class _Fold:
                 mean[key] = total.div_(divisor).to(dtype)
         finite = torch.stack([torch.isfinite(value).all() for value in mean.values()]).all()
         return mean, finite
+
+
+def _runs(planned: PlannedRound, chunks: list[tuple[int, int]]) -> list[tuple[int, list[int]]]:
+    """Each chunk's runs of consecutive clients of one structure, as (chunk, slots)."""
+
+    structures = planned.train.structure
+    runs: list[tuple[int, list[int]]] = []
+    for index, (start, stop) in enumerate(chunks):
+        for slot in range(start, stop):
+            if slot > start and structures[slot] == structures[slot - 1]:
+                runs[-1][1].append(slot)
+            else:
+                runs.append((index, [slot]))
+    return runs
+
+
+def _bucket_runs(
+    buckets: list[_BucketPlan], runs: list[tuple[int, list[int]]]
+) -> list[tuple[int, list[int]]]:
+    """``_runs`` as (bucket index, rows of that bucket)."""
+
+    where = {
+        slot: (index, row)
+        for index, bucket in enumerate(buckets)
+        for row, slot in enumerate(bucket.slots)
+    }
+    placed = []
+    for _, slots in runs:
+        index = where[slots[0]][0]
+        placed.append((index, [where[slot][1] for slot in slots]))
+    return placed
 
 
 def _accumulation_dtype(dtype: torch.dtype) -> torch.dtype:
@@ -1299,7 +1656,7 @@ class _Loop:
                 return self._refused(device_round, round_info, observer)
             assert host_mean is not None
             context.server_payload = rounds.aggregate(
-                device_round, values, round_info, observer, host_mean
+                device_round, values, round_info, observer, host_mean, start=self.host_model
             )
             _check_weights(device_round, state)
             self.host_model = host_mean

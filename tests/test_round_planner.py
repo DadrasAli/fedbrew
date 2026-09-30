@@ -47,7 +47,11 @@ from fedbrew.core.round_planner import (
     planned_for,
     roster_plan,
 )
-from tests.test_batched_executor_tolerance import ExecutorRuns, classification_config
+from tests.test_batched_executor_tolerance import (
+    ENGINE_OPTIONS,
+    ExecutorRuns,
+    classification_config,
+)
 
 ROUNDS = 4  # the tolerance suite's assertAgree expects its four checkpoints
 FIELDS = ("indices", "lengths", "starts", "steps", "contiguous")
@@ -70,6 +74,14 @@ def planner_arms() -> Iterator[tuple[str, dict[str, Any], dict[str, Any]]]:
     )
     yield "unshuffled", {**single, "train_shuffle": False}, {}
     yield "drop_last", {**fedavg, "update_mode": "sequential_epoch", "drop_last": True}, {}
+    # SCAFFOLD's server samples through FedAvg's, and its rule's loop is batched_loop's.
+    scaffold = {"strategy": "scaffold", "participation_rate": None}
+    for mode in ("sequential_epoch", "full_gradient"):
+        yield (
+            f"scaffold/{mode}",
+            {"update_rule": "scaffold", "update_mode": mode},
+            {**scaffold, "participation_probability": 0.6},
+        )
 
 
 @contextmanager
@@ -95,6 +107,9 @@ def _config(client: dict[str, Any], server: dict[str, Any]) -> dict[str, Any]:
     iterations = client.pop("local_iterations", None)
     config = classification_config(**client)
     config["client"]["batch_size"] = 3
+    if client.get("update_rule") == "scaffold":
+        for option in ENGINE_OPTIONS:
+            config["client"].pop(option, None)
     if iterations is not None:
         config["schedule"]["local_iterations"] = iterations
     config["server"].update(server)
