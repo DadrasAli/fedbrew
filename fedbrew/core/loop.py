@@ -121,6 +121,10 @@ def run_fl_loop(
     output_dir: str | Path | None = None,
     resume_from: str | Path | None = None,
     checkpointing: Mapping[str, Any] | None = None,
+    # on_round_end fires when a round's records are complete; the writer may
+    # still be writing that round's flush then, so the disk holds that round
+    # or the one before. on_round_flush fires on the writer once a flush's
+    # CSV rows are written -- the hook for files on disk (chapter 09 §2).
     on_round_end: Callable[[MetricRecord], None] | None = None,
     on_round_flush: Callable[[ExperimentState], None] | None = None,
     # Fires as each client finishes fit or evaluation within a round --

@@ -67,7 +67,14 @@ them, and at a flush the CSV rows, `run.json` and the commit, of the run's
 records as they were when the flush was handed over. The loop hands over a
 flush only once the last one is written, so a kill loses at most the rounds
 since the last flush the writer finished, and a resume recomputes them; the
-run's end waits for every write. `tests/test_a_kill_mid_write_resumes.py`
+run's end waits for every write. A caller of `run_fl_loop` sees the same
+bound through its two hooks: `on_round_end`, which fires when a round's
+records are complete, may run while that round's flush is still being written,
+so at a round's end the disk holds that round or the one before;
+`on_round_flush` fires on the writer once a flush's CSV rows are written, and
+is the hook for reading the files on disk
+(`tests/test_resume_metrics_continuity.py` holds both).
+`tests/test_a_kill_mid_write_resumes.py`
 kills a run inside each of those writes, on every path, and resumes it to the
 uninterrupted run bit for bit. An `fsync` on `/proj`'s NFS costs ~7 ms against
 ~0.7 ms on `/tmp`, and a round does five, which is what N buys back.
