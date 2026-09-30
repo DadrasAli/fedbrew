@@ -872,14 +872,20 @@ class _Steps:
         if self._small():
             return None
         steps, widest = indices.shape[1], indices.shape[2]
-        # A fingerprint a step: its indices weighted by position and summed,
-        # so only a step that may repeat step 0 is compared in full.
-        weights = torch.arange(1, self.size * widest + 1, dtype=torch.long).view(self.size, 1, -1)
-        prints = (indices * weights).sum(dim=(0, 2)) + lengths.sum(dim=0)
+        # A step that repeats step 0 repeats it in the first split: only those
+        # steps are candidates, a candidate's step is compared with step 0 in
+        # every split, and only one that matches is compared in full.
+        first = indices[0]
+        candidates = torch.nonzero((first == first[:1]).all(dim=1)).view(-1).tolist()[1:]
         per_row = sum(tensor[0, :1].numel() for tensor in self.rows.tensors)
-        for candidate in torch.nonzero(prints == prints[0]).view(-1).tolist()[1:]:
+        for candidate in candidates:
             if self.size * candidate * widest * per_row > _KEEP_AT_ONCE:
                 return None
+            if not (
+                torch.equal(indices[:, candidate], indices[:, 0])
+                and torch.equal(lengths[:, candidate], lengths[:, 0])
+            ):
+                continue
             if torch.equal(indices[:, candidate:], indices[:, : steps - candidate]) and (
                 torch.equal(lengths[:, candidate:], lengths[:, : steps - candidate])
             ):

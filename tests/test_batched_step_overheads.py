@@ -213,6 +213,63 @@ class NothingMovesTest(ExecutorRuns):
             iid_steps = batched_executor._Steps(stack, drawn, [0, 1, 2], torch.float64)
             self.assertIsNone(iid_steps.period)
 
+    def test_the_period_is_the_fingerprint_search_s(self) -> None:
+        """``_period`` finds what a search over every step's fingerprint found.
+
+        Over steps drawn from few values, so that steps coincide by chance --
+        in one split, in its fingerprint, or everywhere -- tiled with a period
+        and then disturbed in one place, under a bound on what is kept that
+        some candidates pass and some do not.
+        """
+
+        def fingerprint_search(indices: torch.Tensor, lengths: torch.Tensor, per_row: int) -> Any:
+            size, steps, widest = indices.shape
+            weights = torch.arange(1, size * widest + 1, dtype=torch.long).view(size, 1, -1)
+            prints = (indices * weights).sum(dim=(0, 2)) + lengths.sum(dim=0)
+            for candidate in torch.nonzero(prints == prints[0]).view(-1).tolist()[1:]:
+                if size * candidate * widest * per_row > batched_executor._KEEP_AT_ONCE:
+                    return None
+                if torch.equal(indices[:, candidate:], indices[:, : steps - candidate]) and (
+                    torch.equal(lengths[:, candidate:], lengths[:, : steps - candidate])
+                ):
+                    return int(candidate)
+            return None
+
+        generator = torch.Generator().manual_seed(0)
+        found = set()
+        for case in range(3000):
+            size = int(torch.randint(2, 5, (), generator=generator))
+            steps = int(torch.randint(2, 13, (), generator=generator))
+            widest = int(torch.randint(1, 4, (), generator=generator))
+            values = int(torch.randint(1, 4, (), generator=generator))
+            period = int(torch.randint(1, steps + 1, (), generator=generator))
+            base = torch.randint(0, values, (size, period, widest), generator=generator)
+            indices = base.repeat(1, steps // period + 1, 1)[:, :steps].contiguous()
+            lengths = torch.randint(widest, widest + 1, (size, steps), generator=generator)
+            if case % 3 == 0:
+                split, step = (
+                    int(torch.randint(0, n, (), generator=generator)) for n in (size, steps)
+                )
+                indices[split, step, 0] += 1
+            if case % 5 == 0:
+                lengths[0, int(torch.randint(0, steps, (), generator=generator))] -= 1
+            stack = _FakeRows(size, values + 1)
+            held = batched_executor._Steps.__new__(batched_executor._Steps)
+            held.rows, held.size, held.sliced = stack, size, False
+            held._indices, held._lengths = indices, lengths
+            per_row = sum(tensor[0, :1].numel() for tensor in stack.tensors)
+            bound = int(torch.randint(1, 60, (), generator=generator))
+            with (
+                mock.patch.object(batched_executor, "_GATHER_AT_ONCE", 1),
+                mock.patch.object(batched_executor, "_KEEP_AT_ONCE", bound),
+            ):
+                expected = fingerprint_search(indices, lengths, per_row)
+                self.assertEqual(held._period(), expected, (case, indices, lengths, bound))
+            found.add(expected)
+        # Periods found and not, both.
+        self.assertIn(None, found)
+        self.assertGreater(len(found), 5)
+
 
 class _FakeRows:
     """A stack of ``size`` splits of ``rows`` numbered rows, as ``_Rows`` holds them."""
