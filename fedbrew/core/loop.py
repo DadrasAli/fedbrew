@@ -463,18 +463,17 @@ def run_fl_loop(
                 timings=timings,
             )
             state.metrics_history.append(metric_record)
-            if flush_due:
-                _submit_flush(
-                    writer,
-                    state,
-                    output_dir,
-                    reporting.per_client_csv,
-                    csv_cursor,
-                    on_round_flush,
-                    staged,
-                    checkpoint_policy,
-                )
-                staged = None
+            staged = _flush_when_due(
+                flush_due,
+                writer,
+                state,
+                output_dir,
+                reporting.per_client_csv,
+                csv_cursor,
+                on_round_flush,
+                staged,
+                checkpoint_policy,
+            )
             unflushed = not flush_due
             if round_id == start_round:
                 long_lived.freeze()
@@ -496,17 +495,17 @@ def run_fl_loop(
         # Only an aggregation refusal leaves rounds unflushed: every other way out
         # of the loop ends on a flush round. latest.pt stays at the last flush, the
         # refused round's state being neither complete nor healthy.
-        if unflushed:
-            _submit_flush(
-                writer,
-                state,
-                output_dir,
-                reporting.per_client_csv,
-                csv_cursor,
-                on_round_flush,
-                staged,
-                checkpoint_policy,
-            )
+        _flush_when_due(
+            unflushed,
+            writer,
+            state,
+            output_dir,
+            reporting.per_client_csv,
+            csv_cursor,
+            on_round_flush,
+            staged,
+            checkpoint_policy,
+        )
         # The run's end waits for every write.
         writer.wait()
 
@@ -1340,6 +1339,34 @@ def _flush_rounds(
     if on_round_flush is not None:
         on_round_flush(state)
     _commit_checkpoints(staged, output_dir, checkpoint_policy)
+    return None
+
+
+def _flush_when_due(
+    due: bool,
+    writer: Any,
+    state: ExperimentState,
+    output_dir: str | Path | None,
+    per_client_csv: bool,
+    csv_cursor: dict[str, Any],
+    on_round_flush: Callable[[ExperimentState], None] | None,
+    staged: Any,
+    checkpoint_policy: Mapping[str, Any],
+) -> Any:
+    """``_submit_flush`` when ``due``; what is still staged: nothing once it is flushed."""
+
+    if not due:
+        return staged
+    _submit_flush(
+        writer,
+        state,
+        output_dir,
+        per_client_csv,
+        csv_cursor,
+        on_round_flush,
+        staged,
+        checkpoint_policy,
+    )
     return None
 
 

@@ -1269,17 +1269,7 @@ class ResidentRounds:
             )
             members, plans = self._record_plans(device_round, chunk.start, chunk.stop)
             built = time.perf_counter()
-            evaluations: list[Any] = [None] * len(members)
-            for bucket in fit.buckets:
-                for row, position in enumerate(bucket.positions):
-                    if bucket.eval_metrics is not None:
-                        assert bucket.eval_examples is not None
-                        evaluations[position] = (
-                            {name: column[row] for name, column in bucket.eval_metrics.items()},
-                            bucket.eval_examples[row],
-                        )
-                    elif bucket.eval_outputs is not None:
-                        evaluations[position] = bucket.eval_outputs[row]
+            evaluations = _client_evaluations(fit, len(members))
             chunk_results = []
             for position, (member, plan) in enumerate(zip(members, plans, strict=True)):
                 if member._client_control is None:
@@ -1450,6 +1440,27 @@ class _Fold:
                 mean[key] = total.div_(divisor).to(dtype)
         finite = torch.stack([torch.isfinite(value).all() for value in mean.values()]).all()
         return mean, finite
+
+
+def _client_evaluations(fit: Any, size: int) -> list[Any]:
+    """Each client's post-fit pass, as ``chunk_fits`` hands it to the rule: folded or its outputs.
+
+    ``(metrics, examples)`` where the task folded the bucket's pass, the
+    client's outputs where it did not, None where the pass did not run.
+    """
+
+    evaluations: list[Any] = [None] * size
+    for bucket in fit.buckets:
+        for row, position in enumerate(bucket.positions):
+            if bucket.eval_metrics is not None:
+                assert bucket.eval_examples is not None
+                evaluations[position] = (
+                    {name: column[row] for name, column in bucket.eval_metrics.items()},
+                    bucket.eval_examples[row],
+                )
+            elif bucket.eval_outputs is not None:
+                evaluations[position] = bucket.eval_outputs[row]
+    return evaluations
 
 
 def _runs(planned: PlannedRound, chunks: list[tuple[int, int]]) -> list[tuple[int, list[int]]]:
