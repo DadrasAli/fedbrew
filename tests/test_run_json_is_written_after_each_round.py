@@ -33,6 +33,9 @@ def _config(directory: Path, rounds: int) -> Path:
     raw["experiment"]["output_dir"] = str(directory / "run")
     raw["schedule"]["rounds"] = rounds
     raw["runtime"]["checkpointing"] = {"enabled": False}
+    # Round one's start is observed at the rule's own fit, which the
+    # sequential executor calls.
+    raw["runtime"].setdefault("performance", {})["executor"] = "sequential"
     path = directory / "run.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     return path

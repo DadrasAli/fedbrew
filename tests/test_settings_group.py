@@ -244,7 +244,15 @@ class RunJsonRecordsTheGroupTest(GroupRuns):
         self.assertEqual(groups[0]["varies"], ["client.learning_rate"])
         self.assertEqual(groups[0]["largest_chunk_rows"], 16)
         executor = records[0]["reproducibility"]["executor"]
-        self.assertEqual(executor, {"used": "batched", "largest_chunk_clients": 8})
+        self.assertEqual(
+            executor,
+            {
+                "used": "batched",
+                "default": False,
+                "largest_chunk_clients": 8,
+                "gradient_form": {"used": "summed", "default": False},
+            },
+        )
 
     def test_an_auto_budget_is_the_first_settings(self) -> None:
         from fedbrew.core import batched_executor

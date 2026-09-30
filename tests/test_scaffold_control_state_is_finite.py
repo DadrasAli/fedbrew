@@ -144,6 +144,10 @@ def _scaffold_config(directory: Path) -> Path:
         "keep_last": 0,
     }
     raw["schedule"]["rounds"] = 4
+    # The poison is put in through the rule's own fit, which the sequential
+    # executor calls; the resident round's control check is
+    # tests/test_resident_round.py's.
+    raw["runtime"].setdefault("performance", {})["executor"] = "sequential"
     path = directory / "scaffold.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     return path

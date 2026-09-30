@@ -50,6 +50,10 @@ def _config(directory: Path, local_iterations: int, client: dict[str, Any]) -> P
     # `local_adamw` refuses the SGD keys the smoke config carries.
     raw["client"] = {key: value for key, value in raw["client"].items() if value is not None}
     raw["runtime"]["checkpointing"] = {"enabled": False}
+    # What the server is handed is observed where the sequential executor
+    # hands it over; the batched one's counts are held to it by
+    # tests/test_batched_executor_tolerance.py's exact num_examples column.
+    raw["runtime"].setdefault("performance", {})["executor"] = "sequential"
     path = directory / "run.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     return path

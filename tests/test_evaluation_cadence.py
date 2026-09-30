@@ -230,6 +230,8 @@ class ASkippedRoundCountsWithoutEvaluatingTest(_TempRoot):
                 config["data"]["path"] = str(manifest)
                 config["schedule"]["rounds"] = 3
                 config.setdefault("evaluation", {})["fit"] = {"every": "final"}
+                # The count is TorchSGDClient's, which the sequential executor runs.
+                config["runtime"].setdefault("performance", {})["executor"] = "sequential"
                 path = self.root / f"{name}.yaml"
                 path.write_text(yaml.safe_dump(config), encoding="utf-8")
 

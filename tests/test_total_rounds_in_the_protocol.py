@@ -17,6 +17,7 @@ from typing import Any
 from unittest import mock
 
 import torch
+import yaml
 
 from fedbrew.core import loop, runner
 from fedbrew.core.protocol import ClientInfo, FitRequest, RoundInfo
@@ -99,6 +100,12 @@ class ARealRunDeliversItTest(unittest.TestCase):
             mock.patch.object(loop, "_fit_client", recording),
         ):
             path = _write_config(Path(directory), rounds=3, participation_rate=1.0)
+            # _fit_client is where the sequential executor hands a client its
+            # request; the batched plans read T from the same requests, which
+            # tests/test_batched_executor_tolerance.py's cosine arms hold.
+            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+            raw["runtime"].setdefault("performance", {})["executor"] = "sequential"
+            path.write_text(yaml.safe_dump(raw), encoding="utf-8")
             runner.run(path, runner.parse_args(["--quiet"]))
 
         # Two clients at rate 1.0, three rounds.

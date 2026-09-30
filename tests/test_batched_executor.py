@@ -39,6 +39,7 @@ from fedbrew.clients.batched_update import plan_round
 from fedbrew.core import batched_executor
 from fedbrew.core.batched_executor import BatchedExecutor
 from fedbrew.core.config import load_config, validate_config
+from fedbrew.core.console import AMBER
 from fedbrew.core.factory import build_components
 from fedbrew.core.logging import _executor_rows
 from fedbrew.core.loop import SequentialExecutor
@@ -119,7 +120,11 @@ class SelectionIsRecordedTest(ExecutorRuns):
             self._record(output),
             {
                 "used": "batched",
+                "default": False,
                 "largest_chunk_clients": 8,
+                # The tests' reference form (set_performance): autograd, which
+                # fed-lasso declares fastest summed.
+                "gradient_form": {"used": "summed", "default": False},
                 # Planned from the roster in this process: a CPU run starts no
                 # planner workers (round_planner).
                 "planner": {"used": "on", "workers": 0, "waited_sec": 0.0},
@@ -143,9 +148,12 @@ class SelectionIsRecordedTest(ExecutorRuns):
         config = example_config("fed-lasso")
         with mock.patch.object(batched_executor._Bucket, "_run_summed", summed):
             output = self.run_config(config, "batched", gradient_form="vmap_grad")
-            self.assertEqual(self._record(output)["gradient_form"], "vmap_grad")
+            self.assertEqual(
+                self._record(output)["gradient_form"], {"used": "vmap_grad", "default": False}
+            )
             self.assertEqual(taken, [])
-            self.assertNotIn("gradient_form", self._record(self.run_config(config, "batched")))
+            autograd = self._record(self.run_config(config, "batched"))
+            self.assertEqual(autograd["gradient_form"], {"used": "summed", "default": False})
             self.assertTrue(taken)
 
     def test_closed_form_is_refused_for_a_task_without_one(self) -> None:
@@ -154,9 +162,16 @@ class SelectionIsRecordedTest(ExecutorRuns):
         with self.assertRaisesRegex(RunRefused, "gives no closed-form gradient"):
             self.run_config(classification_config(), "batched", gradient_form="closed_form")
 
-    def test_the_sequential_default_is_recorded(self) -> None:
+    def test_the_stated_sequential_executor_is_recorded(self) -> None:
         output = self.run_config(example_config("fed-lasso"), "sequential")
-        self.assertEqual(self._record(output), {"used": "sequential"})
+        self.assertEqual(
+            self._record(output),
+            {
+                "used": "sequential",
+                "default": False,
+                "gradient_form": {"used": "autograd", "default": False},
+            },
+        )
 
     def test_an_unbatchable_run_falls_back_and_says_why(self) -> None:
         config = example_config("fed-lasso", "fedlalr")
@@ -167,9 +182,9 @@ class SelectionIsRecordedTest(ExecutorRuns):
         # The fallback is the sequential executor, so it computes its numbers.
         self.assertAgree(batched, sequential, exact=True)
         rows = _executor_rows(record)
-        self.assertEqual(len(rows), 1)
+        self.assertEqual([row.label for row in rows], ["Executor", "Gradient"])
         self.assertIn("batched falls back", rows[0].value)
-        self.assertIsNotNone(rows[0].tone)
+        self.assertEqual(rows[0].tone, AMBER)
 
     def test_dropout_falls_back(self) -> None:
         from tests.test_batched_executor_tolerance import classification_config
@@ -182,7 +197,7 @@ class SelectionIsRecordedTest(ExecutorRuns):
 
     def test_the_plan_header_names_a_batched_run(self) -> None:
         self.assertEqual(_executor_rows({"used": "batched"})[0].value, "batched")
-        self.assertEqual(_executor_rows({"used": "sequential"}), [])
+        self.assertEqual(_executor_rows({"used": "sequential"})[0].value, "sequential")
 
 
 class ClientsAreIsolatedTest(unittest.TestCase):
@@ -349,7 +364,8 @@ class AnAutoBudgetIsHalfTheFreeMemoryTest(ExecutorRuns):
             {"asked": "auto", "used": free // 2, "free": free, "fraction": 0.5},
         )
         self.assertEqual(record["largest_chunk_clients"], 3)
-        self.assertIn("auto: 0.5 of", _executor_rows(record)[1].value)
+        rows = {row.label: row.value for row in _executor_rows(record)}
+        self.assertIn("auto: 0.5 of", rows["Chunk budget"])
 
     def test_a_budget_as_large_as_the_default_runs_as_the_default(self) -> None:
         auto = self.run_config(example_config("fed-lasso"), "batched", executor_chunk_bytes="auto")

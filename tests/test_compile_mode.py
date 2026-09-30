@@ -212,9 +212,10 @@ class ConfigTest(unittest.TestCase):
             load_config(path)
 
     def test_compile_needs_the_batched_executor(self) -> None:
-        with self.assertRaisesRegex(RunRefused, "executor: batched"):
-            self._load(compile=True)
-        self._load(compile=False)
+        with self.assertRaisesRegex(RunRefused, "executor: sequential"):
+            self._load(executor="sequential", compile=True)
+        self._load(executor="sequential", compile=False)
+        self._load(compile=True)
 
     def test_on_and_off_as_yaml_reads_them_or_as_words(self) -> None:
         for value in (True, False, "on", "off"):

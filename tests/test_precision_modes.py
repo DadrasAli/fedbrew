@@ -179,9 +179,10 @@ class ConfigTest(unittest.TestCase):
             load_config(path)
 
     def test_a_mode_needs_the_batched_executor(self) -> None:
-        with self.assertRaisesRegex(RunRefused, "executor: batched"):
-            self._load(precision="bf16")
-        self._load(precision="reference")
+        with self.assertRaisesRegex(RunRefused, "executor: sequential"):
+            self._load(executor="sequential", precision="bf16")
+        self._load(executor="sequential", precision="reference")
+        self._load(precision="bf16")
 
     def test_an_unknown_precision_is_refused(self) -> None:
         with self.assertRaisesRegex(RunRefused, "precision must be one of"):
