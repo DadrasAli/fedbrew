@@ -167,20 +167,15 @@ def plan_orders(
 
     shape = _plan_shape(tuple(orders), tuple(loops))
     positions = shape.positions
-    if bool(shape.permuted.any()) or shape.oracle is not None:
+    if shape.shuffle is not None or shape.oracle is not None:
         if seeds is None:
             seeds = [order.seed for order in orders]
-    if bool(shape.permuted.any()):
+    if shape.shuffle is not None:
         indices = _shuffle_positions(
             orders,
-            seeds,
-            shape.permuted,
-            shape.rows,
-            shape.epoch,
-            shape.epochs_used,
-            positions,
-            positions if shape.everyone else positions.clone(),
-            shape.everyone,
+            seeds,  # type: ignore[arg-type]
+            shape.shuffle,
+            None if shape.everyone else positions.clone(),
         )
     else:
         indices = positions.clone()
@@ -213,6 +208,24 @@ class _PlanShape:
     positions: Tensor
     permuted: Tensor
     everyone: bool
+    #: The permuted clients' draws and where each position reads them; None
+    #: where no client is permuted.
+    shuffle: _Shuffle | None
+
+
+@dataclass(frozen=True)
+class _Shuffle:
+    """What ``_shuffle_positions`` reads besides the draws, the same for the same orders.
+
+    ``picked`` are the permuted clients, ``epochs`` how many epochs' draws
+    each makes; the draws laid end to end, position ``p`` of client
+    ``picked[k]``'s batches at step ``t`` is element ``where[k, t, p]``.
+    """
+
+    chosen: Tensor
+    picked: list[int]
+    epochs: list[int]
+    where: Tensor
 
 
 @lru_cache(maxsize=16)
@@ -271,6 +284,10 @@ def _plan_shape(orders: tuple[LoaderOrder, ...], loops: tuple[LocalLoop, ...]) -
     # The positions are read again only to map a permuted client's through
     # its permutations; where every client is permuted, what that returns is
     # the whole of the indices, a new tensor.
+    everyone = bool(permuted.all())
+    shuffle = None
+    if bool(permuted.any()):
+        shuffle = _shuffle_shape(orders, permuted, epoch, epochs_used, positions, everyone)
     return _PlanShape(
         rows=rows,
         per_epoch=per_epoch,
@@ -284,7 +301,8 @@ def _plan_shape(orders: tuple[LoaderOrder, ...], loops: tuple[LocalLoop, ...]) -
         shuffled=shuffled,
         positions=positions,
         permuted=permuted,
-        everyone=bool(permuted.all()),
+        everyone=everyone,
+        shuffle=shuffle,
     )
 
 
@@ -304,55 +322,73 @@ def _loop_structure(loop: LocalLoop, count: int) -> tuple[tuple[int, ...], int]:
     return (1,) * total, total
 
 
-def _shuffle_positions(
-    orders: Sequence[LoaderOrder],
-    all_seeds: Sequence[int | None],
+def _shuffle_shape(
+    orders: tuple[LoaderOrder, ...],
     shuffled: Tensor,
-    rows: Tensor,
     epoch: Tensor,
     epochs_used: Tensor,
     positions: Tensor,
-    indices: Tensor,
-    everyone: bool = False,
-) -> Tensor:
-    """Each shuffled client's positions mapped through its epochs' permutations.
+    everyone: bool,
+) -> _Shuffle:
+    """Where each shuffled client's positions are read from its epochs' permutations.
 
-    Into ``indices``, which is returned; where ``everyone`` is shuffled, the
-    mapped positions are returned as the indices themselves.
+    Each draw is a permutation of the client's rows, so how many there are
+    and how long, and so which element of them all end to end each position
+    reads, follow from the orders alone.
     """
 
     chosen = torch.nonzero(shuffled).view(-1)
     picked = chosen.tolist()
     counts = torch.clamp(epochs_used[chosen], min=1).tolist()
-    drawn: list[Tensor] = []
+    # Client c's epoch e is permutation first[c] + e, or its only one for a
+    # loader that permutes once, and its position p is element starts[that]
+    # + p of the permutations end to end.
+    lengths: list[int] = []
     first: list[int] = []
-    # One generator, re-seeded for each loader: manual_seed sets the whole
-    # state, so it is each loader's fresh generator in turn.
-    generator = torch.Generator()
-    scratch = torch.empty((), dtype=_LONG)
     for client, epochs in zip(picked, counts, strict=True):
-        seed = all_seeds[client]
-        if seed is None:
-            raise ValueError("a shuffled loader's order is drawn from its own seed")
-        first.append(len(drawn))
-        generator.manual_seed(int(seed))
-        drawn.extend(_permutations(orders[client], generator, scratch, epochs))
-    # Every permutation end to end; client c's epoch e is permutation
-    # first[c] + e, or its only one for a loader that permutes once, and its
-    # position p is element starts[that] + p.
-    joined = torch.cat(drawn)
-    starts = torch.zeros(len(drawn), dtype=_LONG)
-    if len(drawn) > 1:
-        starts[1:] = torch.tensor([len(permutation) for permutation in drawn[:-1]]).cumsum(0)
+        first.append(len(lengths))
+        lengths.extend([orders[client].rows] * (epochs if orders[client].per_epoch else 1))
+    starts = torch.zeros(len(lengths), dtype=_LONG)
+    if len(lengths) > 1:
+        starts[1:] = torch.tensor(lengths[:-1]).cumsum(0)
     per_loader = torch.tensor([not orders[client].per_epoch for client in picked])
     last = torch.tensor(counts, dtype=_LONG) - 1
     which = torch.minimum(epoch[chosen], last.unsqueeze(1))
     which = torch.where(per_loader.unsqueeze(1), 0, which)
     which = which + torch.tensor(first, dtype=_LONG).unsqueeze(1)
-    if everyone:
-        where = starts[which].unsqueeze(2) + positions
+    where = starts[which].unsqueeze(2) + (positions if everyone else positions[chosen])
+    return _Shuffle(chosen=chosen, picked=picked, epochs=counts, where=where)
+
+
+def _shuffle_positions(
+    orders: Sequence[LoaderOrder],
+    all_seeds: Sequence[int | None],
+    shuffle: _Shuffle,
+    indices: Tensor | None,
+) -> Tensor:
+    """Each shuffled client's positions mapped through its epochs' permutations.
+
+    Into ``indices``, which is returned; where every client is shuffled
+    (``indices`` None), the mapped positions are returned as the indices
+    themselves.
+    """
+
+    drawn: list[Tensor] = []
+    # One generator, re-seeded for each loader: manual_seed sets the whole
+    # state, so it is each loader's fresh generator in turn.
+    generator = torch.Generator()
+    scratch = torch.empty((), dtype=_LONG)
+    for client, epochs in zip(shuffle.picked, shuffle.epochs, strict=True):
+        seed = all_seeds[client]
+        if seed is None:
+            raise ValueError("a shuffled loader's order is drawn from its own seed")
+        generator.manual_seed(int(seed))
+        drawn.extend(_permutations(orders[client], generator, scratch, epochs))
+    joined = torch.cat(drawn)
+    where = shuffle.where
+    if indices is None:
         return joined.index_select(0, where.view(-1)).view(where.shape)
-    indices[chosen] = joined[starts[which].unsqueeze(2) + positions[chosen]]
+    indices[shuffle.chosen] = joined[where]
     return indices
 
 
