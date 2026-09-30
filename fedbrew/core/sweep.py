@@ -1,11 +1,11 @@
 """``fedbrew sweep``: several configs, those differing only in numeric hyperparameters as one group.
 
 A sweep's configs are grouped automatically. Two configs share a group when
-both load, both ask for ``runtime.performance.executor: batched``, neither
-resumes, and they are equal on every key except the ones that name a run
-(``runner._NOT_CONFIGURATION``) and ``VARIABLE``: the client's learning rate,
-momentum, weight decay, FedProx's mu and clipping norm, and the server's
-learning rate and momentum. A key one config has and the other does not is a
+both load, both ask for the batched executor (``runtime.performance.executor``
+left out asks for it), neither resumes, and they are equal on every key except
+the ones that name a run (``runner._NOT_CONFIGURATION``) and ``VARIABLE``:
+the client's learning rate, momentum, weight decay, FedProx's mu and clipping
+norm, and the server's learning rate and momentum. A key one config has and the other does not is a
 difference. Seeds, data, models and local iterations are therefore the same
 inside a group; runs that differ in them run apart.
 
@@ -30,7 +30,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from fedbrew.core.config import FullConfig, load_config
+from fedbrew.core.config import FullConfig, asked_executor, load_config
 from fedbrew.core.runner import _NOT_CONFIGURATION, EXIT_REFUSED, _as_written
 
 #: The keys a group's settings may differ in: numeric hyperparameters that
@@ -155,8 +155,8 @@ _IGNORED = _NOT_CONFIGURATION | VARIABLE
 
 def _alone_reason(config: FullConfig) -> str | None:
     performance = config.runtime.extra.get("performance") or {}
-    if performance.get("executor", "sequential") != "batched":
-        return "runtime.performance.executor is not batched"
+    if asked_executor(performance) != "batched":
+        return "runtime.performance.executor is sequential"
     if config.runtime.extra.get("resume_from") or config.runtime.extra.get("resume_latest"):
         return "it resumes, and a group is not resumed"
     return None

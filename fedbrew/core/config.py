@@ -1152,16 +1152,35 @@ def _validate_numerics(numerics: NumericsConfig) -> None:
 
 
 #: What ``runtime.performance.executor`` accepts: how a round's sampled clients
-#: are run (chapter 11 §9). ``batched`` on a configuration it cannot batch runs
-#: ``sequential``, says so in the plan header, and records why in run.json.
+#: are run (chapter 11 §9). Left out, a run takes ``batched`` wherever its task
+#: and rule can be batched and ``sequential`` otherwise, and the plan header
+#: and run.json say which ran and why; ``sequential`` stated is the reference.
+#: ``batched`` stated on a configuration it cannot batch runs ``sequential``,
+#: flagged as a fallback, since it was asked for.
 EXECUTORS: frozenset[str] = frozenset({"sequential", "batched"})
 
-#: What ``runtime.performance.gradient_form`` accepts: how the batched
-#: executor takes a stack's gradients, in place of the form the task declares
-#: (``batched_gradient``): autograd vmapped, autograd through the losses' sum,
-#: or the task's own closed form (``closed_form_gradient``), which a task
-#: without one refuses. They agree to the executor's tolerance.
-GRADIENT_FORMS: tuple[str, ...] = ("vmap_grad", "summed", "closed_form")
+#: The executor a run that states none asks for.
+DEFAULT_EXECUTOR = "batched"
+
+#: What ``runtime.performance.gradient_form`` accepts: how a client's
+#: gradients are taken. ``closed_form``: the task's own formula
+#: (``closed_form_gradient``), which a task without one refuses -- the default
+#: wherever the task gives one. ``autograd``: autograd, under either executor
+#: -- ``loss.backward()`` in the sequential one, the form the task declares
+#: (``batched_gradient``) in the batched one. ``vmap_grad`` and ``summed``:
+#: the batched executor's two autograd forms, named -- autograd vmapped, or
+#: through the losses' sum. They agree to the executor's tolerance.
+GRADIENT_FORMS: tuple[str, ...] = ("closed_form", "autograd", "vmap_grad", "summed")
+
+#: The gradient forms only the batched executor has.
+BATCHED_GRADIENT_FORMS: frozenset[str] = frozenset({"vmap_grad", "summed"})
+
+
+def asked_executor(performance: Mapping[str, Any]) -> str:
+    """The executor ``runtime.performance`` asks for: the one it states, or the default."""
+
+    return str(performance.get("executor") or DEFAULT_EXECUTOR)
+
 
 #: What ``numerics.precision`` accepts: the reference, or a mode the batched
 #: executor trains in (chapter 11 §11).
@@ -1191,9 +1210,10 @@ def _validate_executor_values(performance: Mapping[str, Any]) -> None:
 def _validate_step_modes(performance: Mapping[str, Any], precision: object) -> None:
     """Refuse a compile or graphs value the executor does not have, or a mode without it.
 
-    ``compile``, ``cuda_graphs`` and ``numerics.precision`` change how the
-    batched executor's step runs, so a config that asks for one without
-    ``executor: batched`` would record a mode that never ran.
+    ``compile``, ``cuda_graphs``, ``numerics.precision`` and the batched
+    gradient forms change how the batched executor's step runs, so a config
+    that asks for one beside ``executor: sequential`` would record a mode that
+    never ran.
     """
 
     compiled = performance.get("compile")
@@ -1214,15 +1234,21 @@ def _validate_step_modes(performance: Mapping[str, Any], precision: object) -> N
             ("compile", compiled in (True, "on")),
             ("precision", precision not in (None, "reference")),
             ("cuda_graphs", graphs in (True, "on")),
-            ("gradient_form", form is not None),
+            ("gradient_form", form in BATCHED_GRADIENT_FORMS),
         )
         if value
     ]
-    if asked and performance.get("executor") != "batched":
+    if asked and asked_executor(performance) == "sequential":
         place = "numerics" if asked[0] == "precision" else "runtime.performance"
+        value = f" {form}" if asked[0] == "gradient_form" else ""
         raise RunRefused(
-            f"{place}.{asked[0]} is a mode of the batched executor's step; "
-            "set runtime.performance.executor: batched"
+            f"{place}.{asked[0]}{value} is a mode of the batched executor's step, and the "
+            "config states runtime.performance.executor: sequential; drop that line, or "
+            + (
+                "ask for autograd there with gradient_form: autograd"
+                if asked[0] == "gradient_form"
+                else f"the {place}.{asked[0]} key"
+            )
         )
 
 

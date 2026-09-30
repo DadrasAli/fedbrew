@@ -41,7 +41,7 @@ from fedbrew.core.torch_utils import (
     subtract_model_states,
     zeros_like_model_state,
 )
-from fedbrew.tasks.base import TaskAdapter
+from fedbrew.tasks.base import TaskAdapter, take_train_step
 
 
 class TorchScaffoldClient(TorchSGDClient[TaskAdapter]):
@@ -162,7 +162,7 @@ class TorchScaffoldClient(TorchSGDClient[TaskAdapter]):
                     local_steps += 1
                     continue
                 for batch in train_loader:
-                    self.task.train_step(model, batch, optimizer)
+                    take_train_step(self.task, model, batch, optimizer)
                     local_steps += 1
         finally:
             release_optimizer(sgd)

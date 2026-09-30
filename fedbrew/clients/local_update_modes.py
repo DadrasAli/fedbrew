@@ -13,7 +13,12 @@ import torch
 from torch import Tensor, nn, optim
 
 from fedbrew.core.torch_utils import OptimizerLike
-from fedbrew.tasks.base import TaskAdapter, batch_example_count, loss_averages_over_examples
+from fedbrew.tasks.base import (
+    TaskAdapter,
+    batch_example_count,
+    loss_averages_over_examples,
+    take_train_step,
+)
 
 #: The smallest learning rate this module will run a step at.
 #:
@@ -377,7 +382,8 @@ def run_delta_sgd_update_mode(
             for batch in batches:
                 gradient_optimizer = _GradientOnlyOptimizer(model.parameters())
                 outputs.append(
-                    task.train_step(
+                    take_train_step(
+                        task,
                         model,
                         batch,
                         gradient_optimizer,
@@ -433,7 +439,7 @@ def _delta_sgd_batch_step(
     """Measure the gradient on one batch, pick a step size, and apply it."""
 
     gradient_optimizer = _GradientOnlyOptimizer(model.parameters())
-    output = task.train_step(model, batch, gradient_optimizer)  # type: ignore[arg-type]
+    output = take_train_step(task, model, batch, gradient_optimizer)
     _apply_delta_sgd_step(model, _parameter_gradients(model), stepper, max_grad_norm)
     return output
 
@@ -592,7 +598,7 @@ def _run_single_batch(
                 batch_iterator,
                 client_id=client_id,
             )
-            outputs.append(task.train_step(model, batch, optimizer))
+            outputs.append(take_train_step(task, model, batch, optimizer))
     finally:
         release_optimizer(sgd)
 
@@ -619,7 +625,7 @@ def _run_sequential_epochs(
             epoch_had_batch = False
             for batch in train_loader:
                 epoch_had_batch = True
-                outputs.append(task.train_step(model, batch, optimizer))
+                outputs.append(take_train_step(task, model, batch, optimizer))
                 optimizer_steps += 1
             if not epoch_had_batch:
                 raise ValueError(f"client {client_id!r} has no training batches")
@@ -653,7 +659,8 @@ def _run_frozen_gradient_epochs(
         for batch in batches:
             gradient_optimizer = _GradientOnlyOptimizer(model.parameters())
             outputs.append(
-                task.train_step(
+                take_train_step(
+                    task,
                     model,
                     batch,
                     gradient_optimizer,
@@ -778,7 +785,7 @@ def _whole_split_gradient(
     denominator = 0.0
     batches = 0
     for batch in train_loader:
-        output = task.train_step(model, batch, _GradientOnlyOptimizer(model.parameters()))
+        output = take_train_step(task, model, batch, _GradientOnlyOptimizer(model.parameters()))
         outputs.append(output)
         weight = float(task.train_loss_denominator(batch, output))
         if not math.isfinite(weight) or weight < 0.0:

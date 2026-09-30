@@ -72,7 +72,7 @@ from fedbrew.clients.batched_update import (
     values_at,
 )
 from fedbrew.clients.torch_sgd_client import trainable_parameter_count
-from fedbrew.core.config import GRADIENT_FORMS
+from fedbrew.core.config import BATCHED_GRADIENT_FORMS, GRADIENT_FORMS, asked_executor
 from fedbrew.core.execution import ClientPool, FitObserver
 from fedbrew.core.protocol import FitRequest, FitResult
 from fedbrew.core.refusal import RunRefused
@@ -1755,15 +1755,48 @@ class _Bucket:
 def gradient_form(task: Any, asked: str | None = None) -> str:
     """The form a stack's gradients are taken in.
 
-    ``asked``, a run's ``runtime.performance.gradient_form``, where it sets one;
-    otherwise the form the task declares its stacked gradients fastest in,
-    ``vmap_grad`` by default.
+    ``asked``, the form a run chose (``choose_gradient_form``), where it names
+    one; ``autograd`` or None is the autograd form the task declares its
+    stacked gradients fastest in, ``vmap_grad`` by default.
     """
 
-    form = asked if asked is not None else getattr(task, "batched_gradient", "vmap_grad")
-    if form not in GRADIENT_FORMS:
+    form = asked if asked not in (None, "autograd") else getattr(task, "batched_gradient", None)
+    form = form or "vmap_grad"
+    if form not in GRADIENT_FORMS or form == "autograd":
         raise ValueError(f"batched_gradient must be one of {GRADIENT_FORMS}, got {form!r}")
     return form
+
+
+def choose_gradient_form(
+    task: Any, performance: Mapping[str, Any], precision: str, batched: bool
+) -> tuple[str, dict[str, Any]]:
+    """The gradient form a run trains in, and what run.json records of it.
+
+    ``runtime.performance.gradient_form`` where the config states one; left
+    out, the task's closed form wherever it gives one the run can take
+    (``closed_form_unsupported``), and autograd otherwise. Under the batched
+    executor autograd is the form the task declares (``gradient_form``); under
+    the sequential one it is ``train_step``'s ``loss.backward()``, which a
+    batched form stated for a run that could not be batched falls back to.
+    """
+
+    asked = performance.get("gradient_form")
+    if asked == "closed_form":
+        why = closed_form_unsupported(task, precision)
+        if why is not None:
+            raise RunRefused(f"runtime.performance.gradient_form: closed_form is refused: {why}")
+    if asked is None:
+        asked = "closed_form" if closed_form_unsupported(task, precision) is None else "autograd"
+    record: dict[str, Any] = {"default": performance.get("gradient_form") is None}
+    if asked == "closed_form":
+        used = "closed_form"
+    elif batched:
+        used = gradient_form(task, asked)
+    else:
+        used = "autograd"
+        if asked in BATCHED_GRADIENT_FORMS:
+            record["fallback"] = f"{asked} is the batched executor's, and the run is sequential"
+    return used, {"used": used, **record}
 
 
 def step_functions(
@@ -2254,41 +2287,70 @@ def select_executor(
 ) -> tuple[BatchedExecutor | None, dict[str, Any]]:
     """The executor ``runtime.performance.executor`` asks for, or the reference if it cannot be.
 
-    Returns it -- None for the sequential reference -- and the record run.json
-    keeps under ``reproducibility.executor``: which one ran, and, when
-    ``batched`` was asked for and the run could not be batched, why. A batched
-    executor keeps its record current as it runs (``largest_chunk_clients``).
-    ``plan_ahead`` gives it a planner of its rounds' orders (``round_planner``).
+    A config that states none asks for ``batched`` (``DEFAULT_EXECUTOR``).
+    Returns the executor -- None for the sequential reference -- and the
+    record run.json keeps under ``reproducibility.executor``: which one ran,
+    whether it was the default, and, when the run could not be batched, why --
+    a ``fallback`` when ``batched`` was stated, a ``reason`` when it was only
+    the default -- and the gradient form it trains in
+    (``choose_gradient_form``). A batched executor keeps its record current
+    as it runs (``largest_chunk_clients``). ``plan_ahead`` gives it a planner
+    of its rounds' orders (``round_planner``).
     """
 
     performance = components.config.runtime.extra.get("performance") or {}
-    if performance.get("executor", "sequential") != "batched":
-        return None, {"used": "sequential"}
-    compile_asked = compile_mode(performance.get("compile"))
+    stated = performance.get("executor") is not None
     precision_asked = str(components.config.numerics.precision)
-    if performance.get("gradient_form") == "closed_form":
-        why = closed_form_unsupported(components.task, precision_asked)
-        if why is not None:
-            raise RunRefused(f"runtime.performance.gradient_form: closed_form is refused: {why}")
+    if asked_executor(performance) == "sequential":
+        return None, _sequential(components, performance, {"default": False})
+    compile_asked = compile_mode(performance.get("compile"))
     reason, model = _batched_check(components)
     if reason is not None:
-        record = {"used": "sequential", "fallback": reason}
+        # Asked for and refused is a fallback; taken by default, it is only why.
+        record = {"default": not stated, "fallback" if stated else "reason": reason}
+        record = _sequential(components, performance, record)
         _record_modes(record, compile_asked, precision_asked, "reference", "the run is sequential")
         return None, record
-    record = {"used": "batched", "largest_chunk_clients": 0}
+    record = {"used": "batched", "default": not stated, "largest_chunk_clients": 0}
     assert model is not None
     precision, why = _precision_for(precision_asked, model)
     _record_modes(record, compile_asked, precision_asked, precision, why)
     chunk_bytes = chunk_budget(performance.get("executor_chunk_bytes"), model, record)
-    form = performance.get("gradient_form")
-    if form is not None:
-        record["gradient_form"] = str(form)
+    form, record["gradient_form"] = choose_gradient_form(
+        components.task, performance, precision, batched=True
+    )
+    _train_on(components.task, form)
     context = StepContext(compile_asked, precision, record, gradient_form=form)
     executor = BatchedExecutor(chunk_bytes, record=record, context=context)
     executor.cuda_graphs = compile_mode(performance.get("cuda_graphs"))
     if plan_ahead:
         executor.planner = round_planner(components, model, record)
     return executor, record
+
+
+def _sequential(
+    components: Any, performance: Mapping[str, Any], record: dict[str, Any]
+) -> dict[str, Any]:
+    """The record of a sequential run, its gradient form chosen and handed to its task.
+
+    The sequential executor steps at the reference precision, whatever
+    ``numerics.precision`` asked of a batched one.
+    """
+
+    form, chosen = choose_gradient_form(components.task, performance, "reference", batched=False)
+    _train_on(components.task, form)
+    return {"used": "sequential", **record, "gradient_form": chosen}
+
+
+def _train_on(task: Any, form: str) -> None:
+    """Have ``task``'s own training steps take ``form``: its closed form, or autograd.
+
+    Every step a rule takes through ``take_train_step`` reads it, so a client
+    the batched executor hands to its own ``fit`` trains in the run's form too.
+    """
+
+    if form == "closed_form" or getattr(task, "closed_form_steps", False):
+        task.closed_form_steps = form == "closed_form"
 
 
 def round_planner(components: Any, model: nn.Module, record: dict[str, Any]) -> RoundPlanner | None:

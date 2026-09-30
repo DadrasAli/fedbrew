@@ -199,7 +199,7 @@ what leaves the client.
 | Counted in | examples | tokens |
 | AMP | `use_amp` supported | **refused** — no autocast path, so `use_amp: true` is an error rather than a no-op |
 | `fast_batching` | supported | not applicable |
-| `executor: batched` | supported (`BatchableTask`), at dropout 0 | falls back to `sequential` |
+| batched executor (the default) | supported (`BatchableTask`), at dropout 0; otherwise runs `sequential` | runs `sequential` |
 
 Chapter 08 §2 gives both formulas, and chapter 11 §9 the batched executor.
 

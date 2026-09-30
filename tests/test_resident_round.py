@@ -45,6 +45,7 @@ from tests.test_batched_executor_tolerance import (
     classification_rule_config,
     example_config,
     ragged_clients,
+    set_performance,
 )
 from tests.test_reproducibility import TIMING
 from tests.test_round_planner import ragged
@@ -436,7 +437,7 @@ class AResumeFromAnAsynchronousFlushIsTheRunTest(ResidentRuns):
             with self.subTest(stop_at=stop_at):
                 path = self.root / f"stopped-{stop_at}.yaml"
                 config["experiment"]["output_dir"] = str(self.root / f"stopped-{stop_at}")
-                config["runtime"].setdefault("performance", {})["executor"] = "batched"
+                set_performance(config, executor="batched")
                 path.write_text(yaml.safe_dump(config), encoding="utf-8")
                 with mock.patch.object(runner, "_round_progress_reporter", _stopping(stop_at)):
                     with self.assertRaises(KeyboardInterrupt):
@@ -485,7 +486,7 @@ class SCAFFOLDIsHeldOnTheDeviceTest(ResidentRuns):
         self.assertEqual(_executor(whole)["rounds"], {"used": "resident"})
         path = self.root / "stopped.yaml"
         config["experiment"]["output_dir"] = str(self.root / "stopped")
-        config["runtime"].setdefault("performance", {})["executor"] = "batched"
+        set_performance(config, executor="batched")
         path.write_text(yaml.safe_dump(config), encoding="utf-8")
         # Stopped at round 5: latest.pt is round 4's flush, with every c_i as round 4 left it.
         with mock.patch.object(runner, "_round_progress_reporter", _stopping(5)):

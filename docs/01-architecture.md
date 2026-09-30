@@ -73,7 +73,8 @@ result to a `FitObserver` before yielding it, so the per-client records, the
 fit time and the progress footer are written whatever runs the clients.
 `tests/test_execution_seam.py` pins that the loop calls nothing else.
 The second executor is `BatchedExecutor` (`fedbrew/core/batched_executor.py`),
-selected by `runtime.performance.executor: batched`: it trains the sampled
+which a run takes by default wherever its task and rule can be batched
+(`runtime.performance.executor`; `sequential` stated is the reference): it trains the sampled
 clients together over a stack of their parameters and yields each result as a
 row of that stack, which the `StreamingAggregator` folds as before. Beside it
 runs `BatchedEvaluator` (`fedbrew/core/batched_evaluator.py`), which measures

@@ -250,6 +250,14 @@ produces: `test_aggregation_correctness.py`, `test_fedopt_server.py`,
 single-client identity; `test_non_finite_aggregation.py` checks that a NaN
 changes values without changing the column set.
 
+**The reference.** A run's defaults are the batched executor and, where the
+task gives one, its closed-form gradient; the tests hold every path to the
+sequential executor on autograd, stated. `set_performance`
+(`tests/test_batched_executor_tolerance.py`) asks for `gradient_form:
+autograd` beside any executor a test names, so a path is compared on the same
+gradients unless the test is of the gradient form itself
+(`tests/test_closed_form_gradients.py`, `tests/test_default_executor.py`).
+
 **Documentation guards.** They diff a chapter against the code that defines
 what it describes. This is the group the previous documentation set did not
 have, and the reason it went stale.

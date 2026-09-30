@@ -167,6 +167,7 @@ class TheBlockIsValidatedTest(_Directory):
     def test_a_step_precision_needs_the_batched_executor(self) -> None:
         def edit(raw: dict[str, Any]) -> None:
             raw["numerics"]["precision"] = "bf16"
+            raw["runtime"].setdefault("performance", {})["executor"] = "sequential"
 
         with self.assertRaisesRegex(RunRefused, r"numerics\.precision is a mode of the batched"):
             self._load(edit)

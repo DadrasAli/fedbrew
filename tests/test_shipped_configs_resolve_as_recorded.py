@@ -38,6 +38,14 @@ Two differences are allowed, both declared here rather than taken on trust:
 The ``schedule`` block, which ``defaults`` was renamed to, is read at load and
 never stored, so its rename moved nothing in the resolved config.
 
+Two defaults changed on purpose, and change what a config that leaves the key
+out runs, not how it resolves: ``DEFAULTS_CHANGED``. A key left out stays out
+of the resolved config -- a run records what it used, and whether that was the
+default, in run.json -- so the comparison above cannot see them; they are
+declared here instead, with the default each config that leaves the key out
+asked for when the record was made and asks for now, and the test holds the
+code's defaults and which shipped configs they reach to the declaration.
+
 examples/fed-logistic-l1's 34 arms were recorded as they resolved before they
 moved to this schema, in the record's own, with
 ``evaluation.splits_without_data`` at the ``[]`` a config without client splits
@@ -107,6 +115,26 @@ ADDED: dict[str, Any] = {
 #: Inferred keys whose inferred value may differ from the recorded one.
 INFERRED_AND_CHANGED = frozenset({"experiment.name"})
 
+#: Defaults changed since the record: a key a config may leave out -> what a
+#: config that leaves it out asked for then, and asks for now. Each changes
+#: results in the last digits, within the batched executor's tolerance
+#: (FINDINGS.md, POST-F34 and POST-F35).
+DEFAULTS_CHANGED: dict[str, tuple[str, str]] = {
+    "runtime.extra.performance.executor": ("sequential", "batched"),
+    "runtime.extra.performance.gradient_form": (
+        "autograd",
+        "closed_form wherever the task gives closed_form_gradient, autograd otherwise",
+    ),
+}
+
+#: How many shipped configs leave each changed default's key out, and so run
+#: the new default: every config but the eight heterogeneous-quadratic arms,
+#: which state executor: batched, and every config for the gradient form.
+LEFT_OUT: dict[str, int] = {
+    "runtime.extra.performance.executor": 131,
+    "runtime.extra.performance.gradient_form": 139,
+}
+
 
 def _differences(before: dict[str, Any], now: dict[str, Any]) -> list[str]:
     inferred = {key[len("inferred.") :] for key in now if key.startswith("inferred.")}
@@ -151,6 +179,21 @@ class EveryShippedConfigResolvesAsRecordedTest(unittest.TestCase):
                 now = resolved(path)
                 self.assertEqual(_differences(before["config"], now["config"]), [])
                 self.assertEqual(now["planned"], before["planned"])
+
+    @pytest.mark.fast
+    def test_the_changed_defaults_are_the_declared_ones(self) -> None:
+        from fedbrew.core.config import DEFAULT_EXECUTOR, asked_executor
+
+        self.assertEqual(
+            DEFAULT_EXECUTOR, DEFAULTS_CHANGED["runtime.extra.performance.executor"][1]
+        )
+        self.assertEqual(asked_executor({}), DEFAULT_EXECUTOR)
+        for key, count in LEFT_OUT.items():
+            with self.subTest(key=key):
+                left_out = [
+                    path for path, entry in self.record.items() if key not in entry["config"]
+                ]
+                self.assertEqual(len(left_out), count)
 
     @pytest.mark.fast
     def test_the_allowance_is_only_what_was_inferred(self) -> None:

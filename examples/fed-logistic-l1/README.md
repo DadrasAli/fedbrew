@@ -256,10 +256,11 @@ rows, which is the order the gap is computed in.
 
 The task is batchable (chapter 11 §9): `split_rows`, `row_batches`,
 `functional_loss` and `functional_eval` are the arithmetic `train_step` and
-`eval_step` run, so `runtime.performance.executor: batched` trains every
-client of a round together. `tests/test_fed_logistic_l1.py` holds one FedAvg
-round of each problem, batched, to the sequential run within the executor's
-`1e-12`.
+`eval_step` run, so the batched executor, the default, trains every client of
+a round together, on the task's closed-form gradient (`closed_form_gradient`),
+also the sequential executor's default. `tests/test_fed_logistic_l1.py` holds
+one FedAvg round of each problem, batched, to the sequential run within the
+executor's `1e-12`.
 
 ## Which shipped algorithms can solve it
 

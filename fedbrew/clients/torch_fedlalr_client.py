@@ -50,6 +50,7 @@ from fedbrew.core.checkpointing import refuse_a_reconfigured_resume
 from fedbrew.core.federated_state import model_state_size, refuse_adapter_state
 from fedbrew.core.metrics import filter_metrics
 from fedbrew.core.protocol import FitRequest, FitResult
+from fedbrew.tasks.base import take_train_step
 
 #: beta1 and epsilon are the paper's CIFAR settings (arXiv:2309.09719, Section
 #: V-A; it uses beta1 0.8 on Shakespeare). beta2 is not the paper's: it reports
@@ -172,9 +173,7 @@ class TorchFedLALRClient(TorchSGDClient):
             for batch in train_loader:
                 epoch_had_batch = True
                 optimizer = _GradientOnlyOptimizer(model.parameters())
-                training_outputs.append(
-                    self.task.train_step(model, batch, optimizer)  # type: ignore[arg-type]
-                )
+                training_outputs.append(take_train_step(self.task, model, batch, optimizer))
                 _amsgrad_step(
                     model,
                     momentum,

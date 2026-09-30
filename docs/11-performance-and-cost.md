@@ -40,9 +40,9 @@ comparison, and its figures are not quoted.
 The consequence for tuning: a round's wall clock is dominated by per-client
 Python overhead, not by matrix multiplication. Settings that reduce the number
 of client visits help; settings that make each visit's arithmetic faster mostly
-do not. The exception is `runtime.performance.executor: batched`, which removes
-the per-client overhead instead, by training the sampled clients together
-(§9).
+do not. The exception is the batched executor, every batchable run's default,
+which removes the per-client overhead instead, by training the sampled clients
+together (§9).
 
 **Each worker builds its optimizer once.** Every local update used to construct
 its own `torch.optim` optimizer, 86 µs per client per round, 86 ms a round at
@@ -330,7 +330,7 @@ is summed differently (§9).
 
 ## 9. The batched executor
 
-`runtime.performance.executor: batched` trains a round's sampled clients
+The batched executor trains a round's sampled clients
 together (`fedbrew/core/batched_executor.py`). Every client's parameters are
 stacked on a leading client dimension, and each local step is one
 `torch.func.vmap(torch.func.grad(...))` of the task's `functional_loss` over
@@ -338,14 +338,18 @@ the stack, followed by the rule's step over the same dimension
 (`fedbrew/clients/batched_update.py`). The post-fit pass that gives `fit_*`
 and the aggregation weight is one `vmap` of `functional_eval`, and the results
 are folded in one weighted reduction per tensor (chapter 07 §3.3).
-`sequential`, the default, is the reference it is held to.
+It is the default: a run that states no `executor` takes it wherever its task
+and rule can be batched, and the sequential executor where they cannot, which
+the plan header and `run.json` record as the default, with the reason, not as
+a fallback. `sequential`, stated, is the reference it is held to, and every
+test holds the batched paths to it on autograd.
 
 | Key | Type | Default | Effect |
 | --- | --- | --- | --- |
-| `executor` | `sequential` \| `batched` | `sequential` | How a round's sampled clients are run. |
+| `executor` | `sequential` \| `batched` | unset: `batched` where it can run, `sequential` otherwise | How a round's sampled clients are run. `batched` stated on a run it cannot batch is a fallback, in amber. |
 | `executor_chunk_bytes` | int > 0 \| `auto` | `1073741824` (1 GiB) | The memory one chunk of clients may take. Read only by `batched`. `auto`: half the device's free memory at the start of the run, below. |
 | `cuda_graphs` | `on` \| `off` | `off` | Replays a resident round's training from a CUDA graph recorded once per round shape (§9.1). Read only by `batched`, on CUDA. |
-| `gradient_form` | `vmap_grad` \| `summed` \| `closed_form` | the task's | How a stack's gradients are taken, over the form the task declares (`batched_gradient`). `summed` walks the stack once forward and once back, and is the faster of the autograd forms for a small model on the CPU; `closed_form` takes no autograd at all, the task's formula for every client at once, for a task that gives one. Read only by `batched`. |
+| `gradient_form` | `closed_form` \| `autograd` \| `vmap_grad` \| `summed` | unset: `closed_form` where the task gives one, `autograd` otherwise | How a client's gradients are taken. `closed_form` takes no autograd at all: the task's formula, for every client of a stack at once, and in the sequential executor for its one client (`closed_form_train_step`). `autograd` is the form the task declares (`batched_gradient`), and `loss.backward()` in the sequential executor; `vmap_grad` and `summed` name the batched executor's two: `summed` walks the stack once forward and once back, and is the faster for a small model on the CPU. |
 
 **What it computes.** Per client, what the sequential executor computes:
 
@@ -789,8 +793,8 @@ settings to plan. A group is not resumed as a group.
 Two opt-in keys change how the batched executor's training step runs
 (`StepContext`, `fedbrew/core/batched_executor.py`): `runtime.performance.compile`,
 and `numerics.precision`, which is in the numerics block because it changes
-the numbers (chapter 04 §7.5). Both need
-`runtime.performance.executor: batched`, and the defaults leave the step as
+the numbers (chapter 04 §7.5). Both are refused beside
+`runtime.performance.executor: sequential`, and the defaults leave the step as
 §9 describes it. They change the training step only: the update arithmetic
 stays at the model's precision, and the post-fit pass and every evaluation
 run eagerly at the model's own precision, so what a run reports is measured
@@ -942,6 +946,8 @@ python tools/bench_compare_runs.py --help
 | `tests/test_report_run_size.py` | Reported run size. |
 | `tests/test_batched_executor_tolerance.py` | §9: both executors agree on every model, client state and cell, to `1e-12`, and bit for bit with one client per chunk. |
 | `tests/test_batched_executor.py` | §9: the keys, the fallback and its record, client isolation, the refusals, the generator, and one chunk at a time. |
+| `tests/test_default_executor.py` | §9: a run that states neither key trains batched on the task's closed form, or its declared autograd form without one; one it cannot batch runs sequentially with the reason, not a fallback; stated `batched` it is a fallback; `sequential` stated takes the closed form unless `autograd` is asked for; the plan header's rows; what the config refuses. |
+| `tests/test_closed_form_gradients.py` | §9: every example's closed form is autograd's within `1e-12`; each example's default run, batched and sequential, is the sequential run on autograd within the tolerance; the sequential closed-form step under every rule and update mode is the autograd step within it. |
 | `tests/test_batch_orders.py` | §9: every planned order is its loader's own, for every task, update mode, shuffle, `drop_last` and `max_local_steps`, 520 clients at once included; the bulk seeds are `dataloader_seed`'s. |
 | `tests/test_batched_evaluator.py` | §9: ragged, shuffled and missing evaluation splits through both evaluators, the refusal's words, and the central pass's kept model and shard. |
 | `tests/test_compile_mode.py` | §11: a compiled loop is held to §9's bounds on fed-lasso (FedAvg, local_sgd in both modes, local_adamw, SCAFFOLD) and the MLP, dynamo having made its graphs; a resident run makes one compiled call a round, under `vmap_grad` and `closed_form`, within the executor's tolerance; a loop that does not compile runs eagerly, bit for bit the reference, and run.json says why; the key needs the batched executor. |

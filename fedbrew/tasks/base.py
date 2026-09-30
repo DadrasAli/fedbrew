@@ -6,7 +6,7 @@ import json
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, ClassVar, Protocol, runtime_checkable
+from typing import Any, ClassVar, Protocol, cast, runtime_checkable
 
 import torch
 from torch import Tensor, nn
@@ -86,20 +86,26 @@ class BatchableTask(Protocol):
     a longer one it holds 1.0 for each real row and 0.0 for each padded row,
     and the result is the unpadded batch's, up to summation order.
 
-    One more is optional and opt-in:
+    One more is optional:
     ``closed_form_gradient(model, params, buffers, batch, mask, outputs=True)``
     gives the gradient of ``functional_loss`` in closed form for a whole stack
     at once -- ``params``, ``batch`` and ``mask`` each with a leading client
     dimension -- as ``(gradients, outputs)``: the gradients stacked like
     ``params``, and the outputs ``functional_loss`` returns, each stacked over
-    the clients. With ``outputs=False`` -- how a training step asks, which
-    reads no output but ``total`` -- only ``total`` is returned, where the
-    task has one, and the gradients are the same tensors. A run
-    takes it with ``runtime.performance.gradient_form: closed_form``, which a
-    task without it refuses. It is the same gradient to rounding: an ``l1``
-    term takes ``lam * sign(x)``, 0 at exactly 0, as autograd does.
-    ``stacked_row_weights`` and ``stacked_row_mean`` are ``row_mean``'s
-    derivative and value per client.
+    the clients. With ``outputs=False`` -- how a batched training step asks,
+    which reads no output but ``total`` -- only ``total`` is returned, where
+    the task has one, and the gradients are the same tensors. It is the same
+    gradient to rounding: an ``l1`` term takes ``lam * sign(x)``, 0 at exactly
+    0, as autograd does. ``stacked_row_weights`` and ``stacked_row_mean`` are
+    ``row_mean``'s derivative and value per client. A task that gives it
+    trains on it by default, under either executor
+    (``runtime.performance.gradient_form``; ``autograd`` asks for autograd).
+    The sequential executor then takes each step as :func:`closed_form_train_step`
+    does, so such a task's ``train_step`` must be what that function computes
+    with autograd: zero the gradients, backpropagate ``functional_loss`` at the
+    model's own parameters on the batch as the loader yields it -- a tuple of
+    ``split_rows``' tensors, moved to the model's device -- step the optimizer,
+    and return ``functional_loss``'s outputs as floats.
 
     Two more are optional. ``loader_order(data, config)`` declares what the
     loader yields (:class:`LoaderOrder`), so a round's orders are planned
@@ -339,6 +345,11 @@ class TaskAdapter(ABC):
     #: is glossed by its own words.
     METRIC_GLOSSES: ClassVar[Mapping[str, str] | None] = None
 
+    #: Whether the run trains this task on its closed-form gradient
+    #: (``closed_form_gradient``, :class:`BatchableTask`): set by the run when
+    #: it chooses its gradient form, read by :func:`take_train_step`.
+    closed_form_steps: bool = False
+
     #: What ``grad_norm_sq`` measures for this task (``evaluation.grad_norm``),
     #: as a noun phrase: the squared norm of the gradient of the task's global
     #: objective F at the global model, and what F is. Registered beside
@@ -502,3 +513,45 @@ def loss_averages_over_examples(task: TaskAdapter | type[TaskAdapter]) -> bool:
 
     cls = task if isinstance(task, type) else type(task)
     return cls.train_loss_denominator is TaskAdapter.train_loss_denominator
+
+
+def take_train_step(task: Any, model: Any, batch: Any, optimizer: Any) -> dict[str, float]:
+    """One local training step of ``task``: its own ``train_step``, or its closed form's.
+
+    Every rule's local loop takes its steps through here. A run whose gradient
+    form is the task's closed form (``closed_form_steps``) steps on
+    ``closed_form_gradient``; any other takes the task's ``train_step``.
+    """
+
+    if getattr(task, "closed_form_steps", False) and optimizer is not None:
+        return closed_form_train_step(task, model, batch, optimizer)
+    return cast(dict[str, float], task.train_step(model, batch, optimizer))
+
+
+def closed_form_train_step(task: Any, model: Any, batch: Any, optimizer: Any) -> dict[str, float]:
+    """``train_step`` with the gradient taken from ``closed_form_gradient`` (BatchableTask).
+
+    The batch is the loader's tuple of tensors, moved to the model's device,
+    and the model's parameters a stack of one client. Each parameter's
+    ``grad`` is set to its closed-form gradient where ``loss.backward()`` would
+    have put autograd's, and the optimizer steps on it; what comes back is
+    ``functional_loss``'s outputs, as ``train_step`` returns them.
+    """
+
+    model.train()
+    optimizer.zero_grad(set_to_none=True)
+    parameters = dict(model.named_parameters())
+    device = next(iter(parameters.values())).device
+    with torch.no_grad():
+        grads, outputs = task.closed_form_gradient(
+            model,
+            {name: parameter.detach().unsqueeze(0) for name, parameter in parameters.items()},
+            dict(model.named_buffers()),
+            tuple(tensor.to(device).unsqueeze(0) for tensor in batch),
+            None,
+            outputs=True,
+        )
+    for name, parameter in parameters.items():
+        parameter.grad = grads[name].squeeze(0)
+    optimizer.step()
+    return {name: float(value.reshape(-1)[0]) for name, value in outputs.items()}

@@ -28,7 +28,7 @@ from fedbrew.core.federated_state import model_state_size, refuse_adapter_state
 from fedbrew.core.metrics import filter_metrics
 from fedbrew.core.protocol import ClientInfo, FitRequest, FitResult
 from fedbrew.core.torch_utils import clone_model_state, get_model_state, load_model_state
-from fedbrew.tasks.base import TaskAdapter
+from fedbrew.tasks.base import TaskAdapter, take_train_step
 
 
 class TorchFedProxClient(TorchSGDClient[TaskAdapter]):
@@ -141,7 +141,7 @@ class TorchFedProxClient(TorchSGDClient[TaskAdapter]):
                     optimizer_steps += 1
                     continue
                 for batch in train_loader:
-                    self.task.train_step(model, batch, optimizer)
+                    take_train_step(self.task, model, batch, optimizer)
                     optimizer_steps += 1
         finally:
             release_optimizer(sgd)

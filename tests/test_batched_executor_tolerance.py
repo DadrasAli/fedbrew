@@ -64,6 +64,14 @@ EXACT_COLUMNS = {"round_id", "client_id", "phase", "num_clients", "num_examples"
 #: itself; the coordinates it counts are compared, to tolerance, in the model.
 ORDER_COUNTED = ("exact_zeros",)
 CSVS = ("round_metrics.csv", "client_update_metrics.csv", "client_metrics.csv")
+#: Compared at the scale of the quantities they are a difference of, not their
+#: own. ``constraint_violation`` is ``||x - Proj_Delta(x)||``, two vectors of
+#: norm at most 1 subtracted, and exactly 0 for a feasible iterate, where what
+#: it reports is their rounding: 5.2e-17 against 1.1e-16 for
+#: simplex-lsq-feasible's first round, sequential on autograd against its
+#: closed form (measured 2026-09-30). Its error is measured against
+#: ``max(|b|, 1)``, as SCAFFOLD's ``c_i`` is against its model tensor's scale.
+UNIT_SCALED = ("constraint_violation",)
 
 _generated: dict[str, Path] = {}
 _root = tempfile.TemporaryDirectory()
@@ -184,9 +192,13 @@ class ExecutorRuns(unittest.TestCase):
                     continue
                 where = f"{batched.name} row {number} {column}: {row_b[column]} vs {value_s}"
                 self.assertFalse(exact or column in EXACT_COLUMNS, where)
-                self.assertLessEqual(
-                    _relative(float(row_b[column]), float(value_s)), tolerance, where
+                a, b = float(row_b[column]), float(value_s)
+                error = (
+                    abs(a - b) / max(abs(b), 1.0)
+                    if column.endswith(UNIT_SCALED)
+                    else _relative(a, b)
                 )
+                self.assertLessEqual(error, tolerance, where)
 
     def _compare_checkpoint(
         self, batched: Path, sequential: Path, exact: bool, tolerance: float
@@ -459,8 +471,17 @@ FLOAT32_TOLERANCE = 1e-4
 
 
 def set_performance(config: dict[str, Any], **performance: Any) -> None:
-    """Set runtime.performance keys, and the step precision where it lives, in numerics."""
+    """Set runtime.performance keys, and the step precision where it lives, in numerics.
 
+    A run given an executor and no gradient form trains on autograd, under
+    either executor: the reference these tests hold every path to is the
+    sequential executor on autograd, and a path is compared on the same
+    gradients unless the test is of the gradient form itself, which then asks
+    for one (``tests/test_closed_form_gradients.py``).
+    """
+
+    if "executor" in performance and "gradient_form" not in performance:
+        performance["gradient_form"] = "autograd"
     if "precision" in performance:
         config.setdefault("numerics", {})["precision"] = performance.pop("precision")
     config["runtime"].setdefault("performance", {}).update(performance)

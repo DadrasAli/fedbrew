@@ -249,21 +249,41 @@ def print_plan_header(
 
 
 def _executor_rows(executor: Mapping[str, Any] | None) -> list[Row]:
-    """The executor, when it is not the default one run without asking."""
+    """The executor and the gradient form the run uses, each marked when it is the default."""
 
     if not executor:
         return []
     fallback = executor.get("fallback")
     if fallback:
-        # Amber: batched was asked for and the run is sequential. It changes
-        # no number, and it is the difference between the run time the config
-        # was written for and the one it will take.
+        # Amber: batched was asked for and the run is sequential. It is the
+        # difference between the run time the config was written for and the
+        # one it will take.
         rows = [Row("Executor", f"sequential; batched falls back: {fallback}", tone=AMBER)]
-    elif executor.get("used") == "batched":
-        rows = [Row("Executor", "batched")]
     else:
+        used = str(executor.get("used"))
+        # Not amber: nobody asked for batched, so a run that cannot be batched
+        # says why it is sequential and nothing more.
+        reason = executor.get("reason")
+        rows = [Row("Executor", _defaulted(used, executor) + (f": {reason}" if reason else ""))]
+    return rows + _form_rows(executor) + _budget_rows(executor) + _mode_rows(executor)
+
+
+def _defaulted(used: str, record: Mapping[str, Any]) -> str:
+    """``used``, marked ``(default)`` when the config left the choice to the run."""
+
+    return f"{used} (default)" if record.get("default") else used
+
+
+def _form_rows(executor: Mapping[str, Any]) -> list[Row]:
+    """The gradient form the clients train on, in amber when it is not the one stated."""
+
+    form = executor.get("gradient_form")
+    if not isinstance(form, Mapping):
         return []
-    return rows + _budget_rows(executor) + _mode_rows(executor)
+    used = _defaulted(str(form.get("used")), form)
+    if form.get("fallback"):
+        return [Row("Gradient", f"{used}: {form['fallback']}", tone=AMBER)]
+    return [Row("Gradient", used)]
 
 
 def _budget_rows(executor: Mapping[str, Any]) -> list[Row]:

@@ -41,7 +41,9 @@ from tests.test_resident_round import per_round
 
 def _batched(config: dict[str, Any], **performance: Any) -> dict[str, Any]:
     config = copy.deepcopy(config)
-    config["runtime"].setdefault("performance", {}).update(executor="batched", **performance)
+    config["runtime"].setdefault("performance", {}).update(
+        executor="batched", **{"gradient_form": "autograd", **performance}
+    )
     return config
 
 

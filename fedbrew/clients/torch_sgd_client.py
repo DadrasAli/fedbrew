@@ -63,7 +63,12 @@ from fedbrew.core.torch_utils import (
     RESIDENT_STATE_ATTR,
     forget_resident_state,
 )
-from fedbrew.tasks.base import BatchableTask, TaskAdapter, loss_averages_over_examples
+from fedbrew.tasks.base import (
+    BatchableTask,
+    TaskAdapter,
+    loss_averages_over_examples,
+    take_train_step,
+)
 
 TaskT = TypeVar("TaskT", bound=TaskAdapter)
 
@@ -307,7 +312,7 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
                     optimizer_steps += 1
                 else:
                     for batch in train_loader:
-                        output = self.task.train_step(model, batch, optimizer)
+                        output = take_train_step(self.task, model, batch, optimizer)
                         training_outputs.append(output)
                         optimizer_steps += 1
                         if (

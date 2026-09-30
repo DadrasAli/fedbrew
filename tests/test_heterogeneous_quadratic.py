@@ -250,7 +250,8 @@ class _Runs(unittest.TestCase):
         config["experiment"]["extensions"] = [str(EXAMPLE)]
         config["data"]["path"] = str(manifest)
         config["runtime"]["quiet"] = True
-        config["runtime"]["performance"]["executor"] = executor
+        # The reference, and the batched path held to it, on autograd.
+        config["runtime"]["performance"].update(executor=executor, gradient_form="autograd")
         for key, value in edits.items():
             section, name = key.split("__")
             config[section][name] = value

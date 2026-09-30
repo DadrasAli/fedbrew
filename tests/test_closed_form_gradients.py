@@ -12,17 +12,27 @@ each example and each of its problems:
   relative -- an l1 term included, whose subgradient at exactly 0 is 0 both
   ways; asked for no outputs, as a training step asks, the gradients are the
   same bits and no loss is computed;
-- a run of the shipped arm with ``closed_form`` agrees with the same run on
-  ``vmap_grad`` within the batched executor's tolerance, in every CSV cell
-  and checkpoint, and run.json records the form.
+- a run of the shipped arm on its default form -- the closed form, batched
+  and sequential -- agrees with the reference, the sequential executor on
+  autograd, within the batched executor's tolerance, in every CSV cell and
+  checkpoint, as ``closed_form`` stated does with the batched run on
+  ``vmap_grad``; run.json records the form and that it was the default;
+- the sequential executor's closed-form step (``closed_form_train_step``),
+  which every rule's local loop takes through ``take_train_step``: fed-lasso
+  under every shipped arm's rule, FedAvg's four update modes, clipping,
+  momentum, AdamW, FedProx, SCAFFOLD and Delta-SGD, each within the tolerance
+  of the same run on autograd.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import unittest
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import torch
 import yaml
@@ -30,10 +40,14 @@ import yaml
 from fedbrew.clients.torch_sgd_client import _get_train_data
 from fedbrew.core.config import load_config, standalone_config_mapping
 from fedbrew.core.factory import build_components
+from fedbrew.core.runner import run
 from tests.test_batched_executor_tolerance import (
     ROUNDS,
     TOLERANCE,
     ExecutorRuns,
+    classification_arms,
+    classification_rule_config,
+    example_config,
     example_manifest,
 )
 
@@ -183,11 +197,87 @@ class ARunOnTheClosedFormTest(ExecutorRuns):
                 enabled=True, save_last=True, save_every_round=True, keep_last=None
             )
             with self.subTest(case=label):
+                reference = self.run_config(config, "sequential", gradient_form="autograd")
+                for executor in ("batched", "sequential"):
+                    default = self.run_as_written(config, executor)
+                    record = json.loads((default / "run.json").read_text())["reproducibility"]
+                    self.assertEqual(
+                        record["executor"]["gradient_form"],
+                        {"used": "closed_form", "default": True},
+                    )
+                    self.assertAgree(default, reference, tolerance=TOLERANCE)
                 closed = self.run_config(config, "batched", gradient_form="closed_form")
                 autograd = self.run_config(config, "batched", gradient_form="vmap_grad")
                 record = json.loads((closed / "run.json").read_text())["reproducibility"]
-                self.assertEqual(record["executor"]["gradient_form"], "closed_form")
+                self.assertEqual(
+                    record["executor"]["gradient_form"], {"used": "closed_form", "default": False}
+                )
                 self.assertAgree(closed, autograd, tolerance=TOLERANCE)
+
+    def run_as_written(self, config: dict[str, Any], executor: str) -> Path:
+        """The run with ``executor`` and no gradient form stated: the run's default form."""
+
+        config = copy.deepcopy(config)
+        config["runtime"].setdefault("performance", {})["executor"] = executor
+        self._count += 1
+        output = self.root / f"run{self._count}-{executor}-default"
+        config["experiment"]["output_dir"] = str(output)
+        path = self.root / f"run{self._count}.yaml"
+        path.write_text(yaml.safe_dump(config), encoding="utf-8")
+        run(path, args=None)
+        return output
+
+
+def _rules() -> Iterator[tuple[str, dict[str, Any]]]:
+    """fed-lasso's client block under each rule and mode its sequential loop steps through.
+
+    Each shipped arm as it is, and the executor tolerance test's rules on
+    fed-lasso's batch size and step size (``classification_arms``).
+    """
+
+    for arm in sorted(path.stem for path in (REPO / "configs/examples/fed-lasso").glob("[!_]*")):
+        yield arm, {"arm": arm}
+    for label, rule in classification_arms():
+        client = classification_rule_config({"learning_rate": 0.004, **rule})["client"]
+        yield label, {**client, "batch_size": 4}
+    yield (
+        "delta_sgd",
+        {
+            "batch_size": 4,
+            "update_rule": "delta_sgd",
+            "eta_0": 0.004,
+            "theta_0": 1.0,
+            "gamma": 2.0,
+            "delta": 0.1,
+            "eta_max": None,
+        },
+    )
+
+
+class TheSequentialStepOnTheClosedFormTest(ExecutorRuns):
+    def test_every_rule_within_the_executor_tolerance(self) -> None:
+        for label, client in _rules():
+            config = example_config("fed-lasso", client.pop("arm", "fedavg"))
+            if client:
+                config["client"] = client
+                if client["update_rule"] == "scaffold":
+                    config["server"]["strategy"] = "scaffold"
+            with self.subTest(rule=label):
+                with _counted() as closed_steps:
+                    closed = self.run_config(config, "sequential", gradient_form="closed_form")
+                with _counted() as autograd_steps:
+                    autograd = self.run_config(config, "sequential", gradient_form="autograd")
+                self.assertGreater(closed_steps.call_count, 0)
+                self.assertEqual(autograd_steps.call_count, 0)
+                self.assertAgree(closed, autograd, tolerance=TOLERANCE)
+
+
+def _counted() -> Any:
+    """``closed_form_train_step``, its calls counted."""
+
+    from fedbrew.tasks import base
+
+    return mock.patch.object(base, "closed_form_train_step", wraps=base.closed_form_train_step)
 
 
 if __name__ == "__main__":

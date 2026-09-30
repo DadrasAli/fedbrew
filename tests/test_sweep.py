@@ -70,7 +70,17 @@ class ThePlanTest(SweepRuns):
         )
         alone = {child.configs[0]: child.alone for child in planned if child.alone is not None}
         self.assertEqual(set(alone), {seeded, longer, sequential, same_place})
-        self.assertEqual(alone[sequential], "runtime.performance.executor is not batched")
+        self.assertEqual(alone[sequential], "runtime.performance.executor is sequential")
+
+    def test_configs_that_leave_the_executor_out_group(self) -> None:
+        """Left out, the executor is batched, so such configs group as stated ones do."""
+
+        left_out = {"performance": {}}
+        first = self.write("first", runtime=left_out)
+        second = self.write("second", runtime=left_out, client={"learning_rate": 0.1})
+        (child,) = plan([first, second])
+        self.assertIsNone(child.alone)
+        self.assertEqual(child.configs, [first, second])
 
     def test_a_config_that_does_not_load_runs_alone(self) -> None:
         broken = self.root / "broken.yaml"

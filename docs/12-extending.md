@@ -351,7 +351,7 @@ has nothing to hold out.
    everything under `configs/`.
 
 7. **Declare a batched update if it has one.** A rule built on
-   `TorchSGDClient` runs under `runtime.performance.executor: batched` only
+   `TorchSGDClient` runs under the batched executor only
    when its own class sets `_batched_rule` and gives `batched_program` (what
    one step does), `batched_plan` (the batches its loop draws, from
    `sgd_mode_updates` or `own_loop_updates`) and `batched_result` (its
@@ -576,10 +576,17 @@ A batchable task may also give its gradient in closed form, for a whole stack
 of clients at once: `closed_form_gradient(model, params, buffers, batch, mask)`,
 where `params`, `batch` and `mask` carry a leading client dimension, returning
 `(gradients, outputs)` -- the gradients stacked like `params`, the outputs
-`functional_loss` returns stacked over clients. A run takes it with
-`runtime.performance.gradient_form: closed_form` (chapter 04), and it is then
-the whole step's gradient, with no autograd and no vmap. It must be the same
-gradient to rounding -- an `l1` term takes `lam * sign(x)`, 0 at exactly 0, as
+`functional_loss` returns stacked over clients. A task that gives it is
+trained on it by default, under either executor (`runtime.performance.gradient_form`,
+chapter 04; `autograd` asks for autograd): in the batched executor it is the
+whole step's gradient, with no autograd and no vmap, and in the sequential one
+each step is `closed_form_train_step` (`fedbrew/tasks/base.py`), which every
+rule's local loop reaches through `take_train_step`. That function takes the
+step your `train_step` takes, with the gradient from the formula, so
+`train_step` must be exactly zero the gradients, backpropagate
+`functional_loss` at the model's own parameters on the loader's batch, step the
+optimizer and return `functional_loss`'s outputs as floats -- as the linear
+examples' are. It must be the same gradient to rounding -- an `l1` term takes `lam * sign(x)`, 0 at exactly 0, as
 autograd does -- and `stacked_row_weights` and `stacked_row_mean`
 (`fedbrew/tasks/base.py`) give `row_mean`'s derivative and value per client.
 Every linear example implements it; its test holds it to autograd of the
@@ -609,8 +616,8 @@ build an eval dataloader, `eval_step` each batch, `compute_metrics` the
 outputs.
 
 Implement `BatchableTask` (`fedbrew/tasks/base.py`) as well if its runs should
-be able to use `runtime.performance.executor: batched`; without it they run
-sequentially and say so (chapter 11 §9). Four methods: `split_rows` returns a
+take the batched executor, every batchable run's default; without it they run
+sequentially and say why (chapter 11 §9). Four methods: `split_rows` returns a
 split as the loader's rows, `row_batches` the loader's batches as row indices
 -- run your own `build_dataloader` on `row_numbers(n)` so the order is the
 loader's by construction -- and `functional_loss` and `functional_eval` are
