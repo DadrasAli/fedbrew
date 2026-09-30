@@ -19,7 +19,10 @@ bit for bit, in every CSV and every round's checkpoint:
 - a pass's combination on the stack is taken in place, into a total of the
   pass's own, by step weights and update denominators uploaded and shaped once
   a round (``_Bucket._pass_add``, ``_pass_combined``), against ``accumulate``
-  and ``divide`` a step: over the same cases, under every gradient form.
+  and ``divide`` a step: over the same cases, under every gradient form;
+- a stack's unclipped step makes each operation into the tensor it would have
+  replaced, where the stack owns it (``_owned``), against the step that makes
+  a new tensor each time: over the same cases, under every gradient form.
 """
 
 from __future__ import annotations
@@ -144,6 +147,20 @@ class NothingMovesTest(ExecutorRuns):
                     with data() if data is not None else nullcontext():
                         now = self.run_config(config, "batched", gradient_form=form)
                         with paying(stepwise=True, repeats=True, in_place=False):
+                            before = self.run_config(config, "batched", gradient_form=form)
+                    self.assertAgree(now, before, exact=True)
+
+    def test_the_stacked_step_in_place(self) -> None:
+        """Each operation into the tensor it replaced (``_owned``), against a new tensor each."""
+
+        for form in ("vmap_grad", "summed", "closed_form"):
+            for label, config, data in cases():
+                if form == "closed_form" and label.startswith("mlp/"):
+                    continue
+                with self.subTest(form=form, case=label):
+                    with data() if data is not None else nullcontext():
+                        now = self.run_config(config, "batched", gradient_form=form)
+                        with mock.patch.object(batched_executor, "_STACKED_IN_PLACE", False):
                             before = self.run_config(config, "batched", gradient_form=form)
                     self.assertAgree(now, before, exact=True)
 

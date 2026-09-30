@@ -44,6 +44,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
 import torch
@@ -687,6 +688,8 @@ def apply_update(
     server_control: Mapping[str, Tensor] | None = None,
     *,
     values: Mapping[str, Tensor],
+    in_place: bool = False,
+    params_owned: bool = False,
 ) -> tuple[dict[str, Tensor], dict[str, Any]]:
     """One applied update from its gradient: correction, clipping, optimizer step.
 
@@ -696,6 +699,14 @@ def apply_update(
     the combined gradient before stepping on it. ``program`` gives the
     update's shape, and ``values`` (``ProgramValues.at(step)``) the client's
     numbers.
+
+    ``in_place``: the gradients and the optimizer state are the caller's to
+    overwrite, and each operation on them is made in place -- the same
+    operation, into the tensor it would have replaced; ``params_owned``: so
+    are the parameters. On a stack of many clients a new tensor per operation
+    is most of the step's cost on the CPU (a 1000-client stack of the MNIST
+    MLP's first layer: 290 against 33 ms for ``g - c_i + c``, measured
+    2026-09-30). Under vmap neither is asked for.
     """
 
     grads = dict(gradients)
@@ -704,8 +715,7 @@ def apply_update(
     if program.proximal_mu:
         assert reference is not None
         grads = {
-            name: torch.addcmul(
-                gradient,
+            name: (gradient.addcmul_ if in_place else partial(torch.addcmul, gradient))(
                 params[name] - reference[name],
                 _per_client(values["proximal_mu"], gradient),
             )
@@ -714,14 +724,20 @@ def apply_update(
     if program.scaffold:
         assert client_control is not None and server_control is not None
         grads = {
-            name: gradient - client_control[name] + server_control[name]
+            name: (
+                gradient.sub_(client_control[name]).add_(server_control[name])
+                if in_place
+                else gradient - client_control[name] + server_control[name]
+            )
             for name, gradient in grads.items()
         }
     if program.combine == "batch" and program.max_grad_norm is not None:
         grads = clip_batch_gradients(grads, values["max_grad_norm"])
     if program.optimizer.kind == "adamw":
-        return _adamw_step(program.optimizer, params, grads, state, step, values)
-    return _sgd_step(program.optimizer, params, grads, state, step, values)
+        return _adamw_step(
+            program.optimizer, params, grads, state, step, values, in_place, params_owned
+        )
+    return _sgd_step(program.optimizer, params, grads, state, step, values, in_place, params_owned)
 
 
 def _sgd_step(
@@ -731,10 +747,14 @@ def _sgd_step(
     state: Mapping[str, Any],
     step: int,
     values: Mapping[str, Tensor],
+    in_place: bool = False,
+    params_owned: bool = False,
 ) -> tuple[dict[str, Tensor], dict[str, Any]]:
-    """``torch.optim.SGD``'s ``_single_tensor_sgd``, dampening 0, out of place.
+    """``torch.optim.SGD``'s ``_single_tensor_sgd``, dampening 0: out of place, or in place.
 
     Its ``add(b, alpha=s)`` is ``addcmul(a, b, s)`` with the client's ``s``.
+    ``in_place`` and ``params_owned`` as ``apply_update``'s: each operation
+    the same, written into the tensor it would have replaced.
     """
 
     new_params: dict[str, Tensor] = {}
@@ -742,16 +762,29 @@ def _sgd_step(
     for name, param in params.items():
         grad = gradients[name]
         if spec.weight_decay != 0:
-            grad = torch.addcmul(grad, param, _per_client(values["weight_decay"], param))
+            decay = _per_client(values["weight_decay"], param)
+            grad = grad.addcmul_(param, decay) if in_place else torch.addcmul(grad, param, decay)
         if spec.momentum != 0:
             momentum = _per_client(values["momentum"], grad)
             if step == 1:
                 buffer = torch.clone(grad)
+            elif in_place:
+                buffer = state["momentum"][name].mul_(momentum).add_(grad, alpha=1)
             else:
                 buffer = state["momentum"][name].mul(momentum).add(grad, alpha=1)
             buffers[name] = buffer
-            grad = torch.addcmul(grad, buffer, momentum) if spec.nesterov else buffer
-        new_params[name] = torch.addcmul(param, grad, _per_client(values["negated_lr"], param))
+            if spec.nesterov:
+                grad = (
+                    grad.addcmul_(buffer, momentum)
+                    if in_place
+                    else torch.addcmul(grad, buffer, momentum)
+                )
+            else:
+                grad = buffer
+        rate = _per_client(values["negated_lr"], param)
+        new_params[name] = (
+            param.addcmul_(grad, rate) if params_owned else torch.addcmul(param, grad, rate)
+        )
     return new_params, ({"momentum": buffers} if buffers else {})
 
 
@@ -762,8 +795,10 @@ def _adamw_step(
     state: Mapping[str, Any],
     step: int,
     values: Mapping[str, Tensor],
+    in_place: bool = False,
+    params_owned: bool = False,
 ) -> tuple[dict[str, Tensor], dict[str, Any]]:
-    """``torch.optim.AdamW``'s ``_single_tensor_adamw``, no amsgrad, out of place.
+    """``torch.optim.AdamW``'s ``_single_tensor_adamw``, no amsgrad: out of place, or in place.
 
     The step count is the Python float torch reads off its step tensor, so the
     bias corrections are the same Python arithmetic. The client's decay
@@ -780,17 +815,29 @@ def _adamw_step(
     exp_avg_sqs: dict[str, Tensor] = {}
     for name, param in params.items():
         grad = gradients[name]
-        param = param.mul(_per_client(values["decay"], param))
-        exp_avg = state["exp_avg"][name].lerp(grad, 1 - spec.beta1)
-        exp_avg_sq = (
-            state["exp_avg_sq"][name].mul(spec.beta2).addcmul(grad, grad, value=1 - spec.beta2)
-        )
+        decay = _per_client(values["decay"], param)
+        param = param.mul_(decay) if params_owned else param.mul(decay)
+        if in_place:
+            exp_avg = state["exp_avg"][name].lerp_(grad, 1 - spec.beta1)
+            exp_avg_sq = (
+                state["exp_avg_sq"][name]
+                .mul_(spec.beta2)
+                .addcmul_(grad, grad, value=1 - spec.beta2)
+            )
+        else:
+            exp_avg = state["exp_avg"][name].lerp(grad, 1 - spec.beta1)
+            exp_avg_sq = (
+                state["exp_avg_sq"][name].mul(spec.beta2).addcmul(grad, grad, value=1 - spec.beta2)
+            )
         correction: Any = bias_correction2_sqrt
         if "bias_correction2_sqrt" in values:
             correction = _per_client(values["bias_correction2_sqrt"], exp_avg_sq)
         denominator = (exp_avg_sq.sqrt() / correction).add(spec.eps)
-        new_params[name] = torch.addcdiv(
-            param, exp_avg * _per_client(values["step_size"], exp_avg), denominator
+        scaled = exp_avg * _per_client(values["step_size"], exp_avg)
+        new_params[name] = (
+            param.addcdiv_(scaled, denominator)
+            if params_owned
+            else torch.addcdiv(param, scaled, denominator)
         )
         exp_avgs[name] = exp_avg
         exp_avg_sqs[name] = exp_avg_sq

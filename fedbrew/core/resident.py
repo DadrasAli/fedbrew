@@ -538,6 +538,13 @@ class ResidentRounds:
         #: Per chunk of clients, their rules and record plans (``_record_plans``).
         self._records: dict[tuple[int, ...], tuple[list[Any], list[_MemberPlan]]] = {}
         self.graphs = RoundGraphs(self.device, executor.cuda_graphs, executor.record)
+        #: Whether a bucket of the same clients as the round before takes the
+        #: rows it gathered then. On the host, where a round's gather is a new
+        #: tensor the size of its clients' rows -- page-faulted in, ~200 ms a
+        #: round for the MNIST MLP's 1000 clients -- and not under CUDA graphs,
+        #: whose rounds read their rows at fixed addresses from the round's
+        #: inputs. A device's caching allocator makes the gather cheap there.
+        self.keeps_rows = self.device.type == "cpu" and not self.graphs.on
         #: The dtypes the fold sums the model's tensors in, in order of first use.
         self.accumulation_dtypes = list(
             dict.fromkeys(
@@ -691,6 +698,8 @@ class ResidentRounds:
             self.model,
             lambda inputs, model: self._execute(plan, device_round, inputs, model),
         )
+        if self.keeps_rows and self.rows is not None:
+            self.rows.round_done()
         results, mean, finite = outputs
         for index, (start, stop) in enumerate(plan.chunks):
             parts, columns, layout = staged_chunk(
@@ -973,8 +982,14 @@ class ResidentRounds:
         index = uploaded(torch.tensor(bucket.places, dtype=torch.long), self.device)
         deltas = {}
         for name, table in self.controls.items():
-            new = (old[name] - server[name]) + (start[name] - stack[name]) * scale
-            deltas[name] = new - old[name]
+            # (old - server) + (start - stack) * scale, and the new minus the
+            # old, each operation into a tensor of its own making: two new
+            # tensors a name, not five.
+            drift = start[name] - stack[name]
+            drift.mul_(scale)
+            new = old[name] - server[name]
+            new.add_(drift)
+            deltas[name] = torch.sub(new, old[name], out=drift)
             table.index_copy_(0, index, new)
         return deltas
 
@@ -996,7 +1011,10 @@ class ResidentRounds:
         summed = {name: torch.zeros_like(value) for name, value in server.items()}
         for slot in range(len(rows)):
             deltas, row = rows[slot]
-            summed = {name: summed[name] + deltas[name][row] for name in summed}
+            for name, total in summed.items():
+                # The same addition into the sum, not a new sum a client:
+                # a delta has c's dtype, so nothing is promoted.
+                total.add_(deltas[name][row])
         scale = 1.0 / len(self.context.client_infos)
         updated = {name: server[name] + summed[name] * scale for name in server}
         checks = [torch.isfinite(deltas[name]).all() for _, _, deltas in trained for name in deltas]
@@ -1011,6 +1029,10 @@ class ResidentRounds:
             return rows.single(bucket.rows_index[0])
         if bucket.kind == "everyone":
             return rows.everyone()
+        if self.keeps_rows:
+            # The same clients' rows as the round before are those rows again
+            # (ResidentRows.bucket), not another gather into a new tensor.
+            return rows.bucket(bucket.places)
         return rows.gathered(inputs[bucket.inputs["index"]], bucket.longest)
 
     def _costs(self, planned: PlannedRound, device_round: DeviceRound, program: Any) -> list[int]:

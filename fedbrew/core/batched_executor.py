@@ -1647,7 +1647,14 @@ class _Bucket:
                 step += 1
                 grads, step_outputs = self._call(gradient, [(params, 0), (batch, 0), (mask, 0)])
                 params, state = apply_update(
-                    program, params, grads, state, number, *controls, values=self.values.at(number)
+                    program,
+                    params,
+                    grads,
+                    state,
+                    number,
+                    *controls,
+                    values=self.values.at(number),
+                    **_owned(number),
                 )
                 outputs.append(step_outputs)
                 continue
@@ -1660,7 +1667,14 @@ class _Bucket:
                 step += 1
             total = self._pass_combined(total, number)
             params, state = apply_update(
-                program, params, total, state, number, *controls, values=self.values.at(number)
+                program,
+                params,
+                total,
+                state,
+                number,
+                *controls,
+                values=self.values.at(number),
+                **_owned(number),
             )
         return params, outputs, step
 
@@ -1766,6 +1780,7 @@ class _Bucket:
                         number,
                         *(value for value, _ in corrections),
                         values=self.values.at(number),
+                        **_owned(number),
                     )
                 else:
                     params, state = self._call(
@@ -1801,6 +1816,7 @@ class _Bucket:
                     number,
                     *(value for value, _ in corrections),
                     values=self.values.at(number),
+                    **_owned(number),
                 )
                 continue
             params, state = self._call(
@@ -1896,6 +1912,23 @@ class _Bucket:
             self.eval_counts,
         )
         return outputs, self.eval_counts
+
+
+#: Whether a stack's unclipped step overwrites what it owns (``_owned``); off
+#: only in the test that holds it to the step that does not.
+_STACKED_IN_PLACE = True
+
+
+def _owned(number: int) -> dict[str, bool]:
+    """What the ``number``-th applied update of a stack stepped whole may overwrite.
+
+    Its gradients and optimizer state always -- a vmap's or a closed form's
+    output, a pass's total, state the stack made -- and its parameters from
+    the second update on: the first reads the broadcast every client starts
+    from, which the stack does not own.
+    """
+
+    return {"in_place": _STACKED_IN_PLACE, "params_owned": _STACKED_IN_PLACE and number > 1}
 
 
 def gradient_form(task: Any, asked: str | None = None) -> str:
