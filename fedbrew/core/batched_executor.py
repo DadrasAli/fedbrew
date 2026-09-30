@@ -767,6 +767,10 @@ class _Rows:
         )
 
 
+#: At most this many (split, step) lengths are read off as numbers for a
+#: stack's per-step facts (``_Steps``); more are reduced as tensors.
+_HOST_FACTS = 512
+
 #: At most this many elements of a stack's rows are gathered for every step
 #: at once (``_Steps._gathered``); more are gathered a step at a time.
 _GATHER_AT_ONCE = 1 << 22
@@ -793,25 +797,41 @@ class _Steps:
     def __init__(
         self, rows: _Rows, orders: RoundOrders, slots: Sequence[int], mask_dtype: torch.dtype
     ) -> None:
-        where = torch.tensor(list(slots), dtype=torch.long)
         self.rows = rows
         self.dtype = mask_dtype
         self.size = len(slots)
-        lengths = orders.lengths[where]
-        starts = orders.starts[where]
+        if list(slots) == list(range(len(orders.lengths))):
+            # Every split of the orders, in their order: their own tensors, never written.
+            lengths, starts, self._indices = orders.lengths, orders.starts, orders.indices
+            self.sliced = bool(orders.contiguous.all())
+        else:
+            where = torch.tensor(list(slots), dtype=torch.long)
+            lengths, starts = orders.lengths[where], orders.starts[where]
+            self._indices = orders.indices[where]
+            self.sliced = bool(orders.contiguous[where].all())
         self._lengths = lengths
-        self._indices = orders.indices[where]
-        # What each step needs to know on the host, read off once.
-        if lengths.shape[1]:
+        # What each step needs to know on the host, read off once: for a few
+        # splits' few steps from their numbers, for more by tensor reductions.
+        if not lengths.shape[1]:
+            self.widths, self.full, self.aligned = [], [], []
+        elif lengths.numel() <= _HOST_FACTS:
+            by_step = list(zip(*lengths.tolist(), strict=True))
+            self.widths = [max(column) for column in by_step]
+            self.full = [
+                all(value == widest for value in column)
+                for column, widest in zip(by_step, self.widths, strict=True)
+            ]
+            self.aligned = [
+                all(value == column[0] for value in column)
+                for column in zip(*starts.tolist(), strict=True)
+            ]
+        else:
             widths = lengths.amax(dim=0)
             self.widths = widths.tolist()
             self.full = (lengths == widths.unsqueeze(0)).all(dim=0).tolist()
             self.aligned = (starts == starts[:1]).all(dim=0).tolist()
-        else:
-            self.widths, self.full, self.aligned = [], [], []
         self.first_starts = starts[0].tolist() if len(starts) else []
         self.first_lengths = lengths[0].tolist() if len(lengths) else []
-        self.sliced = bool(orders.contiguous[where].all())
         self._on_device: tuple[Tensor, Tensor] | None = None
         self._every: tuple[Tensor, ...] | None = None
         #: Each step's views into ``_every``, made with it (``_step_views``).
@@ -1229,11 +1249,12 @@ class _Bucket:
         slots = [plan.slot for plan in plans]
         train, evaluation = orders
         if steps is None:
+            # The post-fit pass's steps only where the round runs the pass.
             steps = (
                 _Steps(
                     train_rows(rows, self.dtype, task, model, self.closed), train, slots, self.dtype
                 ),
-                _Steps(rows, evaluation, slots, self.model_dtype),
+                _Steps(rows, evaluation, slots, self.model_dtype) if plans[0].evaluate else None,
             )
         # Built by the caller where its host half is computed ahead of the
         # round (the resident round's ``_prepare``), over these rows.

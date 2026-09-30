@@ -190,6 +190,30 @@ class AppendOnlyTest(unittest.TestCase):
         self.assertEqual(updates.summary.phase_counts, {"fit": 5})
         self.assertEqual(updates.summary.num_examples, 35)
 
+    def test_a_flush_reads_the_summaries_as_they_were(self) -> None:
+        """``frozen_state``'s snapshots: a deep copy's equal, and untouched by what follows."""
+
+        import copy
+
+        from fedbrew.core.resident_flush import frozen_state
+        from fedbrew.core.state import ExperimentState, MetricRecord, RoundTimings
+
+        state = ExperimentState()
+        state.client_metrics_history, state.client_update_metrics_history = _populate()
+        state.metrics_history.append(
+            MetricRecord(1, {}, 3, 21, timings=RoundTimings(total=0.5, fit=0.25))
+        )
+        names = ("metrics_history", "client_metrics_history", "client_update_metrics_history")
+        expected = {name: copy.deepcopy(getattr(state, name).summary) for name in names}
+        frozen = frozen_state(state)
+        state.client_update_metrics_history.append(_update(4, "c9", phase="eval"))
+        state.client_metrics_history.append(_evaluation(4, "c9"))
+        state.metrics_history.append(MetricRecord(2, {}, 3, 21, timings=RoundTimings(total=2.0)))
+        for name in names:
+            with self.subTest(history=name):
+                self.assertEqual(getattr(frozen, name).summary, expected[name])
+                self.assertNotEqual(getattr(state, name).summary, expected[name])
+
     def test_reading_the_history_is_unchanged(self) -> None:
         """The CSV writers and the round table index and iterate these."""
 

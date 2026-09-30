@@ -145,7 +145,9 @@ def frozen_state(state: Any) -> Any:
             continue
         copied = type(history).__new__(type(history))
         list.extend(copied, history)
-        copied.summary = copy.deepcopy(history.summary)
+        summary = history.summary
+        snapshot = getattr(summary, "snapshot", None)
+        copied.summary = snapshot() if callable(snapshot) else copy.deepcopy(summary)
         setattr(frozen, name, copied)
     return frozen
 

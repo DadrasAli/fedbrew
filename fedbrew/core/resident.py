@@ -412,6 +412,8 @@ class RoundPlan:
 def _steps_key(steps: Any) -> tuple[Any, ...]:
     """What of a bucket's steps its kernels depend on: their shape, and how each batch is cut."""
 
+    if steps is None:
+        return ()
     return (
         steps.size,
         tuple(steps._indices.shape),
@@ -739,7 +741,9 @@ class ResidentRounds:
             for slot in range(start, stop):
                 groups.setdefault(device_round.structures[slot], []).append(slot - start)
             for structure, members in groups.items():
-                plan.buckets.append(self._bucket_plan(plan, index, start, structure, members))
+                plan.buckets.append(
+                    self._bucket_plan(plan, index, start, structure, members, device_round.evaluate)
+                )
         if runs is not None:
             plan.runs = _bucket_runs(plan.buckets, runs)
         if not plan.host_fold:
@@ -755,8 +759,13 @@ class ResidentRounds:
         start: int,
         structure: tuple[int, ...],
         members: list[int],
+        evaluate: bool = True,
     ) -> _BucketPlan:
-        """One bucket's host half: its clients, its rows' shape, its steps and their indices."""
+        """One bucket's host half: its clients, its rows' shape, its steps and their indices.
+
+        The post-fit pass's steps only on a round that runs the pass
+        (``evaluate``): on any other, nothing reads them.
+        """
 
         rows = self.rows
         assert rows is not None
@@ -783,7 +792,11 @@ class ResidentRounds:
             kind=kind,
             longest=longest,
             train=_Steps(shape, plan.planned.train, slots, dtype),  # type: ignore[arg-type]
-            evaluation=_Steps(shape, plan.planned.evaluation, slots, self.template_dtype),  # type: ignore[arg-type]
+            evaluation=(
+                _Steps(shape, plan.planned.evaluation, slots, self.template_dtype)  # type: ignore[arg-type]
+                if evaluate
+                else None
+            ),
             places=places,
         )
         if self.scaffold:
@@ -793,6 +806,8 @@ class ResidentRounds:
         if size > 1:
             offsets = torch.arange(size, dtype=torch.long).view(-1, 1, 1) * longest
             for name, steps in (("train", bucket.train), ("eval", bucket.evaluation)):
+                if steps is None:
+                    continue
                 # What ``_Steps._device`` computes and uploads, computed here.
                 bucket.inputs[f"{name}_flat"] = plan.add(steps._indices + offsets)
                 bucket.inputs[f"{name}_lengths"] = plan.add(steps._lengths)
@@ -858,22 +873,22 @@ class ResidentRounds:
             context = self.executor.context
             dtype = context.train_dtype(self.template_dtype) if context else self.template_dtype
             bucket.train.rows = train_rows(rows, dtype, self.task, self.template, self.closed)
-            bucket.evaluation.rows = rows
             # What a step gathers lazily is this call's: a capture that failed
             # left tensors it recorded but never computed.
-            bucket.train._every = bucket.evaluation._every = None
-            bucket.train._on_device = bucket.evaluation._on_device = None
-            bucket.train._repeated.clear()
-            bucket.evaluation._repeated.clear()
-            if bucket.kind != "single":
-                bucket.train._on_device = (
-                    inputs[bucket.inputs["train_flat"]],
-                    inputs[bucket.inputs["train_lengths"]],
-                )
-                bucket.evaluation._on_device = (
-                    inputs[bucket.inputs["eval_flat"]],
-                    inputs[bucket.inputs["eval_lengths"]],
-                )
+            for name, steps, bound in (
+                ("train", bucket.train, bucket.train.rows),
+                ("eval", bucket.evaluation, rows),
+            ):
+                if steps is None:
+                    continue
+                steps.rows = bound
+                steps._every = steps._on_device = None
+                steps._repeated.clear()
+                if bucket.kind != "single":
+                    steps._on_device = (
+                        inputs[bucket.inputs[f"{name}_flat"]],
+                        inputs[bucket.inputs[f"{name}_lengths"]],
+                    )
             members = [
                 _MemberPlan(
                     program=device_round.program,
