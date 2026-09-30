@@ -125,6 +125,7 @@ from fedbrew.tasks.base import (
     row_count,
     row_mean,
     row_numbers,
+    scratch,
     stacked_row_mean,
     stacked_row_weights,
 )
@@ -265,10 +266,10 @@ def _logistic(signed: Tensor, mask: Tensor | None = None) -> Tensor:
     return row_mean(torch.nn.functional.softplus(signed), mask)
 
 
-def _logistic_weights(signed: Tensor) -> Tensor:
-    """`d loss_i / d z_i`: `sigma(z)`."""
+def _logistic_weights(signed: Tensor, out: Tensor | None = None) -> Tensor:
+    """`d loss_i / d z_i`: `sigma(z)`, into ``out`` where given."""
 
-    return torch.sigmoid(signed)
+    return torch.sigmoid(signed, out=out)
 
 
 def _tanh(signed: Tensor, mask: Tensor | None = None) -> Tensor:
@@ -277,17 +278,20 @@ def _tanh(signed: Tensor, mask: Tensor | None = None) -> Tensor:
     return 1.0 + row_mean(torch.tanh(signed), mask)
 
 
-def _tanh_weights(signed: Tensor) -> Tensor:
-    """`d loss_i / d z_i`: `1 - tanh(z)^2`."""
+def _tanh_weights(signed: Tensor, out: Tensor | None = None) -> Tensor:
+    """`d loss_i / d z_i`: `1 - tanh(z)^2`, into ``out`` where given.
 
-    return 1.0 - torch.tanh(signed).square()
+    `-t^2 + 1` is the subtraction `1 - t^2` itself, so the tensor is the same.
+    """
+
+    return torch.tanh(signed, out=out).square_().neg_().add_(1.0)
 
 
 #: The losses of the margin, each as (the mean over a batch's rows of `z =
 #: -b a.x`, its derivative in `z` per row, whether it is convex, and the bound
 #: on its second derivative that makes `grad l` Lipschitz with `L = bound *
 #: ||A||^2 / n`).
-LOSSES: dict[str, tuple[Callable[..., Tensor], Callable[[Tensor], Tensor], bool, float]] = {
+LOSSES: dict[str, tuple[Callable[..., Tensor], Callable[..., Tensor], bool, float]] = {
     "logistic": (_logistic, _logistic_weights, True, 0.25),
     # |tanh''| <= 4 / (3 sqrt 3), attained where tanh(z)^2 = 1/3.
     "tanh": (_tanh, _tanh_weights, False, 4.0 / (3.0 * math.sqrt(3.0))),
@@ -298,17 +302,17 @@ def _l1(x: Tensor, lam: float) -> Tensor:
     return lam * x.abs().sum()
 
 
-def _l1_gradient(x: Tensor, lam: float) -> Tensor:
+def _l1_gradient(x: Tensor, lam: float, out: Tensor | None = None) -> Tensor:
     # sign(0) = 0: the minimum-norm subgradient, and what autograd gives |x|.
-    return lam * torch.sign(x)
+    return torch.sign(x, out=out).mul_(lam)
 
 
 def _l2sq(x: Tensor, lam: float) -> Tensor:
     return 0.5 * lam * (x * x).sum()
 
 
-def _l2sq_gradient(x: Tensor, lam: float) -> Tensor:
-    return lam * x
+def _l2sq_gradient(x: Tensor, lam: float, out: Tensor | None = None) -> Tensor:
+    return torch.mul(x, lam, out=out)
 
 
 def _nonconvex(x: Tensor, lam: float) -> Tensor:
@@ -316,16 +320,15 @@ def _nonconvex(x: Tensor, lam: float) -> Tensor:
     return lam * (squared / (1.0 + squared)).sum()
 
 
-def _nonconvex_gradient(x: Tensor, lam: float) -> Tensor:
+def _nonconvex_gradient(x: Tensor, lam: float, out: Tensor | None = None) -> Tensor:
     # 2 lam x / (1 + x^2)^2: bounded by lam 3 sqrt(3) / 8, and |r''| <= 2 lam.
-    return x / (1.0 + x * x).square() * (2.0 * lam)
+    return torch.mul(x / (1.0 + x * x).square(), 2.0 * lam, out=out)
 
 
-#: The penalties, each as (its value, its (sub)gradient, whether it is convex,
-#: and the bound on its second derivative, None where it has none).
-PENALTIES: dict[
-    str, tuple[Callable[[Tensor, float], Tensor], Callable[[Tensor, float], Tensor], bool, Any]
-] = {
+#: The penalties, each as (its value, its (sub)gradient -- into ``out`` where
+#: given -- whether it is convex, and the bound on its second derivative, None
+#: where it has none).
+PENALTIES: dict[str, tuple[Callable[[Tensor, float], Tensor], Callable[..., Tensor], bool, Any]] = {
     "l1": (_l1, _l1_gradient, True, None),
     "l2sq": (_l2sq, _l2sq_gradient, True, 1.0),
     "nonconvex": (_nonconvex, _nonconvex_gradient, False, 2.0),
@@ -1885,6 +1888,20 @@ class FedLogisticL1Task(TaskAdapter):
         )
         return loss, {"loss": loss.detach()}
 
+    def closed_form_rows(self, model: Any, rows: tuple[Tensor, ...]) -> tuple[Tensor]:
+        """The rows the closed form reads (BatchableTask): each row's signed `-b a`.
+
+        The labels are exactly -1 or +1 (``read_libsvm`` refuses any other,
+        and ``ProblemSpec.labels`` draws only these), so every product
+        `x_j (-b a_j)` is `-b (x_j a_j)` exactly, and a sum of them the margin
+        `-b a.x` the rows as they are give, bit for bit; the gradient's
+        `(loss' w) (-b a_j)` is `-b` times the unsigned product so too.
+        """
+
+        del model
+        features, labels = rows
+        return (-labels.unsqueeze(-1) * features,)
+
     def closed_form_gradient(
         self,
         model: Any,
@@ -1893,25 +1910,43 @@ class FedLogisticL1Task(TaskAdapter):
         batch: tuple[Tensor, ...],
         mask: Tensor | None = None,
         outputs: bool = True,
+        workspace: dict[str, Tensor] | None = None,
     ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
         """``functional_loss``'s gradient for a stack of clients, in closed form (BatchableTask).
 
         With `z = -b a.x` per row and `w` the row's weight in the mean, the
         smooth part's gradient is `sum_r w_r loss'(z_r) (-b_r) a_r`, and the
         penalty's is its own (:data:`PENALTIES`): `lam sign(x)` for the l1
-        term, 0 at exactly 0, as autograd takes it.
+        term, 0 at exactly 0, as autograd takes it. ``batch`` is the signed
+        rows (``closed_form_rows``); the margins and the gradient are written
+        into the ``workspace`` where there is one.
         """
 
         del buffers
-        features, labels = batch
+        (signed_rows,) = batch
         x = params["x"]
-        signed = -labels * torch.bmm(x.unsqueeze(1), features.transpose(1, 2)).squeeze(1)
-        weights = stacked_row_weights(signed, mask)
-        slope = LOSSES[model.loss_form][1](signed)
-        coefficients = (-labels * slope * weights).unsqueeze(1)
+        clients, count, dim = signed_rows.shape
+        margins = torch.bmm(
+            x.unsqueeze(1),
+            signed_rows.transpose(1, 2),
+            out=scratch(workspace, "signed", (clients, 1, count), x),
+        )
+        signed = margins.squeeze(1)
+        # 1/n itself where no row is padded: the same factor the full tensor
+        # of stacked_row_weights holds, without reading one.
+        weights = 1.0 / count if mask is None else stacked_row_weights(signed, mask).unsqueeze(1)
+        coefficients = LOSSES[model.loss_form][1](
+            margins, out=scratch(workspace, "coefficients", (clients, 1, count), x)
+        ).mul_(weights)
         lam = model.penalty_strength
-        gradient = torch.bmm(coefficients, features).squeeze(1)
-        gradient = gradient + PENALTIES[model.penalty_form][1](x, lam)
+        gradient = torch.bmm(
+            coefficients, signed_rows, out=scratch(workspace, "gradient", (clients, 1, dim), x)
+        ).squeeze(1)
+        gradient.add_(
+            PENALTIES[model.penalty_form][1](
+                x, lam, out=scratch(workspace, "penalty", (clients, dim), x)
+            )
+        )
         if not outputs:
             return {"x": gradient}, {}
         if model.loss_form == "logistic":

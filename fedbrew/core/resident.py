@@ -66,8 +66,10 @@ from fedbrew.core.batched_executor import (
     finished_chunk,
     finished_values,
     free_memory,
+    gradient_form,
     staged_chunk,
     staged_values,
+    train_rows,
     trained_state_keys,
     uploaded,
 )
@@ -480,6 +482,10 @@ class ResidentRounds:
         self.task = self.representative.task
         self.template = self.task.build_model(self.representative.model_config)
         self.state_keys = trained_state_keys(self.task, self.template)
+        #: Whether the run's steps take the task's closed form, whose rows the
+        #: training steps gather prepared (``train_rows``).
+        context_form = executor.context.gradient_form if executor.context else None
+        self.closed = gradient_form(self.task, context_form) == "closed_form"
         self.parameters = dict(self.template.named_parameters())
         self.buffers = dict(self.template.named_buffers())
         self.device = next(iter(self.parameters.values())).device
@@ -851,7 +857,7 @@ class ResidentRounds:
             rows = self._rows_for(bucket, inputs)
             context = self.executor.context
             dtype = context.train_dtype(self.template_dtype) if context else self.template_dtype
-            bucket.train.rows = rows.as_dtype(dtype)
+            bucket.train.rows = train_rows(rows, dtype, self.task, self.template, self.closed)
             bucket.evaluation.rows = rows
             # What a step gathers lazily is this call's: a capture that failed
             # left tensors it recorded but never computed.

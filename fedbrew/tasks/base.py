@@ -97,7 +97,19 @@ class BatchableTask(Protocol):
     the task has one, and the gradients are the same tensors. It is the same
     gradient to rounding: an ``l1`` term takes ``lam * sign(x)``, 0 at exactly
     0, as autograd does. ``stacked_row_weights`` and ``stacked_row_mean`` are
-    ``row_mean``'s derivative and value per client. A task that gives it
+    ``row_mean``'s derivative and value per client. Two optional aids make
+    it cheaper a step, each a claim that it changes no bit:
+    ``closed_form_rows(model, rows)`` gives, from a split's rows as
+    ``split_rows`` gives them -- one split's, or a stack's with a leading
+    client dimension -- the rows ``closed_form_gradient`` reads instead,
+    computed row by row, so that a batch of them is the same rows computed
+    from the batch; a stack's are computed once and gathered every step
+    (fed-logistic-l1's signed rows ``-b a``). A task that declares it is
+    always handed batches of them. And a ``workspace`` keyword -- a dict kept
+    for one stack's steps, whose tensors the form may write in place
+    (``scratch``) -- lets it take no new memory a step; the gradients it
+    returns may be workspace tensors, read before the next call, and its
+    outputs may not. A task that gives it
     trains on it by default, under either executor
     (``runtime.performance.gradient_form``; ``autograd`` asks for autograd).
     The sequential executor then takes each step as :func:`closed_form_train_step`
@@ -547,7 +559,7 @@ def closed_form_train_step(task: Any, model: Any, batch: Any, optimizer: Any) ->
             model,
             {name: parameter.detach().unsqueeze(0) for name, parameter in parameters.items()},
             dict(model.named_buffers()),
-            tuple(tensor.to(device).unsqueeze(0) for tensor in batch),
+            closed_form_batch(task, model, tuple(tensor.to(device) for tensor in batch)),
             None,
             outputs=True,
         )
@@ -555,3 +567,32 @@ def closed_form_train_step(task: Any, model: Any, batch: Any, optimizer: Any) ->
         parameter.grad = grads[name].squeeze(0)
     optimizer.step()
     return {name: float(value.reshape(-1)[0]) for name, value in outputs.items()}
+
+
+def closed_form_batch(task: Any, model: Any, batch: tuple[Tensor, ...]) -> tuple[Tensor, ...]:
+    """One split's batch as ``closed_form_gradient`` reads it: a stack of one, prepared.
+
+    Its ``closed_form_rows`` where the task declares them (:class:`BatchableTask`).
+    """
+
+    rows = tuple(tensor.unsqueeze(0) for tensor in batch)
+    prepare = getattr(task, "closed_form_rows", None)
+    return tuple(prepare(model, rows)) if callable(prepare) else rows
+
+
+def scratch(
+    workspace: dict[str, Tensor] | None, name: str, shape: Sequence[int], like: Tensor
+) -> Tensor | None:
+    """A tensor of ``shape`` kept under ``name`` in a closed form's workspace, for ``out=``.
+
+    Made on first use, in ``like``'s dtype and device, and made again when the
+    shape changes; None without a workspace, which ``out=None`` reads as a
+    new tensor, so a form written with it runs either way (:class:`BatchableTask`).
+    """
+
+    if workspace is None:
+        return None
+    held = workspace.get(name)
+    if held is None or held.shape != tuple(shape) or held.dtype != like.dtype:
+        held = workspace[name] = torch.empty(tuple(shape), dtype=like.dtype, device=like.device)
+    return held

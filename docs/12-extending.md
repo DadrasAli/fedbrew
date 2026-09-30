@@ -590,7 +590,15 @@ examples' are. It must be the same gradient to rounding -- an `l1` term takes `l
 autograd does -- and `stacked_row_weights` and `stacked_row_mean`
 (`fedbrew/tasks/base.py`) give `row_mean`'s derivative and value per client.
 Every linear example implements it; its test holds it to autograd of the
-task's own loss within `1e-12`.
+task's own loss within `1e-12`. Two optional aids take work out of each step,
+and each must change no bit: `closed_form_rows(model, rows)` computes, row by
+row, what the form reads in place of a split's rows -- a stack's once, then
+gathered every step, as fed-logistic-l1's signed rows `-b a` are -- and a
+task that declares it is always handed those rows; and a `workspace` keyword,
+a dict kept for one stack's steps, lets the form write its intermediates and
+its gradient into tensors it keeps there (`scratch`, `fedbrew/tasks/base.py`),
+which the executor reads before the next call. fed-logistic-l1's test holds
+both to the form on the rows as they are, bit for bit.
 
 For `evaluation.grad_norm` (chapter 04 §8), say what the task's `grad_norm_sq`
 measures as `GRAD_NORM_GLOSS` -- the squared norm of the gradient of its global

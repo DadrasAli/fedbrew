@@ -45,6 +45,7 @@ work is done.
 from __future__ import annotations
 
 import copy
+import inspect
 import sys
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -700,6 +701,7 @@ class _Rows:
         self.device = first.device
         self.bytes = sum(tensor.numel() * tensor.element_size() for tensor in self.tensors)
         self._cast: dict[torch.dtype, _Rows] = {}
+        self._closed: _Rows | None = None
 
     def as_dtype(self, dtype: torch.dtype) -> _Rows:
         """These rows with every floating tensor in ``dtype``: themselves, when it is theirs.
@@ -717,8 +719,30 @@ class _Rows:
                 for tensor in self.tensors
             )
             rows._cast = {}
+            rows._closed = None
             self._cast[dtype] = rows
         return self._cast[dtype]
+
+    def closed(self, task: Any, model: nn.Module) -> _Rows:
+        """These rows as the task's closed form reads them (``closed_form_rows``), made once.
+
+        Themselves for a task that declares none. The copy is kept with the
+        rows, so rows kept for the next round are prepared once; the rows are
+        one run's, whose clients share the model's configuration the task may
+        read.
+        """
+
+        prepare = getattr(task, "closed_form_rows", None)
+        if not callable(prepare):
+            return self
+        if getattr(self, "_closed", None) is None:
+            rows = copy.copy(self)
+            rows.tensors = tuple(prepare(model, self.tensors))
+            rows.bytes = sum(tensor.numel() * tensor.element_size() for tensor in rows.tensors)
+            rows._cast = {}
+            rows._closed = rows
+            self._closed = rows
+        return self._closed  # type: ignore[return-value]
 
     def serving(self, sources: list[Any]) -> _Rows:
         """These rows, held as the rows of other splits over the same tensors, unedited.
@@ -1160,12 +1184,35 @@ class _Bucket:
             name: value.to(self.dtype) if value.is_floating_point() else value
             for name, value in self.buffers.items()
         }
+        #: Whether a step's gradients are taken as one backward through the
+        #: stacked losses' sum rather than vmap(grad): the form the task
+        #: declares, by measurement (``batched_gradient``); one client is
+        #: never vmapped, and takes the sequential gradient either way.
+        #: Compiled, a summed step is vmap(grad), which compiles whole.
+        form = gradient_form(task, self.context.gradient_form)
+        self.summed = self.stacked and form == "summed" and not self.compiled
+        #: Whether each step's gradients are the task's closed form
+        #: (``closed_form_gradient``), for the whole stack at once, rather than
+        #: autograd's: the run's form (``choose_gradient_form``). Compiled, the
+        #: closed form of one client is vmapped over the stack inside the
+        #: compiled loop.
+        self.closed = form == "closed_form"
+        #: The closed form's scratch tensors for this stack's steps
+        #: (``scratch``), where its form takes them and the stack is stepped
+        #: whole, eagerly: vmapped or compiled, each call's are its own.
+        self.workspace: dict[str, Tensor] | None = (
+            {}
+            if self.closed and self.stacked and not self.compiled and _takes_workspace(task)
+            else None
+        )
         self.rows = rows
         slots = [plan.slot for plan in plans]
         train, evaluation = orders
         if steps is None:
             steps = (
-                _Steps(rows.as_dtype(self.dtype), train, slots, self.dtype),
+                _Steps(
+                    train_rows(rows, self.dtype, task, model, self.closed), train, slots, self.dtype
+                ),
                 _Steps(rows, evaluation, slots, self.model_dtype),
             )
         # Built by the caller where its host half is computed ahead of the
@@ -1185,19 +1232,6 @@ class _Bucket:
             self.device,
             per_step=self.compiled,
         )
-        #: Whether a step's gradients are taken as one backward through the
-        #: stacked losses' sum rather than vmap(grad): the form the task
-        #: declares, by measurement (``batched_gradient``); one client is
-        #: never vmapped, and takes the sequential gradient either way.
-        #: Compiled, a summed step is vmap(grad), which compiles whole.
-        form = gradient_form(task, self.context.gradient_form)
-        self.summed = self.stacked and form == "summed" and not self.compiled
-        #: Whether each step's gradients are the task's closed form
-        #: (``closed_form_gradient``), for the whole stack at once, rather than
-        #: autograd's: a run's opt-in (``runtime.performance.gradient_form``).
-        #: Compiled, the closed form of one client is vmapped over the stack
-        #: inside the compiled loop.
-        self.closed = form == "closed_form"
 
     # -- the tensors every client starts from --------------------------------
 
@@ -1681,7 +1715,9 @@ class _Bucket:
         """
 
         if self.closed:
-            return closed_gradients(self.task, self.model, params, self.buffers, batch, mask)
+            return closed_gradients(
+                self.task, self.model, params, self.buffers, batch, mask, self.workspace
+            )
         return self._summed_gradients(params, batch, mask)
 
     def _summed_gradients(
@@ -1881,17 +1917,40 @@ def closed_gradients(
     buffers: Mapping[str, Tensor],
     batch: tuple[Tensor, ...],
     mask: Tensor | None,
+    workspace: dict[str, Tensor] | None = None,
 ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
     """A stack's gradients and step outputs from the task's closed form (``closed_form_gradient``).
 
     ``params``, ``batch`` and ``mask`` carry a leading client dimension; what
     comes back is each client's gradient of its batch's ``functional_loss``,
     stacked like ``params``, and the step outputs a training step reads --
-    ``total``, where the task has one -- stacked over clients.
+    ``total``, where the task has one -- stacked over clients. ``batch`` is
+    the task's prepared rows where it declares them (``_Rows.closed``);
+    ``workspace``, the stack's scratch tensors where its form takes them,
+    which the gradients returned may be: they are read before the next call.
     """
 
-    grads, outputs = task.closed_form_gradient(model, params, buffers, batch, mask, outputs=False)
+    extra = {} if workspace is None else {"workspace": workspace}
+    grads, outputs = task.closed_form_gradient(
+        model, params, buffers, batch, mask, outputs=False, **extra
+    )
     return dict(grads), dict(outputs)
+
+
+def _takes_workspace(task: Any) -> bool:
+    """Whether the task's closed form takes a ``workspace`` of scratch tensors."""
+
+    try:
+        return "workspace" in inspect.signature(task.closed_form_gradient).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def train_rows(rows: _Rows, dtype: torch.dtype, task: Any, model: nn.Module, closed: bool) -> _Rows:
+    """The rows a stack's training steps gather: in the step's dtype, and prepared if closed."""
+
+    rows = rows.as_dtype(dtype)
+    return rows.closed(task, model) if closed else rows
 
 
 def _one_client_closed(

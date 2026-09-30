@@ -117,7 +117,7 @@ def _stack(task: Any, dataset: Any) -> tuple[tuple[torch.Tensor, ...], int]:
     ), rows
 
 
-class TheClosedFormIsAutogradTest(unittest.TestCase):
+class _ExampleComponents(unittest.TestCase):
     def setUp(self) -> None:
         import tempfile
 
@@ -132,6 +132,8 @@ class TheClosedFormIsAutogradTest(unittest.TestCase):
         path.write_text(yaml.safe_dump(_config(arm, setting, self.root)), encoding="utf-8")
         return build_components(load_config(path))
 
+
+class TheClosedFormIsAutogradTest(_ExampleComponents):
     def test_every_example_and_problem(self) -> None:
         generator = torch.Generator().manual_seed(2026)
         for label, (arm, setting) in CASES.items():
@@ -156,10 +158,12 @@ class TheClosedFormIsAutogradTest(unittest.TestCase):
                     self._check(task, model, buffers, x, batch, mask, f"{label} masked={masked}")
 
     def _check(self, task, model, buffers, x, batch, mask, where) -> None:  # type: ignore[no-untyped-def]
+        prepare = getattr(task, "closed_form_rows", None)
+        rows = tuple(prepare(model, batch)) if callable(prepare) else batch
         with torch.no_grad():
-            grads, outputs = task.closed_form_gradient(model, {"x": x}, buffers, batch, mask)
+            grads, outputs = task.closed_form_gradient(model, {"x": x}, buffers, rows, mask)
             bare, none = task.closed_form_gradient(
-                model, {"x": x}, buffers, batch, mask, outputs=False
+                model, {"x": x}, buffers, rows, mask, outputs=False
             )
         self.assertTrue(torch.equal(bare["x"], grads["x"]), f"{where} without outputs")
         self.assertNotIn("loss", none, where)
@@ -181,6 +185,73 @@ class TheClosedFormIsAutogradTest(unittest.TestCase):
                 1e-12 * max(1.0, abs(value)),
                 f"{where} client {client} loss",
             )
+
+
+def _unprepared_logistic(model: Any, x: torch.Tensor, batch: Any, mask: Any) -> torch.Tensor:
+    """fed-logistic-l1's closed-form gradient as it was written on the rows as they are."""
+
+    from fedbrew.tasks.base import stacked_row_weights
+
+    # Each derivative as it was written, not the task's table, which the
+    # prepared form now writes in place.
+    slopes = {
+        "logistic": torch.sigmoid,
+        "tanh": lambda z: 1.0 - torch.tanh(z).square(),
+    }
+    lam = model.penalty_strength
+    penalties = {
+        "l1": lambda x: lam * torch.sign(x),
+        "l2sq": lambda x: lam * x,
+        "nonconvex": lambda x: x / (1.0 + x * x).square() * (2.0 * lam),
+    }
+    features, labels = batch
+    signed = -labels * torch.bmm(x.unsqueeze(1), features.transpose(1, 2)).squeeze(1)
+    weights = stacked_row_weights(signed, mask)
+    slope = slopes[model.loss_form](signed)
+    coefficients = (-labels * slope * weights).unsqueeze(1)
+    gradient = torch.bmm(coefficients, features).squeeze(1)
+    return gradient + penalties[model.penalty_form](x)
+
+
+class ThePreparedRowsAndTheWorkspaceChangeNoBitTest(_ExampleComponents):
+    """fed-logistic-l1's signed rows and scratch tensors: the unprepared form's gradient, exactly.
+
+    For each of its four problems, at random points with exact zeros, masked
+    and not, with no workspace and with one reused across calls of two
+    shapes: ``torch.equal`` with the form as it was written on the rows as
+    they are (``_unprepared_logistic``).
+    """
+
+    def test_every_logistic_problem(self) -> None:
+        generator = torch.Generator().manual_seed(7)
+        for label, (arm, setting) in CASES.items():
+            if "logistic" not in arm and "tanh" not in arm:
+                continue
+            with self.subTest(case=label):
+                components = self._components(arm, setting)
+                task = components.task
+                client = components.clients[next(iter(components.clients))]
+                model = task.build_model(client.model_config)
+                batch, rows = _stack(task, components.dataset)
+                workspace: dict[str, torch.Tensor] = {}
+                for masked, width in ((False, rows), (True, rows), (False, max(1, rows // 2))):
+                    cut = tuple(tensor[:, :width] for tensor in batch)
+                    x = 0.5 * torch.randn(CLIENTS, *model.x.shape, generator=generator)
+                    x = x.to(torch.float64)
+                    x[:, :2] = 0.0
+                    mask = None
+                    if masked:
+                        mask = torch.ones(CLIENTS, width, dtype=torch.float64)
+                        mask[1, max(1, width // 2) :] = 0.0
+                    expected = _unprepared_logistic(model, x, cut, mask)
+                    prepared = tuple(task.closed_form_rows(model, cut))
+                    for kept in (None, workspace):
+                        with torch.no_grad():
+                            grads, _ = task.closed_form_gradient(
+                                model, {"x": x}, {}, prepared, mask, outputs=False, workspace=kept
+                            )
+                        where = f"masked={masked} width={width} workspace={kept is not None}"
+                        self.assertTrue(torch.equal(grads["x"], expected), where)
 
 
 class ARunOnTheClosedFormTest(ExecutorRuns):
