@@ -116,6 +116,8 @@ from fedbrew.tasks.base import (
     row_count,
     row_mean,
     row_numbers,
+    stacked_row_mean,
+    stacked_row_weights,
 )
 
 #: The optimum's objective value, in closed form and exact for the federated
@@ -847,6 +849,33 @@ class DriftQuadTask(TaskAdapter):
 
         loss = self._criterion(self._values(model, params, buffers, batch[0]), batch[1], mask)
         return loss, {"loss": loss.detach()}
+
+    def closed_form_gradient(
+        self,
+        model: Any,
+        params: Mapping[str, Tensor],
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+        """``functional_loss``'s gradient for a stack of clients, in closed form (BatchableTask).
+
+        A row's `f(x) = (1/2) x'Ax - b_r.x` has gradient `Ax - b_r`, so the
+        batch's is `(sum_r w_r) Ax - sum_r w_r b_r` -- the model's own
+        backward, for every client at once.
+        """
+
+        offsets = batch[0]
+        x = params["x"]
+        curvature = (buffers or {}).get("curvature", model.curvature)
+        per_row = 0.5 * (curvature * x * x).sum(-1, keepdim=True) - torch.bmm(
+            offsets, x.unsqueeze(2)
+        ).squeeze(2)
+        weights = stacked_row_weights(per_row, mask)
+        gradient = weights.sum(1, keepdim=True) * (curvature * x) - torch.bmm(
+            weights.unsqueeze(1), offsets
+        ).squeeze(1)
+        return {"x": gradient}, {"loss": stacked_row_mean(per_row, mask)}
 
     def functional_eval(
         self,

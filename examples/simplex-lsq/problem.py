@@ -95,6 +95,8 @@ from fedbrew.tasks.base import (
     row_count,
     row_mean,
     row_numbers,
+    stacked_row_mean,
+    stacked_row_weights,
 )
 
 #: float64 throughout: `constraint_violation` and `simplex_sum - 1` are the two
@@ -856,6 +858,27 @@ class SimplexLSQTask(TaskAdapter):
         )
         loss = self._criterion(outputs, targets, mask)
         return loss, {"loss": loss.detach()}
+
+    def closed_form_gradient(
+        self,
+        model: Any,
+        params: Mapping[str, Tensor],
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+        """``functional_loss``'s gradient for a stack of clients, in closed form (BatchableTask).
+
+        `(1/2) mean_r (a_r.x - y_r)^2` has gradient `sum_r w_r (a_r.x - y_r) a_r`.
+        """
+
+        del model, buffers
+        features, targets = batch
+        x = params["x"]
+        residual = torch.bmm(features, x.unsqueeze(2)).squeeze(2) - targets
+        weights = stacked_row_weights(residual, mask)
+        gradient = torch.bmm((weights * residual).unsqueeze(1), features).squeeze(1)
+        return {"x": gradient}, {"loss": 0.5 * stacked_row_mean(residual * residual, mask)}
 
     def functional_eval(
         self,

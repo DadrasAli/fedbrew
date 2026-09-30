@@ -99,6 +99,8 @@ from fedbrew.tasks.base import (
     listed_loader_order,
     row_count,
     row_mean,
+    stacked_row_mean,
+    stacked_row_weights,
 )
 
 #: Every tensor here is float64: the smooth members' floors go below 1e-30.
@@ -1082,6 +1084,40 @@ class HeterogeneousQuadraticTask(TaskAdapter):
         if self.member == LASSO:
             loss = loss + self.lam * x.abs().sum()
         return loss, {"loss": loss.detach()}
+
+    def closed_form_gradient(
+        self,
+        model: Any,
+        params: Mapping[str, Tensor],
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+        """``functional_loss``'s gradient for a stack of clients, in closed form (BatchableTask).
+
+        A row's loss is `sum_j a_j phi(u_j) + g.u` with `u = x - x_hat`, so its
+        gradient is `a phi'(u) + g`, and the lasso's `lam ||x||_1` adds
+        `lam sign(x)`, 0 at exactly 0, as autograd takes it.
+        """
+
+        del model, buffers
+        features = batch[0]
+        x = params["x"]
+        dim = x.shape[-1]
+        u = x - self._centre
+        curvature, linear = features[..., :dim], features[..., dim:]
+        per_row = (curvature * profile(self.member, u, self.theta).unsqueeze(1)).sum(-1) + (
+            linear * u.unsqueeze(1)
+        ).sum(-1)
+        weights = stacked_row_weights(per_row, mask).unsqueeze(2)
+        gradient = (weights * curvature).sum(1) * profile_slope(self.member, u, self.theta) + (
+            weights * linear
+        ).sum(1)
+        loss = stacked_row_mean(per_row, mask)
+        if self.member == LASSO:
+            gradient = gradient + self.lam * torch.sign(x)
+            loss = loss + self.lam * x.abs().sum(-1)
+        return {"x": gradient}, {"loss": loss}
 
     def functional_eval(
         self,

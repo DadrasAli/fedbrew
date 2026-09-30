@@ -125,6 +125,8 @@ from fedbrew.tasks.base import (
     row_count,
     row_mean,
     row_numbers,
+    stacked_row_mean,
+    stacked_row_weights,
 )
 
 #: Every tensor here is float64: so that ``exact_zeros`` means what it says, and
@@ -339,6 +341,17 @@ PROBLEMS: tuple[tuple[str, str], ...] = (
     ("logistic", "nonconvex"),
     ("tanh", "l2sq"),
 )
+
+
+def _stacked_penalty(x: Tensor, lam: float, penalty: str) -> Tensor:
+    """:data:`PENALTIES`' value at each row of a stack of iterates, ``(clients,)``."""
+
+    if penalty == "l1":
+        return lam * x.abs().sum(-1)
+    if penalty == "l2sq":
+        return 0.5 * lam * (x * x).sum(-1)
+    squared = x * x
+    return lam * (squared / (1.0 + squared)).sum(-1)
 
 
 def convex(loss: str, penalty: str) -> bool:
@@ -1871,6 +1884,38 @@ class FedLogisticL1Task(TaskAdapter):
             iterate, model.penalty_strength, model.penalty_form
         )
         return loss, {"loss": loss.detach()}
+
+    def closed_form_gradient(
+        self,
+        model: Any,
+        params: Mapping[str, Tensor],
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+        """``functional_loss``'s gradient for a stack of clients, in closed form (BatchableTask).
+
+        With `z = -b a.x` per row and `w` the row's weight in the mean, the
+        smooth part's gradient is `sum_r w_r loss'(z_r) (-b_r) a_r`, and the
+        penalty's is its own (:data:`PENALTIES`): `lam sign(x)` for the l1
+        term, 0 at exactly 0, as autograd takes it.
+        """
+
+        del buffers
+        features, labels = batch
+        x = params["x"]
+        signed = -labels * torch.bmm(features, x.unsqueeze(2)).squeeze(2)
+        weights = stacked_row_weights(signed, mask)
+        if model.loss_form == "logistic":
+            smooth = stacked_row_mean(torch.nn.functional.softplus(signed), mask)
+        else:
+            smooth = 1.0 + stacked_row_mean(torch.tanh(signed), mask)
+        slope = LOSSES[model.loss_form][1](signed)
+        coefficients = (-labels * slope * weights).unsqueeze(1)
+        lam = model.penalty_strength
+        gradient = torch.bmm(coefficients, features).squeeze(1)
+        gradient = gradient + PENALTIES[model.penalty_form][1](x, lam)
+        return {"x": gradient}, {"loss": smooth + _stacked_penalty(x, lam, model.penalty_form)}
 
     def functional_eval(
         self,

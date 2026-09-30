@@ -78,6 +78,8 @@ from fedbrew.tasks.base import (
     row_count,
     row_mean,
     row_numbers,
+    stacked_row_mean,
+    stacked_row_weights,
 )
 
 #: The optimum, in closed form. Both are exact for the *federated* objective,
@@ -658,6 +660,29 @@ class PL1DTask(TaskAdapter):
 
         loss = self._criterion(self._values(model, params, buffers, batch[0]), batch[1], mask)
         return loss, {"loss": loss.detach()}
+
+    def closed_form_gradient(
+        self,
+        model: Any,
+        params: Mapping[str, Tensor],
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+        """``functional_loss``'s gradient for a stack of clients, in closed form (BatchableTask).
+
+        A row's `f(x) = x^2 + 3 sin^2 x + s x` has derivative
+        `2x + 3 sin 2x + s`: the model's own backward, for every client at once.
+        """
+
+        del model, buffers
+        shifts = batch[0]
+        x = params["x"]
+        per_row = x * x + 3.0 * torch.sin(x) ** 2 + shifts * x
+        weights = stacked_row_weights(per_row, mask)
+        slope = 2.0 * x + 3.0 * torch.sin(2.0 * x) + shifts
+        gradient = (weights * slope).sum(1, keepdim=True)
+        return {"x": gradient}, {"loss": stacked_row_mean(per_row, mask)}
 
     def functional_eval(
         self,

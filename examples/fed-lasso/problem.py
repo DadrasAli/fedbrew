@@ -144,6 +144,8 @@ from fedbrew.tasks.base import (
     row_count,
     row_mean,
     row_numbers,
+    stacked_row_mean,
+    stacked_row_weights,
 )
 
 #: Every tensor here is float64. The objective's floor is set by `lam` and sits
@@ -1149,6 +1151,37 @@ class FedLassoTask(TaskAdapter):
         )
         loss = self._criterion(model, outputs, targets, self._penalty(model, iterate), mask)
         return loss, {"loss": loss.detach()}
+
+    def closed_form_gradient(
+        self,
+        model: Any,
+        params: Mapping[str, Tensor],
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+        """``functional_loss``'s gradient for a stack of clients, in closed form (BatchableTask).
+
+        `(1/2) mean_r (a_r.x - y_r)^2` has gradient `sum_r w_r (a_r.x - y_r) a_r`;
+        the penalty's is :func:`penalty_gradient`'s, `lam sign(x)` for the l1
+        term, 0 at exactly 0, as autograd takes it.
+        """
+
+        del buffers
+        features, targets = batch
+        x = params["x"]
+        residual = torch.bmm(features, x.unsqueeze(2)).squeeze(2) - targets
+        weights = stacked_row_weights(residual, mask)
+        rows = model.x.numel()
+        level, form = model.penalty_strength, model.penalty_form
+        gradient = torch.bmm((weights * residual).unsqueeze(1), features).squeeze(1)
+        gradient = gradient + penalty_gradient(x, level, form, rows)
+        if form == "l1":
+            penalty = level * x.abs().sum(-1)
+        else:
+            penalty = level * (x * x).sum(-1) / (2.0 * rows)
+        loss = 0.5 * stacked_row_mean(residual * residual, mask) + penalty
+        return {"x": gradient}, {"loss": loss}
 
     def functional_eval(
         self,
