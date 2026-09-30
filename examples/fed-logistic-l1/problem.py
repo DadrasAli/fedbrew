@@ -1904,7 +1904,7 @@ class FedLogisticL1Task(TaskAdapter):
         del buffers
         features, labels = batch
         x = params["x"]
-        signed = -labels * torch.bmm(features, x.unsqueeze(2)).squeeze(2)
+        signed = -labels * torch.bmm(x.unsqueeze(1), features.transpose(1, 2)).squeeze(1)
         weights = stacked_row_weights(signed, mask)
         if model.loss_form == "logistic":
             smooth = stacked_row_mean(torch.nn.functional.softplus(signed), mask)

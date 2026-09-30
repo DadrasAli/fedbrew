@@ -875,7 +875,7 @@ class SimplexLSQTask(TaskAdapter):
         del model, buffers
         features, targets = batch
         x = params["x"]
-        residual = torch.bmm(features, x.unsqueeze(2)).squeeze(2) - targets
+        residual = torch.bmm(x.unsqueeze(1), features.transpose(1, 2)).squeeze(1) - targets
         weights = stacked_row_weights(residual, mask)
         gradient = torch.bmm((weights * residual).unsqueeze(1), features).squeeze(1)
         return {"x": gradient}, {"loss": 0.5 * stacked_row_mean(residual * residual, mask)}

@@ -869,8 +869,8 @@ class DriftQuadTask(TaskAdapter):
         x = params["x"]
         curvature = (buffers or {}).get("curvature", model.curvature)
         per_row = 0.5 * (curvature * x * x).sum(-1, keepdim=True) - torch.bmm(
-            offsets, x.unsqueeze(2)
-        ).squeeze(2)
+            x.unsqueeze(1), offsets.transpose(1, 2)
+        ).squeeze(1)
         weights = stacked_row_weights(per_row, mask)
         gradient = weights.sum(1, keepdim=True) * (curvature * x) - torch.bmm(
             weights.unsqueeze(1), offsets

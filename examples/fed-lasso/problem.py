@@ -1170,7 +1170,7 @@ class FedLassoTask(TaskAdapter):
         del buffers
         features, targets = batch
         x = params["x"]
-        residual = torch.bmm(features, x.unsqueeze(2)).squeeze(2) - targets
+        residual = torch.bmm(x.unsqueeze(1), features.transpose(1, 2)).squeeze(1) - targets
         weights = stacked_row_weights(residual, mask)
         rows = model.x.numel()
         level, form = model.penalty_strength, model.penalty_form
