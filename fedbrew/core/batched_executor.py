@@ -74,6 +74,7 @@ from fedbrew.clients.torch_sgd_client import trainable_parameter_count
 from fedbrew.core.config import GRADIENT_FORMS
 from fedbrew.core.execution import ClientPool, FitObserver
 from fedbrew.core.protocol import FitRequest, FitResult
+from fedbrew.core.refusal import RunRefused
 from fedbrew.core.round_planner import RoundPlanner, auto_workers, planned_for, roster_plan
 from fedbrew.core.stacked_results import StackedFitResults
 from fedbrew.core.torch_utils import StateStack, uploaded
@@ -1172,11 +1173,13 @@ class _Bucket:
         #: declares, by measurement (``batched_gradient``); one client is
         #: never vmapped, and takes the sequential gradient either way.
         #: Compiled, the step is always vmap(grad), which compiles whole.
-        self.summed = (
-            self.stacked
-            and gradient_form(task, self.context.gradient_form) == "summed"
-            and not self.compiled
-        )
+        form = gradient_form(task, self.context.gradient_form)
+        self.summed = self.stacked and form == "summed" and not self.compiled
+        #: Whether each step's gradients are the task's closed form
+        #: (``closed_form_gradient``), for the whole stack at once, rather than
+        #: autograd's: a run's opt-in (``runtime.performance.gradient_form``).
+        #: Compiled, the step is vmap(grad) as for the other forms.
+        self.closed = form == "closed_form" and not self.compiled
 
     # -- the tensors every client starts from --------------------------------
 
@@ -1295,7 +1298,12 @@ class _Bucket:
             steps = self.context.functions(self.task, self.model, self.buffers, program)
         else:
             steps = step_functions(
-                self.task, self.model, self.buffers, program, self.context.autocast(self.device)
+                self.task,
+                self.model,
+                self.buffers,
+                program,
+                self.context.autocast(self.device),
+                closed=self.closed,
             )
         batch_update, gradient_sum, combined_update = steps
         # Compiled, a step is told only whether it is the first, which is
@@ -1315,7 +1323,7 @@ class _Bucket:
         outputs: list[dict[str, Tensor]] = []
 
         self.model.train()
-        if self.summed:
+        if self.summed or (self.closed and self.stacked):
             return self._run_summed(params, state, corrections, outputs)
         if self._stepwise():
             return self._run_stepwise(params, state, corrections, outputs)
@@ -1508,7 +1516,7 @@ class _Bucket:
         step = 0
         for number, count in enumerate(self.structure, start=1):
             if program.combine == "batch":
-                grads, step_outputs = self._summed_gradients(params, *self._gather(step))
+                grads, step_outputs = self._stack_gradients(params, *self._gather(step))
                 step += 1
                 if program.max_grad_norm is None:
                     # Unclipped, a step is elementwise -- every operand a
@@ -1541,7 +1549,7 @@ class _Bucket:
             total: Any = None
             first = step
             for _ in range(count):
-                grads, step_outputs = self._summed_gradients(params, *self._gather(step))
+                grads, step_outputs = self._stack_gradients(params, *self._gather(step))
                 if program.max_grad_norm is None:
                     # Elementwise, as the unclipped batch step above.
                     total = accumulate(total, grads, self._weights(step)[0])
@@ -1574,6 +1582,16 @@ class _Bucket:
                 ],
             )
         return params, outputs, step
+
+    def _stack_gradients(
+        self, params: dict[str, Tensor], batch: tuple[Tensor, ...], mask: Tensor | None
+    ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+        """Every client's gradient and step outputs, in the stack's form: closed or summed."""
+
+        if self.closed:
+            with torch.no_grad():
+                return closed_gradients(self.task, self.model, params, self.buffers, batch, mask)
+        return self._summed_gradients(params, batch, mask)
 
     def _summed_gradients(
         self, params: dict[str, Tensor], batch: tuple[Tensor, ...], mask: Tensor | None
@@ -1663,6 +1681,7 @@ def step_functions(
     buffers: Mapping[str, Tensor],
     program: Any,
     autocast: str | None,
+    closed: bool = False,
 ) -> tuple[Callable[..., Any], Callable[..., Any], Callable[..., Any]]:
     """The three per-client functions a bucket's steps are made of.
 
@@ -1672,7 +1691,11 @@ def step_functions(
     runs under bfloat16 autocast on ``autocast``'s device type, when given.
     """
 
-    gradient = gradient_function(task, model, buffers, autocast)
+    gradient = (
+        _one_client_closed(task, model, buffers)
+        if closed
+        else gradient_function(task, model, buffers, autocast)
+    )
 
     def batch_update(  # type: ignore[no-untyped-def]
         params, state, batch, mask, reference, client_control, server_control, values, step
@@ -1725,6 +1748,61 @@ def gradient_function(
             return task.functional_loss(model, params, buffers, batch, mask)
 
     return torch.func.grad(loss, has_aux=True)
+
+
+def closed_gradients(
+    task: Any,
+    model: nn.Module,
+    params: Mapping[str, Tensor],
+    buffers: Mapping[str, Tensor],
+    batch: tuple[Tensor, ...],
+    mask: Tensor | None,
+) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+    """A stack's gradients and step outputs from the task's closed form (``closed_form_gradient``).
+
+    ``params``, ``batch`` and ``mask`` carry a leading client dimension; what
+    comes back is each client's gradient of its batch's ``functional_loss``,
+    stacked like ``params``, and each client's outputs, stacked over clients.
+    """
+
+    grads, outputs = task.closed_form_gradient(model, params, buffers, batch, mask)
+    return dict(grads), dict(outputs)
+
+
+def _one_client_closed(
+    task: Any, model: nn.Module, buffers: Mapping[str, Tensor]
+) -> Callable[..., Any]:
+    """``gradient_function``'s shape for one client, from the stack's closed form of one."""
+
+    def gradient(params: Any, batch: Any, mask: Any) -> Any:
+        with torch.no_grad():
+            grads, outputs = closed_gradients(
+                task,
+                model,
+                {name: value.unsqueeze(0) for name, value in params.items()},
+                buffers,
+                tuple(tensor.unsqueeze(0) for tensor in batch),
+                None if mask is None else mask.unsqueeze(0),
+            )
+        return (
+            {name: value.squeeze(0) for name, value in grads.items()},
+            {name: value.squeeze(0) for name, value in outputs.items()},
+        )
+
+    return gradient
+
+
+def closed_form_unsupported(task: Any, precision: str) -> str | None:
+    """Why ``gradient_form: closed_form`` cannot run for this task, or None."""
+
+    if not callable(getattr(task, "closed_form_gradient", None)):
+        return (
+            f"task {type(task).__name__} gives no closed-form gradient "
+            "(closed_form_gradient, fedbrew.tasks.base.BatchableTask)"
+        )
+    if precision == "bf16":
+        return "numerics.precision: bf16 autocasts autograd's loss, and a closed form has none"
+    return None
 
 
 def _autocast(device_type: str | None) -> Any:
@@ -1975,6 +2053,10 @@ def select_executor(
         return None, {"used": "sequential"}
     compile_asked = compile_mode(performance.get("compile"))
     precision_asked = str(components.config.numerics.precision)
+    if performance.get("gradient_form") == "closed_form":
+        why = closed_form_unsupported(components.task, precision_asked)
+        if why is not None:
+            raise RunRefused(f"runtime.performance.gradient_form: closed_form is refused: {why}")
     reason, model = _batched_check(components)
     if reason is not None:
         record = {"used": "sequential", "fallback": reason}

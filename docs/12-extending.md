@@ -572,6 +572,19 @@ client aggregates of `loss`, `central_test_<name>` — where it used to call
 every task's `loss` a cross-entropy. A name left out is glossed by its own
 words.
 
+A batchable task may also give its gradient in closed form, for a whole stack
+of clients at once: `closed_form_gradient(model, params, buffers, batch, mask)`,
+where `params`, `batch` and `mask` carry a leading client dimension, returning
+`(gradients, outputs)` -- the gradients stacked like `params`, the outputs
+`functional_loss` returns stacked over clients. A run takes it with
+`runtime.performance.gradient_form: closed_form` (chapter 04), and it is then
+the whole step's gradient, with no autograd and no vmap. It must be the same
+gradient to rounding -- an `l1` term takes `lam * sign(x)`, 0 at exactly 0, as
+autograd does -- and `stacked_row_weights` and `stacked_row_mean`
+(`fedbrew/tasks/base.py`) give `row_mean`'s derivative and value per client.
+Every linear example implements it; its test holds it to autograd of the
+task's own loss within `1e-12`.
+
 For `evaluation.grad_norm` (chapter 04 §8), say what the task's `grad_norm_sq`
 measures as `GRAD_NORM_GLOSS` -- the squared norm of the gradient of its global
 objective F, and what F is -- pass it as

@@ -1158,8 +1158,10 @@ EXECUTORS: frozenset[str] = frozenset({"sequential", "batched"})
 
 #: What ``runtime.performance.gradient_form`` accepts: how the batched
 #: executor takes a stack's gradients, in place of the form the task declares
-#: (``batched_gradient``). The two agree to the executor's tolerance.
-GRADIENT_FORMS: tuple[str, ...] = ("vmap_grad", "summed")
+#: (``batched_gradient``): autograd vmapped, autograd through the losses' sum,
+#: or the task's own closed form (``closed_form_gradient``), which a task
+#: without one refuses. They agree to the executor's tolerance.
+GRADIENT_FORMS: tuple[str, ...] = ("vmap_grad", "summed", "closed_form")
 
 #: What ``numerics.precision`` accepts: the reference, or a mode the batched
 #: executor trains in (chapter 11 §11).

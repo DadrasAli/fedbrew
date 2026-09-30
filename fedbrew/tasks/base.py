@@ -86,6 +86,18 @@ class BatchableTask(Protocol):
     a longer one it holds 1.0 for each real row and 0.0 for each padded row,
     and the result is the unpadded batch's, up to summation order.
 
+    One more is optional and opt-in:
+    ``closed_form_gradient(model, params, buffers, batch, mask)`` gives the
+    gradient of ``functional_loss`` in closed form for a whole stack at once --
+    ``params``, ``batch`` and ``mask`` each with a leading client dimension --
+    as ``(gradients, outputs)``: the gradients stacked like ``params``, and the
+    outputs ``functional_loss`` returns, each stacked over the clients. A run
+    takes it with ``runtime.performance.gradient_form: closed_form``, which a
+    task without it refuses. It is the same gradient to rounding: an ``l1``
+    term takes ``lam * sign(x)``, 0 at exactly 0, as autograd does.
+    ``stacked_row_weights`` and ``stacked_row_mean`` are ``row_mean``'s
+    derivative and value per client.
+
     Two more are optional. ``loader_order(data, config)`` declares what the
     loader yields (:class:`LoaderOrder`), so a round's orders are planned
     together rather than replayed per client. ``stacked_metrics(outputs,
@@ -200,6 +212,30 @@ def row_mean(values: Tensor, mask: Tensor | None = None) -> Tensor:
     if mask is None:
         return values.mean()
     return (values * mask).sum() / mask.sum()
+
+
+def stacked_row_weights(values: Tensor, mask: Tensor | None = None) -> Tensor:
+    """Each row's weight in its client's ``row_mean``, for a stack of ``(clients, rows)``.
+
+    ``row_mean``'s derivative with respect to each row's value: ``1 / rows``,
+    or under ``mask`` the row's mask over its client's real rows. In
+    ``values``' dtype and device.
+    """
+
+    if mask is None:
+        rows = values.shape[1]
+        return torch.full(values.shape[:2], 1.0 / rows, dtype=values.dtype, device=values.device)
+    mask = mask.to(values.dtype)
+    return mask / mask.sum(dim=1, keepdim=True)
+
+
+def stacked_row_mean(values: Tensor, mask: Tensor | None = None) -> Tensor:
+    """``row_mean`` of each client's rows, for a stack of ``(clients, rows)``: ``(clients,)``."""
+
+    if mask is None:
+        return values.mean(dim=1)
+    mask = mask.to(values.dtype)
+    return (values * mask).sum(dim=1) / mask.sum(dim=1)
 
 
 def row_count(rows: Tensor, mask: Tensor | None = None) -> Tensor:

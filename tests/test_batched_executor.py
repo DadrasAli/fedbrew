@@ -90,6 +90,7 @@ class TheKeysAreCheckedTest(unittest.TestCase):
         self._validate(executor="batched", executor_chunk_bytes="auto")
         self._validate(executor="batched", gradient_form="summed")
         self._validate(executor="batched", gradient_form="vmap_grad")
+        self._validate(executor="batched", gradient_form="closed_form")
 
     def test_anything_else_is_refused(self) -> None:
         for performance in (
@@ -146,6 +147,12 @@ class SelectionIsRecordedTest(ExecutorRuns):
             self.assertEqual(taken, [])
             self.assertNotIn("gradient_form", self._record(self.run_config(config, "batched")))
             self.assertTrue(taken)
+
+    def test_closed_form_is_refused_for_a_task_without_one(self) -> None:
+        from tests.test_batched_executor_tolerance import classification_config
+
+        with self.assertRaisesRegex(RunRefused, "gives no closed-form gradient"):
+            self.run_config(classification_config(), "batched", gradient_form="closed_form")
 
     def test_the_sequential_default_is_recorded(self) -> None:
         output = self.run_config(example_config("fed-lasso"), "sequential")
