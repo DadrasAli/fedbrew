@@ -351,6 +351,27 @@ class TheEvaluationIsMeasuredOnTheDeviceTest(ResidentRuns):
         }
         self.assertSameRun(*self.pair(config, ragged))
 
+    def test_a_split_evaluated_again_beside_other_work(self) -> None:
+        """The same sampled clients' val split, alone one round and beside train the next.
+
+        The two rounds hold those clients at other places in their work, so
+        a split's kept plan is one round's alone. Kept by whose split it was
+        and not where, the second round read the first's places: past the end
+        of its work it raised (configs/reference_evaluation.yaml did), and
+        inside it measured other clients' splits in their stead, which
+        recorded other numbers and raised nothing -- the second case here.
+        """
+
+        for rate, test, sample in ((0.5, "sample:3", 3), (0.5, "all", 2)):
+            with self.subTest(participation=rate, sample=sample):
+                config = self._config(
+                    train={"every": 2, "clients": "participating"},
+                    val={"every": 1, "clients": f"sample:{sample}"},
+                    test={"every": 2 if test != "all" else 3, "clients": test},
+                )
+                config["server"] = {**config["server"], "participation_rate": rate}
+                self.assertSameRun(*self.pair(config))
+
     def test_a_shuffled_evaluation_loader(self) -> None:
         config = self._config()
         config["client"].update(eval_shuffle=True, eval_batch_size=2)

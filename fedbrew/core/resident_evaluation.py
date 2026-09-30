@@ -205,7 +205,11 @@ class ResidentEvaluation:
             places = tuple(work[index][0] for index, _ in entries)
             declared = [plans[index].orders[position] for index, position in entries]
             shuffled = any(order is not None and order.shuffle for order in declared)
-            key = (split, places, tuple(position for _, position in entries))
+            # The entries themselves, not only whose and which split they
+            # are: they index this round's work, and a round that evaluates
+            # the same clients' split beside other work holds them at other
+            # indices, where the kept chunks would read another client's plan.
+            key = (split, places, tuple(entries))
             held = self._planned.get(key)
             if held is None or shuffled:
                 held = self._planned[key] = _Planned(

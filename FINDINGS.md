@@ -29,7 +29,7 @@ guard that came with its fix — is carried in the CSV.
 | `summary` | The finding's own heading, verbatim except that markdown backticks are stripped. Not a paraphrase, except for the rows named under *Rows removed with a component* and *Summaries edited before publication*. |
 | `confidence` | The leading token of the finding's confidence note: `certain` (102), `likely` (1), `needs-runtime-check` (1), empty (5). Qualifiers after that token are dropped. |
 | `fix_commit` | Empty on every row. It held the short hashes of the commits that named each finding as fixed; *Why `fix_commit` is empty* below says why it no longer does. |
-| `regression_test` | Space-separated `tests/` paths for the guard that came with the fix. Empty for 38 of the 144 rows. |
+| `regression_test` | Space-separated `tests/` paths for the guard that came with the fix. Empty for 38 of the 145 rows. |
 | `status` | One of three values, counted and defined in *Coverage* below. The file's only record of whether a finding was fixed. |
 
 ## How an id is formed
@@ -96,14 +96,14 @@ census's own 5 open rows carry, and an empty `regression_test` with it.
 
 The census tables in this file — the per-pass split, *Coverage* and its status
 table — describe the **109**, and `tests/test_findings_manifest.py` computes
-them over the census rows alone; the empty-cell counts describe all 144 rows.
+them over the census rows alone; the empty-cell counts describe all 145 rows.
 The two numbers a reader might want:
 
 | | Rows |
 |---|---:|
 | Census (passes 01–13) | 109 |
-| Post-census (`pass: post`) | 35 |
-| **File** | **144** |
+| Post-census (`pass: post`) | 36 |
+| **File** | **145** |
 
 The post-census rows, in full:
 
@@ -144,6 +144,7 @@ The post-census rows, in full:
 | `POST-F33` | `fragile` | `examples/fed-lasso/problem.py` | `FedLassoTask.eval_step` measured the optimality gap through `ProblemSpec.objective_at`, which builds the design `H` and the client targets on the CPU from the spec and multiplies them by the model's iterate. Under `runtime.device: cuda` the iterate is on the GPU, so every evaluation of fed-lasso, fed-lasso-smooth and fed-lasso-l2 raised a device mismatch and no run of them on a GPU could complete. Loud, and CPU runs were unaffected; `fragile`, not `silent-degradation`. Found on 2026-09-27 while timing the batched executor on an A100. Fixed on 2026-09-27: the task builds the design, the targets and the true support's mask once, on its own device, and computes `F(x)` from them term by term in `objective_at`'s order, so a CPU run's gap is the same number as before. The guard makes the spec's `design` and `client_targets` raise and requires an evaluation to run and give `objective_at(x) - F*`, and, where a CUDA device is usable, runs a round of the shipped arm on it. | fixed, guarded by `tests/test_fed_lasso_evaluates_on_its_device.py` |
 | `POST-F34` | `silent-degradation` | `fedbrew/core/batched_executor.py` | `runtime.performance.executor` defaulted to `sequential`, so every run that left it out trained its sampled clients one at a time even where its task and rule could be batched: the batched executor was opt-in although it computes the same numbers to summation order. The default is now `batched` wherever the run can be batched; one that cannot runs sequentially and says why, marked the default, not a fallback, and `executor: sequential` stated stays the reference. Results move in the last digits, within the executor's tolerance. | fixed, guarded by `tests/test_default_executor.py` |
 | `POST-F35` | `silent-degradation` | `fedbrew/tasks/base.py` | `runtime.performance.gradient_form` defaulted to autograd, and only the batched executor could take a task's `closed_form_gradient`, so every linear example trained by default on the slower autograd gradient of a loss whose gradient it states in closed form. The default is now the task's closed form wherever it gives one, under either executor -- the sequential one steps through `closed_form_train_step` -- and `gradient_form: autograd` asks for autograd. Results move in the last digits: each example's default run is the sequential run on autograd within the executor's `1e-12`. | fixed, guarded by `tests/test_closed_form_gradients.py tests/test_default_executor.py` |
+| `POST-F36` | `wrong-results` | `fedbrew/core/resident_evaluation.py` | The resident round kept each split's evaluation plan -- its clients' places in the round's work, and the chunks read from them -- by whose split it was and not by where those clients stood. A round that evaluated the same sampled clients' split beside other work, as `configs/reference_evaluation.yaml`'s `val` and `train` cadences do, read an earlier round's places: past the end of its work it raised (`IndexError`), and inside it measured other clients' splits in their stead and recorded those numbers with no refusal -- 8 of 12 cadence and participation settings probed differed from the per-round path so, on 2026-09-30. On master too, under `executor: batched`; no shipped config ran resident with client evaluation before the batched default. The plan is now kept by its entries. | fixed, guarded by `tests/test_resident_round.py` |
 
 ### Two corrections that are not rows
 
@@ -213,7 +214,7 @@ have cited a path, a guard or a subject nobody could open or interpret. The ids
 are retired: no later row reuses one. This is the one place the file does not
 keep what the audit filed, and every census count here — the per-pass split,
 *Coverage*, the locations — describes the 109; the empty-cell counts describe
-all 144 rows of the file.
+all 145 rows of the file.
 
 `P07-F05`'s fix did not depend on its row. It turned `save_best` on for the MNIST
 baseline, which is still what `configs/mnist/fedavg.yaml` ships and what
@@ -414,13 +415,13 @@ the counts above:
 
 An empty cell means the value could not be recovered, with one exception:
 `fix_commit` is empty by decision. None has been filled with a plausible
-substitute. These counts are over all 144 rows, census and post-census together,
+substitute. These counts are over all 145 rows, census and post-census together,
 because they describe the CSV's columns; *Coverage* above counts the 109 census
 rows alone.
 
 - `confidence` — 5 rows (`P10-F31` … `P10-F35`). Those findings carry no
   confidence note.
-- `fix_commit` — all 144 rows; see *Why `fix_commit` is empty*.
+- `fix_commit` — all 145 rows; see *Why `fix_commit` is empty*.
 - `regression_test` — 38 rows. Five are the open post-census rows
   (`POST-F03`, `POST-F11`, `POST-F15`, `POST-F18`, `POST-F20`), which have no fix and so no guard. The
   other 33 are census rows, and 26 of them had no fix commit to take a guard
