@@ -69,6 +69,7 @@ from fedbrew.clients.batched_update import (
     divide,
     initial_optimizer_state,
     plan_round,
+    update_denominators,
     update_weights,
     values_at,
 )
@@ -1392,13 +1393,10 @@ class _Bucket:
 
         key = ("denominators", like.dim(), like.dtype)
         if key not in self._shaped:
-            totals = []
-            first = 0
-            for count in self.structure:
-                totals.append(self.weights[:, first : first + count].sum(dim=1))
-                first += count
             self._shaped_columns(
-                "denominators", uploaded(torch.stack(totals, dim=1), self.device), like
+                "denominators",
+                uploaded(update_denominators(self.weights, self.structure), self.device),
+                like,
             )
         return self._shaped[key][number - 1]
 

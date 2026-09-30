@@ -362,6 +362,26 @@ def update_weights(lengths: Tensor, structure: tuple[int, ...], program: LocalPr
     return weights
 
 
+def update_denominators(weights: Tensor, structure: tuple[int, ...]) -> Tensor:
+    """Each client's sum of each update's batch weights, ``(clients, updates)``.
+
+    Where every update takes the same number of batches, one sum over the
+    weights seen as ``(clients, updates, count)``; a sum reduces each run of
+    contiguous weights alike, so it is each update's own ``sum`` of its slice.
+    """
+
+    if structure and len(set(structure)) == 1:
+        count = structure[0]
+        covered = weights[:, : count * len(structure)]
+        return covered.reshape(weights.shape[0], len(structure), count).sum(dim=2)
+    totals = []
+    first = 0
+    for count in structure:
+        totals.append(weights[:, first : first + count].sum(dim=1))
+        first += count
+    return torch.stack(totals, dim=1)
+
+
 def plan_round(plans: Sequence[ClientBatchPlan], round_id: int) -> tuple[RoundOrders, RoundOrders]:
     """Every client's training and post-fit batches for the round, planned together.
 

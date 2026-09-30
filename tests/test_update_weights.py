@@ -4,8 +4,10 @@
 ``full`` the rows themselves, under ``uniform`` and ``sum`` one division per
 column -- where it assigned an update's columns a slice at a time; and
 ``_per_client`` keeps the shapes it made of an eager tensor of values, which
-every step of a round cast and reshaped again. Held here against the slice at
-a time and a fresh shaping, bit for bit.
+every step of a round cast and reshaped again; ``update_denominators`` sums
+every update's weights in one reduction where the updates take the same
+number of batches, where it summed an update's slice at a time. Held here
+against the slice at a time and a fresh shaping, bit for bit.
 """
 
 from __future__ import annotations
@@ -15,7 +17,13 @@ import unittest
 import pytest
 import torch
 
-from fedbrew.clients.batched_update import LocalProgram, OptimizerSpec, _per_client, update_weights
+from fedbrew.clients.batched_update import (
+    LocalProgram,
+    OptimizerSpec,
+    _per_client,
+    update_denominators,
+    update_weights,
+)
 
 pytestmark = pytest.mark.fast
 
@@ -62,6 +70,43 @@ class TheWeightsTest(unittest.TestCase):
                             _slice_at_a_time(lengths, structure, program),
                         )
                     )
+
+
+class TheDenominatorsTest(unittest.TestCase):
+    def test_one_reduction_is_each_slice_s_sum(self) -> None:
+        generator = torch.Generator().manual_seed(6)
+        for threads in (1, 4):
+            for dtype in (torch.float64, torch.float32):
+                for clients in (1, 3, 100):
+                    for structure in (
+                        (1,) * 100,
+                        (3,) * 7,
+                        (17,) * 3,
+                        (64,) * 2,
+                        (3, 3, 1),
+                        (2, 5),
+                    ):
+                        steps = sum(structure) + 2
+                        weights = (
+                            torch.rand(clients, steps, generator=generator, dtype=dtype) * 37.3
+                        )
+                        weights[weights < 1.0] = -0.0
+                        with self.subTest(
+                            threads=threads, dtype=dtype, clients=clients, structure=structure
+                        ):
+                            held = torch.get_num_threads()
+                            torch.set_num_threads(threads)
+                            try:
+                                summed = update_denominators(weights, structure)
+                                expected, first = [], 0
+                                for count in structure:
+                                    expected.append(weights[:, first : first + count].sum(dim=1))
+                                    first += count
+                            finally:
+                                torch.set_num_threads(held)
+                            expected_table = torch.stack(expected, dim=1)
+                            self.assertTrue(torch.equal(summed, expected_table))
+                            self.assertTrue(torch.equal(summed.signbit(), expected_table.signbit()))
 
 
 class TheValuesShapesTest(unittest.TestCase):
