@@ -64,14 +64,48 @@ EXACT_COLUMNS = {"round_id", "client_id", "phase", "num_clients", "num_examples"
 #: itself; the coordinates it counts are compared, to tolerance, in the model.
 ORDER_COUNTED = ("exact_zeros",)
 CSVS = ("round_metrics.csv", "client_update_metrics.csv", "client_metrics.csv")
-#: Compared at the scale of the quantities they are a difference of, not their
-#: own. ``constraint_violation`` is ``||x - Proj_Delta(x)||``, two vectors of
-#: norm at most 1 subtracted, and exactly 0 for a feasible iterate, where what
-#: it reports is their rounding: 5.2e-17 against 1.1e-16 for
-#: simplex-lsq-feasible's first round, sequential on autograd against its
-#: closed form (measured 2026-09-30). Its error is measured against
-#: ``max(|b|, 1)``, as SCAFFOLD's ``c_i`` is against its model tensor's scale.
+#: Columns compared at the scale of the quantities they are a difference of,
+#: not their own, as SCAFFOLD's ``c_i`` is against its model tensor's scale.
+#: Each is near 0 where the run is near its answer, and what it then reports
+#: is its terms' rounding, which is no fraction of its own size:
+#:
+#: - ``constraint_violation``, ``||x - Proj_Delta(x)||``: two vectors of norm
+#:   at most 1, so against ``max(|b|, 1)``. 5.2e-17 against 1.1e-16 for
+#:   simplex-lsq-feasible's first round, sequential on autograd against its
+#:   closed form (measured 2026-09-30);
+#: - a gap, ``<name>_optimality_gap`` or ``<name>_feasible_gap``: ``F(x) - F*``
+#:   and the like, against ``max(|b|, |<name>_loss|)``, the objective in the
+#:   same row. fit_feasible_gap 1.1011e-13 against 1.1000e-13 for
+#:   simplex-lsq's FedAvg arm at round 20, and three more gaps within 3e-17;
+#: - a spread, ``<name>_std``: of values the row also gives, against
+#:   ``max(|b|, |<name>_avg|, |<name>_min|, |<name>_max|)``. test_loss_std
+#:   2.1331435150e-07 against 2.1331435151e-07 for fed-lasso-smooth's FedAvg
+#:   arm at round 20, and four more within 1.4e-15 (measured 2026-09-30).
 UNIT_SCALED = ("constraint_violation",)
+DIFFERENCE_SUFFIXES = ("_optimality_gap", "_feasible_gap")
+SPREAD_SUFFIX = "_std"
+
+
+def cell_scale(column: str, row: dict[str, str], value: float) -> float:
+    """What a cell's error is measured against: its own size, or its terms' (``UNIT_SCALED``)."""
+
+    scale = abs(value)
+    if column.endswith(UNIT_SCALED):
+        return max(scale, 1.0)
+    terms: list[str] = []
+    for suffix in DIFFERENCE_SUFFIXES:
+        if column.endswith(suffix):
+            terms = [column[: -len(suffix)] + "_loss"]
+    if column.endswith(SPREAD_SUFFIX):
+        name = column[: -len(SPREAD_SUFFIX)]
+        terms = [f"{name}_avg", f"{name}_min", f"{name}_max"]
+    for term in terms:
+        try:
+            scale = max(scale, abs(float(row[term])))
+        except (KeyError, ValueError):
+            continue
+    return max(scale, 1e-300)
+
 
 _generated: dict[str, Path] = {}
 _root = tempfile.TemporaryDirectory()
@@ -193,12 +227,9 @@ class ExecutorRuns(unittest.TestCase):
                 where = f"{batched.name} row {number} {column}: {row_b[column]} vs {value_s}"
                 self.assertFalse(exact or column in EXACT_COLUMNS, where)
                 a, b = float(row_b[column]), float(value_s)
-                error = (
-                    abs(a - b) / max(abs(b), 1.0)
-                    if column.endswith(UNIT_SCALED)
-                    else _relative(a, b)
-                )
-                self.assertLessEqual(error, tolerance, where)
+                if math.isnan(a) and math.isnan(b):
+                    continue
+                self.assertLessEqual(abs(a - b) / cell_scale(column, row_s, b), tolerance, where)
 
     def _compare_checkpoint(
         self, batched: Path, sequential: Path, exact: bool, tolerance: float

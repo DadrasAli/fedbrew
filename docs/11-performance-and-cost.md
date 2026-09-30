@@ -391,7 +391,12 @@ test holds the batched paths to it on autograd.
 both executors and compares every round's model, every persistent client
 state and every non-timing cell: within `1e-12` relative in float64 (a tensor
 against its own largest element, since an element whose exact value is 0
-holds rounding residue), the identity and count columns equal, and bit for bit
+holds rounding residue; and a cell that is a difference of the row's other
+quantities against their scale -- `constraint_violation` against 1, a
+`_optimality_gap` or `_feasible_gap` against the row's `_loss`, a `_std`
+against the row's `_avg`, `_min` and `_max` -- since near the answer it
+holds its terms' rounding, `cell_scale` in the test), the identity and count
+columns equal, and bit for bit
 when every chunk holds one client or a round samples one. The classification
 task is compared at that bound in float64 -- the shipped task with its rows
 and model widened -- and as it ships, in float32, at `1e-4`: float32 rounds at
