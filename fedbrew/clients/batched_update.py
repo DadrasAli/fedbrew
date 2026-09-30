@@ -336,6 +336,16 @@ def update_weights(lengths: Tensor, structure: tuple[int, ...], program: LocalPr
     weights = torch.zeros_like(rows)
     if program.combine == "batch":
         return weights
+    covered = sum(structure)
+    if program.combine == "full" and covered == rows.shape[1]:
+        # Every batch is some update's, and its weight is its rows: the rows.
+        return rows
+    if program.weighting in ("uniform", "sum") and program.combine != "full":
+        # 1/count per column of its update's, or 1: the same division, or none.
+        counts = torch.tensor(structure, dtype=torch.float64)
+        per_step = counts.repeat_interleave(torch.tensor(structure))
+        weights[:, :covered] = 1.0 / per_step if program.weighting == "uniform" else 1.0
+        return weights
     start = 0
     for count in structure:
         part = rows[:, start : start + count]
@@ -592,8 +602,31 @@ def _per_client(value: Tensor, like: Tensor) -> Tensor:
     (``_run_summed``'s unclipped step) it is one value per row of ``like``.
     """
 
-    value = value.to(like.dtype)
-    return value.reshape(tuple(value.shape) + (1,) * (like.dim() - value.dim()))
+    key = (like.dim(), like.dtype)
+    held = _held_shapes(value)
+    if held is not None and key in held:
+        return held[key]
+    shaped = value.to(like.dtype)
+    shaped = shaped.reshape(tuple(shaped.shape) + (1,) * (like.dim() - shaped.dim()))
+    if held is not None:
+        held[key] = shaped
+    return shaped
+
+
+def _held_shapes(value: Tensor) -> dict[Any, Tensor] | None:
+    """The shapes ``_per_client`` made of an eager tensor of values, kept on it; None if not kept.
+
+    A program's values are the same tensors every step of a round, and each
+    step cast and reshaped them again. Not under vmap or compilation, whose
+    tensors are the call's own.
+    """
+
+    if torch.compiler.is_compiling() or torch._C._functorch.is_functorch_wrapped_tensor(value):
+        return None
+    held = value.__dict__.get("_per_client_shapes")
+    if held is None:
+        held = value.__dict__["_per_client_shapes"] = {}
+    return held
 
 
 def initial_optimizer_state(spec: OptimizerSpec, params: Mapping[str, Tensor]) -> dict[str, Any]:
