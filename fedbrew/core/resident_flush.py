@@ -1,22 +1,24 @@
-"""The resident round's flush: one copy to the host, and the writes behind the loop.
+"""A run's flush: one copy to the host, and the writes behind the loop.
 
 A resident round (``fedbrew/core/resident.py``) leaves everything it
-computes on the device until a flush. This module holds what the flush does
-with it without stopping the device:
+computes on the device until a flush, and every run, resident or per round
+(``run_fl_loop``), writes its rounds behind the loop. This module holds what
+the flush does without stopping the training:
 
 - :class:`HostCopy` brings a window's values and models to the host in one
   wait: the copies are queued on a stream of their own behind the window's
   last round, into pinned memory, and the host waits for them alone -- not
   for the round the loop has already queued behind the window;
-- :class:`DeferredStaged` takes the checkpoints a round stages, as
-  ``StagedCheckpoints`` does, but holds their payloads rather than writing
-  them;
-- :class:`FlushWriter` writes a flush on a thread of its own, in the order the
-  per-round loop writes it: the staged checkpoints to their temporary files,
-  the CSV rows, run.json, and only then the checkpoints' commit (POST-F24),
-  so a checkpoint is never visible ahead of the history it continues. The
-  loop hands it one flush at a time and waits for it before recording the
-  next, so a kill loses at most the rounds since the last flush it finished;
+- :class:`WriterStaged` takes the checkpoints a round stages, as
+  ``StagedCheckpoints`` does, and has the writer write each to its temporary
+  file, in the order staged, while the loop goes on;
+- :class:`FlushWriter` is that one thread. It runs what it is handed in
+  order: each round's staged checkpoints, then at a flush the CSV rows,
+  run.json, and only then the checkpoints' commit (POST-F24), so a checkpoint
+  is never visible ahead of the history it continues. A flush writes the
+  run's records as they were when it was handed over (:func:`frozen_state`),
+  and the loop hands over a flush only once the last one is written, so a
+  kill loses at most the rounds since the last flush it finished;
 - :class:`RoundClock` times a round's phases on the device's own timeline,
   with events read back at the flush, so timing a round adds no wait.
 """
@@ -100,28 +102,52 @@ class RoundClock:
         return float(stop - start)
 
 
-class DeferredStaged:
-    """``StagedCheckpoints`` whose payloads are held, and written by the flush's writer.
+class WriterStaged:
+    """``StagedCheckpoints`` whose temporary files the writer writes, each as it is staged.
 
-    A path staged again replaces the earlier payload and keeps its place, as
-    staging it again rewrites the one temporary file.
+    The writer stages them into one ``StagedCheckpoints``, in the order
+    staged, so a path staged again rewrites its one temporary file and keeps
+    its place; the flush commits it (``written``). A payload is held only
+    until the writer has written it.
     """
 
-    def __init__(self) -> None:
-        self.pending: dict[Path, dict[str, Any]] = {}
-
-    def stage(self, payload: Mapping[str, Any], path: Path) -> None:
-        self.pending[Path(path)] = dict(payload)
-
-    def written(self) -> Any:
-        """The payloads written to their temporary files, as a ``StagedCheckpoints`` to commit."""
-
+    def __init__(self, writer: FlushWriter) -> None:
         from fedbrew.core.checkpointing import StagedCheckpoints
 
-        staged = StagedCheckpoints()
-        for path, payload in self.pending.items():
-            staged.stage(payload, path)
-        return staged
+        self.writer = writer
+        self.staged = StagedCheckpoints()
+
+    def stage(self, payload: Mapping[str, Any], path: Path) -> None:
+        payload = dict(payload)
+        self.writer.submit(lambda: self.staged.stage(payload, Path(path)))
+
+    def written(self) -> Any:
+        """The ``StagedCheckpoints`` to commit, once the writer has reached the flush."""
+
+        return self.staged
+
+
+def frozen_state(state: Any) -> Any:
+    """``state`` as a flush writes it: its histories and their summaries as they are now.
+
+    The loop goes on appending to them while the writer writes; the writer
+    reads these copies, so what a flush writes is what the run held when it
+    was handed over.
+    """
+
+    import copy
+
+    frozen = copy.copy(state)
+    for name in ("metrics_history", "client_metrics_history", "client_update_metrics_history"):
+        history = getattr(state, name)
+        if not hasattr(history, "summary"):
+            setattr(frozen, name, list(history))
+            continue
+        copied = type(history).__new__(type(history))
+        list.extend(copied, history)
+        copied.summary = copy.deepcopy(history.summary)
+        setattr(frozen, name, copied)
+    return frozen
 
 
 class FlushWriter:
@@ -133,7 +159,7 @@ class FlushWriter:
     def __init__(self) -> None:
         self._jobs: queue.Queue[Callable[[], None] | None] = queue.Queue()
         self._error: BaseException | None = None
-        self._thread = threading.Thread(target=self._run, name="resident-round-writer", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="flush-writer", daemon=True)
         self._thread.start()
 
     def submit(self, job: Callable[[], None]) -> None:

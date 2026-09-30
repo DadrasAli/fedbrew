@@ -206,14 +206,35 @@ class RoundMetricsFlushTests(unittest.TestCase):
             output_dir = Path(directory)
             seen: list[list[int]] = []
 
-            def observe(record: MetricRecord) -> None:
-                # on_round_end fires after the flush, so the CSV must already
-                # name this round -- that is the whole point of flushing.
+            def observe(state: Any) -> None:
+                # run.json is written after the flush's CSV rows, so the CSV
+                # must already name this round -- that is the whole point of
+                # flushing. The flush runs behind the loop, on the writer.
                 seen.append(_round_ids(output_dir))
 
-            _run(output_dir, global_rounds=4, on_round_end=observe)
+            _run(output_dir, global_rounds=4, on_round_flush=observe)
 
         self.assertEqual(seen, [[1], [1, 2], [1, 2, 3], [1, 2, 3, 4]])
+
+    def test_the_loop_is_at_most_one_flush_ahead_of_the_disk(self) -> None:
+        """At a round's end its flush may still be writing; the one before it is on disk."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            seen: list[tuple[int, list[int]]] = []
+
+            def observe(record: MetricRecord) -> None:
+                written = (output_dir / "round_metrics.csv").is_file()
+                seen.append((record.round_id, _round_ids(output_dir) if written else []))
+
+            _run(output_dir, global_rounds=4, on_round_end=observe)
+            final = _round_ids(output_dir)
+
+        for round_id, on_disk in seen:
+            with self.subTest(round=round_id):
+                self.assertIn(on_disk, (list(range(1, round_id)), list(range(1, round_id + 1))))
+        # The run's end waits for every write.
+        self.assertEqual(final, [1, 2, 3, 4])
 
     def test_flush_leaves_no_temp_file_behind(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -419,7 +440,7 @@ class FlushCadenceTests(unittest.TestCase):
             seen: list[list[int]] = []
             path = output_dir / "client_metrics.csv"
 
-            def observe(record: MetricRecord) -> None:
+            def observe(state: Any) -> None:
                 if not path.is_file():
                     seen.append([])
                     return
@@ -439,7 +460,7 @@ class FlushCadenceTests(unittest.TestCase):
                     "save_every_round": False,
                     "keep_last": None,
                 },
-                on_round_end=observe,
+                on_round_flush=observe,
             )
 
         # Checkpoints land on rounds 2 and 4 only, and save_last is off, yet
@@ -466,7 +487,7 @@ class FlushCadenceTests(unittest.TestCase):
                     "save_every_round": False,
                     "keep_last": None,
                 },
-                on_round_end=lambda record: seen.append(_round_ids(output_dir)),
+                on_round_flush=lambda state: seen.append(_round_ids(output_dir)),
             )
 
         self.assertEqual(seen, [[1], [1, 2], [1, 2, 3], [1, 2, 3, 4]])

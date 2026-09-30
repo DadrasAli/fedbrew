@@ -74,7 +74,7 @@ from fedbrew.core.batched_executor import (
 from fedbrew.core.federated_state import model_state_size
 from fedbrew.core.metrics import filter_metrics
 from fedbrew.core.protocol import FitRequest, RoundInfo
-from fedbrew.core.resident_flush import DeferredStaged, FlushWriter, HostCopy, RoundClock
+from fedbrew.core.resident_flush import FlushWriter, HostCopy, RoundClock, WriterStaged
 from fedbrew.core.resident_graphs import RoundGraphs
 from fedbrew.core.round_planner import PlannedRound
 from fedbrew.core.stacked_results import StackedFitResults
@@ -1573,7 +1573,7 @@ class _Loop:
         self.long_lived = long_lived
         self.writer = FlushWriter()
         #: The checkpoints staged since the last flush, and whether rows wait.
-        self.staged: DeferredStaged | None = None
+        self.staged: WriterStaged | None = None
         self.unflushed = False
         #: The server's model before the next round to record, on the host.
         self.host_model: dict[str, Tensor] = dict(context.server._model_state)
@@ -1621,9 +1621,6 @@ class _Loop:
 
         if not window:
             return False
-        # The last flush's rows are on disk before any of this window's are
-        # recorded: the writer reads the histories this appends to.
-        self.writer.wait()
         for device_round, (values, host_mean) in zip(
             window, self.rounds.read_back(window), strict=True
         ):
@@ -1769,7 +1766,7 @@ class _Loop:
             round_id,
             context.checkpoint_policy,
             context.checkpoint_tracker,
-            self.staged or DeferredStaged(),
+            self.staged or WriterStaged(self.writer),
             write_latest=flush_due,
         )
         record = {
@@ -1801,24 +1798,20 @@ class _Loop:
     def flush(self) -> None:
         """Hand the rounds since the last flush to the writer: CSVs, run.json, then checkpoints."""
 
-        from fedbrew.core.loop import _flush_rounds
+        from fedbrew.core.loop import _submit_flush
 
         context, staged = self.context, self.staged
         self.staged = None
-
-        def write() -> None:
-            _flush_rounds(
-                True,
-                context.state,
-                context.output_dir,
-                context.per_client_csv,
-                context.csv_cursor,
-                context.on_round_flush,
-                None if staged is None else staged.written(),
-                context.checkpoint_policy,
-            )
-
-        self.writer.submit(write)
+        _submit_flush(
+            self.writer,
+            context.state,
+            context.output_dir,
+            context.per_client_csv,
+            context.csv_cursor,
+            context.on_round_flush,
+            staged,
+            context.checkpoint_policy,
+        )
 
 
 def _split_values(

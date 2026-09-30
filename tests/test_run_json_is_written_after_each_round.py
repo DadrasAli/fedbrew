@@ -1,13 +1,14 @@
 """When `run.json` exists: after the first completed round, and not before.
 
-The runner hands the loop a writer (`runner._run_json_writer`) that the loop
-calls once per completed round, after that round's CSV rows and before its
-checkpoints commit; `runner.run` writes the final record when the loop
-returns. There is no initial `run.json`: nothing is written before round 1,
-so a run that fails while building its components or inside its first round
-leaves none. Mid-run writes say `status: "running"` and the round they reach;
-the final write replaces them. Chapter 09 §2 says so; the audit (03-final-
-release-gate, B03) found the paper promising a `run.json` before round 1.
+The runner hands the loop a writer (`runner._run_json_writer`) that the loop's
+flush calls once per completed round, on the writer thread, after that
+round's CSV rows and before its checkpoints commit; `runner.run` writes the
+final record when the loop returns. There is no initial `run.json`: nothing
+is written before round 1, so a run that fails while building its components
+or inside its first round leaves none. Mid-run writes say `status: "running"`
+and the round they reach; the final write replaces them. Chapter 09 §2 says
+so; the audit (03-final-release-gate, B03) found the paper promising a
+`run.json` before round 1.
 """
 
 from __future__ import annotations
@@ -49,25 +50,25 @@ class RunJsonIsWrittenAfterEachCompletedRoundTest(unittest.TestCase):
             at_first_fit: list[bool] = []
             after_round: list[dict[str, Any] | None] = []
             fit = TorchSGDClient.fit
-            reporter = runner._round_progress_reporter
+            json_writer = runner._run_json_writer
 
             def recording_fit(self: TorchSGDClient, request: Any) -> Any:
                 if not at_first_fit:
                     at_first_fit.append(run_json.exists())
                 return fit(self, request)
 
-            def recording_reporter(*args: Any, **kwargs: Any) -> Any:
-                report = reporter(*args, **kwargs)
+            def recording_json_writer(*args: Any, **kwargs: Any) -> Any:
+                write = json_writer(*args, **kwargs)
 
-                def after(record: Any) -> None:
+                def written(state: Any) -> None:
+                    write(state)
                     after_round.append(_read(run_json))
-                    report(record)
 
-                return after
+                return written
 
             with (
                 mock.patch.object(TorchSGDClient, "fit", recording_fit),
-                mock.patch.object(runner, "_round_progress_reporter", recording_reporter),
+                mock.patch.object(runner, "_run_json_writer", recording_json_writer),
                 redirect_stdout(StringIO()),
             ):
                 runner.run(config, runner.parse_args(["--quiet"]))

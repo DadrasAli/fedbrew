@@ -681,7 +681,7 @@ column's position — `_ROUND_TIMING_FIELDS` (`fedbrew/core/artifacts.py`).
 | `aggregate_sec` | the server's own aggregation — `fit_phase_seconds - fit_seconds`, floored at 0 | `RoundTimings.aggregate` |
 | `client_eval_sec` | the per-client evaluation pass | `RoundTimings.client_eval` |
 | `global_eval_sec` | the central-test pass | `RoundTimings.global_eval` |
-| `checkpoint_sec` | building and writing checkpoints | `RoundTimings.checkpoint` |
+| `checkpoint_sec` | building the checkpoints' snapshot; the writer writes them behind the loop | `RoundTimings.checkpoint` |
 
 All are `time.perf_counter()` deltas, rounded to 4 decimal places on write
 (`save_round_metrics_csv`, `fedbrew/core/artifacts.py`). The server consumes fit

@@ -57,8 +57,8 @@ separately, and those timings are columns in `round_metrics.csv` — chapter 08 
 | 3 | Fold each result into the global model as it arrives; skipped when the round selected no client, which leaves the model and server state unchanged | the `Aggregator`: `server.aggregate_stream` | `aggregate_sec` |
 | 4 | Evaluate on each due client's own splits | the `Evaluator`: `client.evaluate` per client | `client_eval_sec` |
 | 5 | Evaluate on the server's pooled test shard | the `Evaluator`: `server.evaluate_global` | `global_eval_sec` |
-| 6 | Write checkpoints if due, staged: complete on disk as `.tmp`, not yet visible | `checkpointing` | `checkpoint_sec` |
-| 7 | Flush artifacts: the CSV rows, then `run.json` | `artifacts.flush_round_artifacts`, the runner's writer | — |
+| 6 | Stage checkpoints if due: the snapshot taken, its `.tmp` written by the writer thread behind the loop, not yet visible | `checkpointing`, `resident_flush.FlushWriter` | `checkpoint_sec` |
+| 7 | Flush artifacts on the writer thread, of the records as they are at the hand-over: the CSV rows, then `run.json` | `artifacts.flush_round_artifacts`, the runner's writer | — |
 | 8 | Commit the staged checkpoints, then prune to `keep_last` | `loop._commit_checkpoints` | — |
 
 **How phases 2–5 are run is a seam** (`fedbrew/core/execution.py`). An

@@ -60,8 +60,16 @@ round a divergence detector stops the run on. Between flushes the rows wait in
 memory, and a numbered or `best.pt` checkpoint is staged as `.tmp` on the round
 it belongs to and committed with the next flush, after the rows and `run.json`,
 so the rule below holds at every flush: no checkpoint is visible for a round
-the CSV does not hold. A kill loses at most the rounds since the last flush,
-and a resume recomputes them. An `fsync` on `/proj`'s NFS costs ~7 ms against
+the CSV does not hold. Every write runs on one thread behind the loop
+(`FlushWriter`, `fedbrew/core/resident_flush.py`), for every executor, in the
+order this section gives: each round's staged checkpoints as the round stages
+them, and at a flush the CSV rows, `run.json` and the commit, of the run's
+records as they were when the flush was handed over. The loop hands over a
+flush only once the last one is written, so a kill loses at most the rounds
+since the last flush the writer finished, and a resume recomputes them; the
+run's end waits for every write. `tests/test_a_kill_mid_write_resumes.py`
+kills a run inside each of those writes, on every path, and resumes it to the
+uninterrupted run bit for bit. An `fsync` on `/proj`'s NFS costs ~7 ms against
 ~0.7 ms on `/tmp`, and a round does five, which is what N buys back.
 
 **`run.json` is first written after the first completed round.** There is no
@@ -92,9 +100,10 @@ loop used to write the checkpoints first, and late in a long run the CSV
 rewrite was most of each round, so a time limit's kill landed between the two
 almost every time: on 2026-09-20 all ten SCAFFOLD points a 12 h limit stopped
 had `latest.pt` one round ahead of their CSV. The checkpoints are now staged in
-place — written, flushed and `fsync`ed as `.tmp`, so `checkpoint_sec` still
-times the write — and `StagedCheckpoints.commit` renames them into place after
-`run.json` (`POST-F24`). A kill before the commit leaves the previous round's
+place — written, flushed and `fsync`ed as `.tmp` by the writer, while
+`checkpoint_sec` times the snapshot the loop hands it — and
+`StagedCheckpoints.commit` renames them into place after `run.json`
+(`POST-F24`). A kill before the commit leaves the previous round's
 checkpoint beside a history that reaches it or one row past it; a resume drops
 the rows after the checkpoint's round and recomputes them.
 
@@ -635,7 +644,8 @@ python -m pytest tests/test_run_provenance.py \
 | `tests/test_runs_index_json_validity.py` | Every index line is valid JSON. |
 | `tests/test_run_json_resume_accounting.py` | `attempts`, `resumed`, `first_round` across attempts. |
 | `tests/test_run_json_is_written_after_each_round.py` | §2: no `run.json` exists before round 1 or after a run that fails inside it; it is rewritten with `status: "running"` after each completed round and replaced by the final record at the end. |
-| `tests/test_resume_metrics_continuity.py` | A resumed run's history is continuous. |
+| `tests/test_resume_metrics_continuity.py` | A resumed run's history is continuous; the CSVs hold every flushed round as the flush writes run.json, and at a round's end the loop is at most one flush ahead of the disk. |
+| `tests/test_a_kill_mid_write_resumes.py` | §2: a SIGKILL inside the per-client CSV write, inside a checkpoint's temporary file and just before the commit -- on the sequential, the batched per-round and the resident path -- leaves round 2's checkpoint, and `--resume-latest` ends bit-identical to the uninterrupted run. |
 | `tests/test_resume_rng_state.py` | RNG position is restored. |
 | `tests/test_client_csv_append.py` | The per-client CSVs append rather than rewrite. |
 | `tests/test_flush_cadence.py` | §2: `runtime.flush_every` changes no number; the CSVs are at or past every visible checkpoint after each flush and between them; a SIGKILL anywhere, then `--resume-latest`, ends bit-identical to the uninterrupted run. |

@@ -62,6 +62,7 @@ from fedbrew.core.protocol import (
     RoundInfo,
 )
 from fedbrew.core.refusal import RunRefused
+from fedbrew.core.resident_flush import FlushWriter, WriterStaged
 from fedbrew.core.runtime_setup import capture_rng_state, restore_rng_state
 from fedbrew.core.stacked_results import StackedFitResults
 from fedbrew.core.state import (
@@ -224,7 +225,7 @@ def run_fl_loop(
     # puts the rest back under a correct header.
     csv_cursor: dict[str, Any] = {}
     # Checkpoints written in full since the last flush and not yet visible.
-    staged: StagedCheckpoints | None = None
+    staged: Any = None
     unflushed = False
 
     client_infos = _build_client_infos(dataset)
@@ -289,6 +290,10 @@ def run_fl_loop(
     # for the whole run, so it is set aside from the collector once the first
     # round has built it (_LongLivedObjects).
     long_lived = _LongLivedObjects()
+    # Every write -- each round's staged checkpoints, and at a flush the CSV
+    # rows, run.json and the commit -- runs on one thread behind the loop, in
+    # the order written here (fedbrew/core/resident_flush.py).
+    writer = FlushWriter()
     try:
         for round_id in range(start_round, global_rounds + 1):
             round_started = time.perf_counter()
@@ -412,8 +417,9 @@ def run_fl_loop(
             verdict = monitor.update(round_id, metrics)
             flush_due = _flush_due(round_id, global_rounds, flush_every, verdict)
             checkpoint_started = time.perf_counter()
-            # Written now, so checkpoint_sec times the write; visible only at the
-            # commit below, after the CSV rows and run.json. POST-F24.
+            # Staged now -- the snapshot taken, its temporary file written by the
+            # writer -- so checkpoint_sec times the snapshot; visible only at
+            # the flush's commit, after the CSV rows and run.json. POST-F24.
             staged = _update_checkpoints(
                 _checkpoint_payload_builder(server, client, server_payload, metrics, round_id),
                 metrics,
@@ -421,7 +427,7 @@ def run_fl_loop(
                 round_id,
                 checkpoint_policy,
                 checkpoint_tracker,
-                staged,
+                staged or WriterStaged(writer),
                 write_latest=flush_due,
             )
             checkpoint_seconds = time.perf_counter() - checkpoint_started
@@ -457,16 +463,18 @@ def run_fl_loop(
                 timings=timings,
             )
             state.metrics_history.append(metric_record)
-            staged = _flush_rounds(
-                flush_due,
-                state,
-                output_dir,
-                reporting.per_client_csv,
-                csv_cursor,
-                on_round_flush,
-                staged,
-                checkpoint_policy,
-            )
+            if flush_due:
+                _submit_flush(
+                    writer,
+                    state,
+                    output_dir,
+                    reporting.per_client_csv,
+                    csv_cursor,
+                    on_round_flush,
+                    staged,
+                    checkpoint_policy,
+                )
+                staged = None
             unflushed = not flush_due
             if round_id == start_round:
                 long_lived.freeze()
@@ -488,16 +496,19 @@ def run_fl_loop(
         # Only an aggregation refusal leaves rounds unflushed: every other way out
         # of the loop ends on a flush round. latest.pt stays at the last flush, the
         # refused round's state being neither complete nor healthy.
-        _flush_rounds(
-            unflushed,
-            state,
-            output_dir,
-            reporting.per_client_csv,
-            csv_cursor,
-            on_round_flush,
-            staged,
-            checkpoint_policy,
-        )
+        if unflushed:
+            _submit_flush(
+                writer,
+                state,
+                output_dir,
+                reporting.per_client_csv,
+                csv_cursor,
+                on_round_flush,
+                staged,
+                checkpoint_policy,
+            )
+        # The run's end waits for every write.
+        writer.wait()
 
         if divergence is not None and divergence.active and not monitor.observed:
             # Every detector reads one metric name; a name nothing emits silences
@@ -517,6 +528,9 @@ def run_fl_loop(
         )
         return state
     finally:
+        # A run stopped by an exception still finishes what the writer was
+        # handed, as a kill leaves what had been committed.
+        writer.close()
         long_lived.release()
 
 
@@ -1327,6 +1341,44 @@ def _flush_rounds(
         on_round_flush(state)
     _commit_checkpoints(staged, output_dir, checkpoint_policy)
     return None
+
+
+def _submit_flush(
+    writer: Any,
+    state: ExperimentState,
+    output_dir: str | Path | None,
+    per_client_csv: bool,
+    csv_cursor: dict[str, Any],
+    on_round_flush: Callable[[ExperimentState], None] | None,
+    staged: Any,
+    checkpoint_policy: Mapping[str, Any],
+) -> None:
+    """``_flush_rounds`` of every round so far, on the writer thread, behind the loop.
+
+    The writer writes the records as they are now (``frozen_state``), after
+    the checkpoints staged before it and in ``_flush_rounds``' order: the CSV
+    rows, run.json, then the commit. The last flush is waited for first, so
+    one is in flight at a time and a kill loses at most the rounds since the
+    last one the writer finished.
+    """
+
+    from fedbrew.core.resident_flush import frozen_state
+
+    writer.wait()
+    frozen = frozen_state(state)
+    written = None if staged is None else staged.written()
+    writer.submit(
+        lambda: _flush_rounds(
+            True,
+            frozen,
+            output_dir,
+            per_client_csv,
+            csv_cursor,
+            on_round_flush,
+            written,
+            checkpoint_policy,
+        )
+    )
 
 
 def _require_positive_global_rounds(global_rounds: int) -> None:

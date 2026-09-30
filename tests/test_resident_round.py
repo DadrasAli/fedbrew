@@ -510,19 +510,36 @@ def _stopping(round_id: int) -> Any:
     return reporter
 
 
+class TheWriterStagesCheckpointsTest(unittest.TestCase):
+    """Each staged checkpoint is written to its temporary file by the writer, in order."""
+
+    def test_a_path_staged_again_keeps_its_place_and_takes_the_later_payload(self) -> None:
+        import tempfile
+
+        from fedbrew.core.checkpointing import load_checkpoint
+        from fedbrew.core.resident_flush import FlushWriter, WriterStaged
+
+        writer = FlushWriter()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                staged = WriterStaged(writer)
+                staged.stage({"round_id": 1}, root / "best.pt")
+                staged.stage({"round_id": 1}, root / "latest.pt")
+                staged.stage({"round_id": 2}, root / "best.pt")
+                writer.wait()
+                names = sorted(p.name for p in root.iterdir())
+                self.assertEqual(names, ["best.pt.tmp", "latest.pt.tmp"])
+                staged.written().commit()
+                self.assertEqual(sorted(p.name for p in root.iterdir()), ["best.pt", "latest.pt"])
+                self.assertEqual(load_checkpoint(root / "best.pt")["round_id"], 2)
+        finally:
+            writer.close()
+
+
 @pytest.mark.fast
 class TheFlushsWritesTest(unittest.TestCase):
     """The writer runs a flush's writes in order, and hands back what one raised."""
-
-    def test_a_path_staged_again_keeps_its_place_and_takes_the_later_payload(self) -> None:
-        from fedbrew.core.resident_flush import DeferredStaged
-
-        staged = DeferredStaged()
-        staged.stage({"round_id": 1}, Path("a/best.pt"))
-        staged.stage({"round_id": 1}, Path("a/latest.pt"))
-        staged.stage({"round_id": 2}, Path("a/best.pt"))
-        self.assertEqual(list(staged.pending), [Path("a/best.pt"), Path("a/latest.pt")])
-        self.assertEqual(staged.pending[Path("a/best.pt")], {"round_id": 2})
 
     def test_writes_run_in_order_and_an_error_reaches_the_loop(self) -> None:
         from fedbrew.core.resident_flush import FlushWriter

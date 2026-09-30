@@ -19,7 +19,7 @@ Chapter 08 §8 gives the exact definitions.
 | `aggregate_sec` | the server's own aggregation |
 | `client_eval_sec` | per-client evaluation |
 | `global_eval_sec` | the central test pass |
-| `checkpoint_sec` | building and writing checkpoints |
+| `checkpoint_sec` | building the checkpoints' snapshot; the writer writes them behind the loop |
 | `duration_sec` | the whole round |
 
 Read these before tuning anything. The distribution is not what most people
@@ -228,8 +228,10 @@ real `DataLoader`. Chapter 10.
 Both default to 1, every round, and neither changes a number.
 `runtime.flush_every: N` writes the CSV rows, `run.json` and `latest.pt`, each
 with one `fsync`, every N rounds instead of every round; an `fsync` on `/proj`'s
-NFS costs ~7 ms against ~0.7 on `/tmp`, and a round does five. A kill loses at
-most the rounds since the last flush. Chapter 09 §2.
+NFS costs ~7 ms against ~0.7 on `/tmp`, and a round does five. Every write
+runs on one writer thread behind the loop, so the next round trains while a
+flush is written. A kill loses at most the rounds since the last flush the
+writer finished. Chapter 09 §2.
 `evaluation.fit.every: n` runs the post-fit pass behind the `fit_` metrics on
 scheduled rounds only; it was 18% of an MNIST MLP round at 1000 clients. The
 divergence monitor watching `fit_loss` then reacts up to *n* − 1 rounds later.
@@ -639,11 +641,11 @@ computes, bit for bit on the same device:
   work while the host records; then the window's values and models come to
   the host in one copy, made on a stream of its own behind the window's last
   round, and the host waits for that copy alone -- one wait per flush. The
-  flush's writes run on a thread of their own, in the per-round loop's order:
-  the staged checkpoints to their temporary files, the CSV rows, run.json,
-  and only then the checkpoints' commit (POST-F24). The loop waits for them
-  before recording the next window, so a kill loses at most the rounds since
-  the last flush the writer finished, and a resume from that flush's
+  flush's writes run on the writer thread every run's loop writes through,
+  in its order: the staged checkpoints to their temporary files, the CSV
+  rows, run.json, and only then the checkpoints' commit (POST-F24). The loop
+  hands over a flush only once the last one is written, so a kill loses at
+  most the rounds since the last flush the writer finished, and a resume from that flush's
   `latest.pt` continues the run bit for bit. A round's timings are its
   phases on the device's own timeline, from events read back at the flush.
 - **CUDA graphs** (`cuda_graphs: on`, `fedbrew/core/resident_graphs.py`). A
