@@ -1390,12 +1390,13 @@ def _submit_flush(
     the checkpoints staged before it and in ``_flush_rounds``' order: the CSV
     rows, run.json, then the commit. The last flush is waited for first, so
     one is in flight at a time and a kill loses at most the rounds since the
-    last one the writer finished.
+    last one the writer finished; the checkpoints staged since, which the
+    writer writes in order ahead of this flush, are not waited for.
     """
 
     from fedbrew.core.resident_flush import frozen_state
 
-    writer.wait()
+    writer.wait_flush()
     frozen = frozen_state(state)
     written = None if staged is None else staged.written()
     writer.submit(
@@ -1408,7 +1409,8 @@ def _submit_flush(
             on_round_flush,
             written,
             checkpoint_policy,
-        )
+        ),
+        flush=True,
     )
 
 

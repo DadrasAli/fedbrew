@@ -586,6 +586,38 @@ class TheFlushsWritesTest(unittest.TestCase):
         finally:
             writer.close()
 
+    def test_a_flush_is_waited_for_and_not_what_was_staged_after_it(self) -> None:
+        """``wait_flush``: the last flush and what came before it, not the writes queued after."""
+
+        import threading
+
+        from fedbrew.core.resident_flush import FlushWriter
+
+        writer = FlushWriter()
+        release = threading.Event()
+        done: list[str] = []
+        try:
+            writer.submit(lambda: done.append("staged before"))
+            writer.submit(lambda: done.append("flush"), flush=True)
+            writer.submit(lambda: (release.wait(10), done.append("staged after")))
+            writer.wait_flush()
+            self.assertEqual(done, ["staged before", "flush"])
+            release.set()
+            writer.wait()
+            self.assertEqual(done, ["staged before", "flush", "staged after"])
+
+            def fails() -> None:
+                raise OSError("disk full")
+
+            writer.submit(fails)
+            writer.submit(lambda: done.append("skipped"), flush=True)
+            with self.assertRaisesRegex(OSError, "disk full"):
+                writer.wait_flush()
+            self.assertNotIn("skipped", done)
+        finally:
+            release.set()
+            writer.close()
+
 
 def _cuda_usable() -> bool:
     """A CUDA device this process can allocate on."""

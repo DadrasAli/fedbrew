@@ -153,25 +153,41 @@ def frozen_state(state: Any) -> Any:
 
 
 class FlushWriter:
-    """One thread that runs the flushes it is handed, in order, one at a time.
+    """One thread that runs the jobs it is handed, in order, one at a time.
 
-    A flush that raises is raised again in the loop, at its next ``wait``.
+    A job that raises is raised again in the loop, at its next ``submit`` or
+    wait. A flush is marked as one (``submit(..., flush=True)``), so the loop
+    can wait for the last flush alone (``wait_flush``) and not for the
+    checkpoints staged after it, which the writer writes while the loop goes on.
     """
 
     def __init__(self) -> None:
-        self._jobs: queue.Queue[Callable[[], None] | None] = queue.Queue()
+        self._jobs: queue.Queue[tuple[Callable[[], None], threading.Event | None] | None] = (
+            queue.Queue()
+        )
         self._error: BaseException | None = None
+        self._last_flush: threading.Event | None = None
         self._thread = threading.Thread(target=self._run, name="flush-writer", daemon=True)
         self._thread.start()
 
-    def submit(self, job: Callable[[], None]) -> None:
+    def submit(self, job: Callable[[], None], flush: bool = False) -> None:
         self._raise()
-        self._jobs.put(job)
+        done = threading.Event() if flush else None
+        if done is not None:
+            self._last_flush = done
+        self._jobs.put((job, done))
 
     def wait(self) -> None:
-        """Until every flush handed over has been written."""
+        """Until every job handed over has run."""
 
         self._jobs.join()
+        self._raise()
+
+    def wait_flush(self) -> None:
+        """Until the last flush handed over has been written, and what was queued before it."""
+
+        if self._last_flush is not None:
+            self._last_flush.wait()
         self._raise()
 
     def close(self) -> None:
@@ -180,15 +196,19 @@ class FlushWriter:
 
     def _run(self) -> None:
         while True:
-            job = self._jobs.get()
+            item = self._jobs.get()
+            done = None
             try:
-                if job is None:
+                if item is None:
                     return
+                job, done = item
                 if self._error is None:
                     job()
             except BaseException as error:  # noqa: BLE001 -- handed to the loop
                 self._error = error
             finally:
+                if done is not None:
+                    done.set()
                 self._jobs.task_done()
 
     def _raise(self) -> None:
