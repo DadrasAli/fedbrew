@@ -818,6 +818,12 @@ class _Steps:
         self._views: tuple[tuple[Tensor, ...] | None, list[tuple[Tensor, ...]]] = (None, [])
         self._found: tuple[int | None] | None = None
         self._repeated: dict[int, tuple[tuple[Tensor, ...], Tensor | None]] = {}
+        #: The slices of the rows sliced steps read, by (first row, width): a
+        #: step reading the rows an earlier one read -- every step of a full
+        #: pass over an unshuffled split -- takes that step's views, which are
+        #: the same storage at the same offsets as its own would be.
+        self._slices: dict[tuple[int, int], tuple[Tensor, ...]] = {}
+        self._slices_of: tuple[Tensor, ...] | None = None
 
     @property
     def period(self) -> int | None:
@@ -929,13 +935,11 @@ class _Steps:
         if not rows.stacked:
             length = self.first_lengths[step]
             if self.sliced:
-                first = self.first_starts[step]
-                return tuple(tensor[first : first + length] for tensor in rows.tensors), None
+                return self._sliced(self.first_starts[step], length, stacked=False), None
             index = uploaded(self._indices[0, step, :length], rows.device)
             return tuple(tensor.index_select(0, index) for tensor in rows.tensors), None
         if self.sliced and self.aligned[step]:
-            first = self.first_starts[step]
-            batch = tuple(tensor[:, first : first + width] for tensor in rows.tensors)
+            batch = self._sliced(self.first_starts[step], width, stacked=True)
         elif self._every is not None or self._small():
             batch = self._step_views()[step]
             if width != self._indices.shape[2]:
@@ -954,6 +958,22 @@ class _Steps:
         _, lengths = self._device()
         positions = torch.arange(width, device=rows.device).unsqueeze(0)
         return batch, (positions < lengths[:, step].unsqueeze(1)).to(self.dtype)
+
+    def _sliced(self, first: int, width: int, stacked: bool) -> tuple[Tensor, ...]:
+        """Rows ``first`` to ``first + width`` of every split, as views, made once each."""
+
+        if self._slices_of is not self.rows.tensors:
+            # Rows bound anew (the resident round binds each round's): their own views.
+            self._slices, self._slices_of = {}, self.rows.tensors
+        key = (first, width)
+        held = self._slices.get(key)
+        if held is None:
+            stop = first + width
+            held = self._slices[key] = tuple(
+                tensor[:, first:stop] if stacked else tensor[first:stop]
+                for tensor in self.rows.tensors
+            )
+        return held
 
     @property
     def lengths(self) -> Tensor:
@@ -1223,6 +1243,10 @@ class _Bucket:
         self.eval_counts = evaluation.steps[torch.tensor(slots, dtype=torch.long)].tolist()
         self.weights = update_weights(self.steps.lengths, self.structure, self.program)
         self._weights_on_device: Tensor | None = None
+        #: The step weights and update denominators the stacked steps scale
+        #: by, uploaded once and shaped per (rank, dtype) of the tensors they
+        #: scale (``_step_weight``, ``_update_denominator``).
+        self._shaped: dict[tuple[str, int, torch.dtype], list[Tensor]] = {}
         #: Each client's own learning rate, momentum, ...: the bucket shares
         #: its program's shape, not its values.
         self.values = values or ProgramValues(
@@ -1320,6 +1344,74 @@ class _Bucket:
         if not self.stacked:
             return {name: value[0] for name, value in values.items()}, None
         return values, 0
+
+    def _step_weight(self, step: int, like: Tensor) -> Tensor:
+        """Each client's weight of its ``step``-th batch, shaped as ``_stacked`` shapes it.
+
+        Uploaded once a round and cut into every step's column at once: the
+        same values, cast and shaped as ``_per_client`` casts and shapes one.
+        """
+
+        if self._weights_on_device is None:
+            self._weights_on_device = uploaded(self.weights, self.device)
+        return self._shaped_columns("weights", self._weights_on_device, like)[step]
+
+    def _update_denominator(self, number: int, like: Tensor) -> Tensor:
+        """Each client's sum of its ``number``-th update's batch weights (from 1), shaped so.
+
+        Every update's sum is ``_denominators``' own, taken on the host, and
+        they cross to the device together, once a round.
+        """
+
+        key = ("denominators", like.dim(), like.dtype)
+        if key not in self._shaped:
+            totals = []
+            first = 0
+            for count in self.structure:
+                totals.append(self.weights[:, first : first + count].sum(dim=1))
+                first += count
+            self._shaped_columns(
+                "denominators", uploaded(torch.stack(totals, dim=1), self.device), like
+            )
+        return self._shaped[key][number - 1]
+
+    def _shaped_columns(self, name: str, table: Tensor, like: Tensor) -> list[Tensor]:
+        """``table``'s columns, each ``_per_client(column, like)``: cast and shaped once."""
+
+        key = (name, like.dim(), like.dtype)
+        held = self._shaped.get(key)
+        if held is None:
+            cast = table.to(like.dtype)
+            shaped = cast.reshape(*cast.shape, *(1,) * (like.dim() - 1)).transpose(0, 1)
+            held = self._shaped[key] = list(shaped.unbind(0))
+        return held
+
+    def _pass_add(
+        self, total: dict[str, Tensor] | None, grads: Mapping[str, Tensor], step: int
+    ) -> dict[str, Tensor]:
+        """``accumulate(total, grads, weight)`` on the stack, into a total of the pass's own.
+
+        The first is ``0 + g * w`` as ``g * w + 0``, the same sum, and each later
+        one is added in place: the pass's total is a tensor no one else holds,
+        so the arithmetic is ``accumulate``'s without a new tensor a step.
+        """
+
+        if total is None:
+            return {
+                name: (gradient * self._step_weight(step, gradient)).add_(0.0)
+                for name, gradient in grads.items()
+            }
+        for name, gradient in grads.items():
+            total[name].add_(gradient * self._step_weight(step, gradient))
+        return total
+
+    def _pass_combined(self, total: dict[str, Tensor], number: int) -> dict[str, Tensor]:
+        """The pass's gradient: under ``full``, ``divide``'s quotient, taken in place."""
+
+        if self.program.combine == "full":
+            for value in total.values():
+                value.div_(self._update_denominator(number, value))
+        return total
 
     def _denominators(self, first: int, count: int) -> tuple[Any, int | None]:
         """Each client's sum of the weights of the batches ``first`` on of one update."""
@@ -1539,15 +1631,13 @@ class _Bucket:
                 outputs.append(step_outputs)
                 continue
             total: Any = None
-            first = step
             for _ in range(count):
                 batch, mask = self._gather(step)
                 grads, step_outputs = self._call(gradient, [(params, 0), (batch, 0), (mask, 0)])
-                total = accumulate(total, grads, self._weights(step)[0])
+                total = self._pass_add(total, grads, step)
                 outputs.append(step_outputs)
                 step += 1
-            if program.combine == "full":
-                total = divide(total, self._denominators(first, count)[0])
+            total = self._pass_combined(total, number)
             params, state = apply_update(
                 program, params, total, state, number, *controls, values=self.values.at(number)
             )
@@ -1675,14 +1765,13 @@ class _Bucket:
                 grads, step_outputs = self._stack_gradients(params, *self._gather(step))
                 if program.max_grad_norm is None:
                     # Elementwise, as the unclipped batch step above.
-                    total = accumulate(total, grads, self._weights(step)[0])
+                    total = self._pass_add(total, grads, step)
                 else:
                     total = self._call(combine, [(total, 0), (grads, 0), self._weights(step)])
                 outputs.append(step_outputs)
                 step += 1
             if program.max_grad_norm is None:
-                if program.combine == "full":
-                    total = divide(total, self._denominators(first, count)[0])
+                total = self._pass_combined(total, number)
                 params, state = apply_update(
                     program,
                     params,

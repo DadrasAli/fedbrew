@@ -13,7 +13,13 @@ bit for bit, in every CSV and every round's checkpoint:
 - a step whose rows are an earlier step's for every client -- a loader that
   permutes once and is iterated again, a single-batch loop taking its first
   batch each time -- reuses that step's gathered batch where steps are
-  gathered one at a time (``_Steps.period``), and nowhere else.
+  gathered one at a time (``_Steps.period``), and nowhere else; a step that
+  slices the rows an earlier one sliced takes that step's views
+  (``_Steps._sliced``);
+- a pass's combination on the stack is taken in place, into a total of the
+  pass's own, by step weights and update denominators uploaded and shaped once
+  a round (``_Bucket._pass_add``, ``_pass_combined``), against ``accumulate``
+  and ``divide`` a step: over the same cases, under every gradient form.
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ from unittest import mock
 
 import torch
 
+from fedbrew.clients.batched_update import accumulate, divide
 from fedbrew.core import batched_executor
 from fedbrew.tasks.base import LoaderOrder
 from tests.test_batched_executor_tolerance import (
@@ -64,11 +71,38 @@ def cases() -> Iterator[tuple[str, dict[str, Any], Any]]:
     yield "mlp/scaffold", classification_rule_config({"update_rule": "scaffold"}), None
 
 
+def _fresh(self: Any, first: int, width: int, stacked: bool) -> Any:
+    """A sliced step's views made anew, as every step made them."""
+
+    return tuple(
+        tensor[:, first : first + width] if stacked else tensor[first : first + width]
+        for tensor in self.rows.tensors
+    )
+
+
+def _accumulated(self: Any, total: Any, grads: Any, step: int) -> Any:
+    return accumulate(total, grads, self._weights(step)[0])
+
+
+def _divided(self: Any, total: Any, number: int) -> Any:
+    if self.program.combine != "full":
+        return total
+    first = sum(self.structure[: number - 1])
+    return divide(total, self._denominators(first, self.structure[number - 1])[0])
+
+
 @contextmanager
-def paying(stepwise: bool, repeats: bool) -> Iterator[None]:
+def paying(stepwise: bool, repeats: bool, in_place: bool = True) -> Iterator[None]:
     """The executor with the removed costs put back, as asked."""
 
     with ExitStack() as stack:
+        if not in_place:
+            stack.enter_context(
+                mock.patch.object(batched_executor._Bucket, "_pass_add", _accumulated)
+            )
+            stack.enter_context(
+                mock.patch.object(batched_executor._Bucket, "_pass_combined", _divided)
+            )
         if not stepwise:
             stack.enter_context(
                 mock.patch.object(batched_executor._Bucket, "_stepwise", lambda self: False)
@@ -77,6 +111,7 @@ def paying(stepwise: bool, repeats: bool) -> Iterator[None]:
             stack.enter_context(
                 mock.patch.object(batched_executor._Steps, "_period", lambda self: None)
             )
+            stack.enter_context(mock.patch.object(batched_executor._Steps, "_sliced", _fresh))
         yield
 
 
@@ -98,6 +133,18 @@ class NothingMovesTest(ExecutorRuns):
                     ),
                 ):
                     now, before = self._pair(config, data, stepwise=False, repeats=True)
+                    self.assertAgree(now, before, exact=True)
+
+    def test_the_pass_combined_in_place(self) -> None:
+        for form in ("vmap_grad", "summed", "closed_form"):
+            for label, config, data in cases():
+                if form == "closed_form" and label.startswith("mlp/"):
+                    continue
+                with self.subTest(form=form, case=label):
+                    with data() if data is not None else nullcontext():
+                        now = self.run_config(config, "batched", gradient_form=form)
+                        with paying(stepwise=True, repeats=True, in_place=False):
+                            before = self.run_config(config, "batched", gradient_form=form)
                     self.assertAgree(now, before, exact=True)
 
     def test_a_repeated_step_reuses_its_gather(self) -> None:
