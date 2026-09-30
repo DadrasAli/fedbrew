@@ -2510,8 +2510,18 @@ def select_executor(
     if asked_executor(performance) == "sequential":
         return None, _sequential(components, performance, {"default": False})
     compile_asked = compile_mode(performance.get("compile"))
+    pool = components.clients
+    first = next(iter(pool), None)
+    is_built = getattr(pool, "is_built", None)
+    asked_about = first is not None and callable(is_built) and not is_built(first)
     reason, model = _batched_check(components)
     if reason is not None:
+        if not stated and asked_about:
+            # Only the default asked, and the run is the sequential run it was
+            # before there was a default: the client built to be asked leaves
+            # nothing in its checkpoints, where a run's states are every built
+            # client's (a stated batched executor always built it).
+            pool.forget(first)
         # Asked for and refused is a fallback; taken by default, it is only why.
         record = {"default": not stated, "fallback" if stated else "reason": reason}
         record = _sequential(components, performance, record)

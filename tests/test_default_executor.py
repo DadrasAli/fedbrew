@@ -13,6 +13,8 @@ Held here:
   task without one on the form it declares;
 - a model the executor cannot batch runs sequentially by default, with the
   reason and no fallback; stated ``batched``, the same run is a fallback;
+- a run that cannot be batched keeps in its checkpoints the client states the
+  stated sequential run keeps: the client built to ask its rule is not one;
 - ``executor: sequential`` stated is the reference, and takes the closed form
   unless ``gradient_form: autograd`` asks for autograd;
 - the config's refusals: a batched gradient form beside a stated sequential
@@ -29,8 +31,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import torch
 import yaml
 
+from fedbrew.core.checkpointing import load_checkpoint
 from fedbrew.core.config import load_config
 from fedbrew.core.console import AMBER
 from fedbrew.core.logging import _executor_rows
@@ -92,6 +96,35 @@ class ARunAsWrittenTest(unittest.TestCase):
         self.assertIs(stated["default"], False)
         self.assertIn("dropout at p = 0.3", stated["fallback"])
         self.assertNotIn("reason", stated)
+
+    def test_a_run_it_cannot_batch_keeps_the_sequential_run_s_client_states(self) -> None:
+        # FedLALR declares no batched update. At a quarter participation and
+        # no client evaluation, the first client is built only if the choice
+        # of executor builds it to ask its rule, and a checkpoint holds every
+        # built client's state.
+        config = example_config("fed-lasso", "fedlalr")
+        config["server"]["participation_rate"] = 0.25
+        config["evaluation"]["test"] = {"every": "never"}
+        default = self.run_as(config)
+        self.assertEqual(
+            (_record(default)["used"], _record(default)["default"]), ("sequential", True)
+        )
+        stated = self.run_as(config, executor="sequential")
+        for path in sorted((stated / "checkpoints").glob("round_*.pt")):
+            with self.subTest(checkpoint=path.name):
+                states = load_checkpoint(default / "checkpoints" / path.name)["client_states"]
+                expected = load_checkpoint(path)["client_states"]
+                self.assertEqual(list(states), list(expected))
+                if path.name == "round_001.pt":
+                    # Round 1 samples no client_0: the case this holds.
+                    self.assertNotIn("client_0", expected)
+                for client, state in expected.items():
+                    self.assertEqual(list(states[client]), list(state))
+                    for key, value in state.items():
+                        if isinstance(value, torch.Tensor):
+                            self.assertTrue(torch.equal(states[client][key], value))
+                        else:
+                            self.assertEqual(states[client][key], value)
 
     def test_the_sequential_reference_stated(self) -> None:
         config = example_config("fed-lasso")

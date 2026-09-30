@@ -342,8 +342,11 @@ are folded in one weighted reduction per tensor (chapter 07 §3.3).
 It is the default: a run that states no `executor` takes it wherever its task
 and rule can be batched, and the sequential executor where they cannot, which
 the plan header and `run.json` record as the default, with the reason, not as
-a fallback. `sequential`, stated, is the reference it is held to, and every
-test holds the batched paths to it on autograd.
+a fallback. That run is the sequential run: the client built to ask whether
+its rule can be batched is dropped again, so its checkpoints hold the client
+states the stated sequential run's hold. `sequential`, stated, is the
+reference it is held to, and every test holds the batched paths to it on
+autograd.
 
 | Key | Type | Default | Effect |
 | --- | --- | --- | --- |
@@ -952,7 +955,7 @@ python tools/bench_compare_runs.py --help
 | `tests/test_report_run_size.py` | Reported run size. |
 | `tests/test_batched_executor_tolerance.py` | §9: both executors agree on every model, client state and cell, to `1e-12`, and bit for bit with one client per chunk. |
 | `tests/test_batched_executor.py` | §9: the keys, the fallback and its record, client isolation, the refusals, the generator, and one chunk at a time. |
-| `tests/test_default_executor.py` | §9: a run that states neither key trains batched on the task's closed form, or its declared autograd form without one; one it cannot batch runs sequentially with the reason, not a fallback; stated `batched` it is a fallback; `sequential` stated takes the closed form unless `autograd` is asked for; the plan header's rows; what the config refuses. |
+| `tests/test_default_executor.py` | §9: a run that states neither key trains batched on the task's closed form, or its declared autograd form without one; one it cannot batch runs sequentially with the reason, not a fallback, and keeps the stated sequential run's client states; stated `batched` it is a fallback; `sequential` stated takes the closed form unless `autograd` is asked for; the plan header's rows; what the config refuses. |
 | `tests/test_closed_form_gradients.py` | §9: every example's closed form is autograd's within `1e-12`; each example's default run, batched and sequential, is the sequential run on autograd within the tolerance; the sequential closed-form step under every rule and update mode is the autograd step within it. |
 | `tests/test_batch_orders.py` | §9: every planned order is its loader's own, for every task, update mode, shuffle, `drop_last` and `max_local_steps`, 520 clients at once included; the bulk seeds are `dataloader_seed`'s. |
 | `tests/test_batched_evaluator.py` | §9: ragged, shuffled and missing evaluation splits through both evaluators, the refusal's words, and the central pass's kept model and shard. |

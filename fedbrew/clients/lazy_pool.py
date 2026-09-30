@@ -83,6 +83,22 @@ class LazyClientPool(Mapping[str, ClientUpdate]):
     def __contains__(self, client_id: object) -> bool:
         return client_id in self._client_id_set
 
+    def is_built(self, client_id: str) -> bool:
+        """Whether ``client_id``'s client is built now."""
+
+        return client_id in self._clients
+
+    def forget(self, client_id: str) -> None:
+        """Drop a built client and keep nothing of it: for one built only to be asked about.
+
+        Unlike :meth:`evict_client`, no snapshot of it is kept, so the
+        checkpoints (:meth:`get_state_snapshot`) hold what they would have held
+        had it never been built. A state it was given (:meth:`load_state_snapshot`)
+        stays.
+        """
+
+        self._clients.pop(client_id, None)
+
     @property
     def materialized_client_ids(self) -> list[str]:
         """Return client IDs already constructed, in dataset order."""
