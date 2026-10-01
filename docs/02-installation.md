@@ -189,13 +189,14 @@ a job, not on the login node — the point is what the compute node sees.
 
 ## 5. The command surface
 
-One console script with fourteen subcommands (`fedbrew/cli/dispatch.py`).
+One console script with fifteen subcommands (`fedbrew/cli/dispatch.py`).
 
 | Subcommand | Does |
 | --- | --- |
 | `run` | Run an experiment. |
 | `sweep` | Run several configs; those that differ only in numeric hyperparameters run as one group in one process (chapter 11 §10). |
 | `analyze` | Summarize finished runs from their `round_metrics.csv`: per run the last iterate, the best so far, the mean of log10 of a metric and the running mean; across the seeds of each config the median, min, max and quantiles, per round and final (chapter 08 §6.3). |
+| `tune` | Choose a config's dials by its `tuning` section: the grid run with `sweep`, scored from the CSVs, extended past an edge until the pick is interior; the evidence and the config with the chosen values written (chapter 04 §9.2). |
 | `generate` | Generate federated data manifests. |
 | `config` | `config show <config>` prints a run config resolved: its `extends` chain merged and the values the loader infers filled in, as one flat file (chapter 04 §2.2). |
 | `report` | Create Markdown reports from a run directory. |

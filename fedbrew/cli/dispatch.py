@@ -23,6 +23,10 @@ COMMANDS: dict[str, tuple[str, str]] = {
         "fedbrew.cli.analyze",
         "Summarize finished runs: last, best, mean of log10 and running mean, across seeds.",
     ),
+    "tune": (
+        "fedbrew.cli.tune",
+        "Choose a config's dials by its tuning section, through sweep and analyze.",
+    ),
     "generate": ("fedbrew.data.generate", "Generate federated data manifests."),
     "config": (
         "fedbrew.cli.show_config",

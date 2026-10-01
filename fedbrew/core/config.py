@@ -510,6 +510,38 @@ class ConvergenceConfig:
 
 
 @dataclass
+class TuningConfig:
+    """How ``fedbrew tune`` chooses this config's dials: ``tuning``, read by tune alone.
+
+    ``fedbrew run`` ignores the section; ``fedbrew tune --config`` runs a grid
+    of this config's dials, scores it on ``metric`` and writes the config with
+    the chosen values (``fedbrew/core/tuning.py``, chapter 11). ``method`` is a
+    named protocol, ``grid_and_edge`` or ``pilot``, and fixes how a run is
+    scored, how ties are broken and how the search stops; ``tie`` and
+    ``tie_kind`` left out take the method's. No method: no section.
+    """
+
+    method: str | None = None
+    metric: str | None = None
+    #: Dotted config path -> its grid: ``{base, exponents}``, ``{values}`` or
+    #: ``{centre, decades}``, each with an optional ``extend``.
+    dials: dict[str, Any] = field(default_factory=dict)
+    #: The seeds every candidate runs at; empty is the config's own seed.
+    seeds: list[int] = field(default_factory=list)
+    #: The tuning runs' horizon; None keeps the config's (required for pilot).
+    rounds: int | None = None
+    aggregate: str = "median"
+    tie: float | None = None
+    tie_kind: str | None = None
+    max_steps: int = 6
+    floor: float = 1e-16
+    direction: str | None = None
+    #: Where the tune writes; None is ``<experiment.output_dir>-tuning``.
+    output_dir: str | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class FullConfig:
     """Resolved benchmark configuration."""
 
@@ -525,6 +557,7 @@ class FullConfig:
     reporting: ReportingConfig = field(default_factory=ReportingConfig)
     divergence: DivergenceConfig = field(default_factory=DivergenceConfig)
     convergence: ConvergenceConfig = field(default_factory=ConvergenceConfig)
+    tuning: TuningConfig = field(default_factory=TuningConfig)
     #: The keys the loader inferred because the config left them out, each
     #: with where from: ``model.input_dim`` and ``model.num_classes`` from the
     #: manifest, ``experiment.output_dir`` and ``experiment.name`` from the
@@ -705,6 +738,7 @@ def load_config(common_path: str | Path) -> FullConfig:
         reporting=_build_reporting_config(common.get("reporting", {})),
         divergence=_build_divergence_config(common.get("divergence", {})),
         convergence=_build_convergence_config(common.get("convergence", {})),
+        tuning=_build_tuning_config(common.get("tuning", {})),
         inferred=inferred,
     )
     # Before validate_config, so the checks that read a split's schedule
@@ -926,6 +960,7 @@ _KNOWN_EXTRA_KEYS: dict[str, frozenset[str]] = {
     "reporting.statistics": frozenset(),
     "divergence": frozenset(),
     "convergence": frozenset(),
+    "tuning": frozenset(),
     # data.extra is forwarded as keyword arguments only to
     # synthetic_classification, whose every parameter is already a named
     # DataConfig field; for manifest_dataset it is dropped entirely.
@@ -1294,6 +1329,7 @@ def _validate_unknown_keys(config: FullConfig) -> None:
     _validate_known_keys("reporting.statistics", config.reporting.statistics.extra)
     _validate_known_keys("divergence", config.divergence.extra)
     _validate_known_keys("convergence", config.convergence.extra)
+    _validate_known_keys("tuning", config.tuning.extra)
 
     for name in ("checkpointing", "performance", "data_staging"):
         block = config.runtime.extra.get(name)
@@ -1644,6 +1680,7 @@ def validate_config(config: FullConfig) -> None:
     _refuse_retired_metric_names(config)
     _validate_evaluation(config)
     _validate_convergence(config)
+    _validate_tuning(config)
     _validate_evaluation_model_scope(config)
     _validate_reporting(config.reporting)
     _validate_divergence(config.divergence)
@@ -1859,6 +1896,19 @@ def _build_convergence_config(values: object) -> ConvergenceConfig:
     return ConvergenceConfig(metrics=list(metrics), extra=extra)
 
 
+def _build_tuning_config(values: object) -> TuningConfig:
+    if values is None:
+        return TuningConfig()
+    if not isinstance(values, Mapping):
+        raise RunRefused("tuning must be a mapping or null")
+    known, extra = _split_extra(values, TuningConfig)
+    if "dials" in known and not isinstance(known["dials"], Mapping):
+        raise RunRefused("tuning.dials must be a mapping of a config path to its grid")
+    if "seeds" in known and known["seeds"] is None:
+        known["seeds"] = []
+    return TuningConfig(**known, extra=extra)
+
+
 def parse_evaluation_schedule(value: object, context: str) -> int | None:
     """Turn an ``every`` value into an interval in rounds.
 
@@ -2029,6 +2079,14 @@ def _validate_convergence(config: FullConfig) -> None:
         grad_norm=task_grad_norm_gloss(config) is not None,
         task=config.task.name,
     )
+
+
+def _validate_tuning(config: FullConfig) -> None:
+    """The ``tuning`` section is one ``fedbrew tune`` can run; its metric is checked by tune."""
+
+    from fedbrew.core.tuning import validate_section
+
+    validate_section(config.tuning)
 
 
 def _validate_evaluation(config: FullConfig) -> None:

@@ -80,13 +80,14 @@ cheapest way to check a new config, and worth running before any long job.
 | `reporting` | no | which columns are written: the one fit-metric filter, the cross-client statistics, the per-client CSVs — §9 |
 | `divergence` | no | when to stop a run that is not learning |
 | `convergence` | no | exact means of chosen metrics over the run's iterates, written every round — §9.1 |
+| `tuning` | no | how `fedbrew tune` chooses this config's dials; `fedbrew run` ignores it — §9.2 |
 
-`numerics` and the last four have complete dataclass defaults, so a config
+`numerics` and the last five have complete dataclass defaults, so a config
 may omit them entirely -- though every shipped config states `numerics` in
 full (§7.5). The first seven have required fields and cannot be omitted.
 
 The root is closed like every block. A top-level key that is none of these
-twelve, and not `extends` (§2.2) or `server_config` or `client_config` below, is
+thirteen, and not `extends` (§2.2) or `server_config` or `client_config` below, is
 refused at load,
 before anything is built: the message names the key, suggests the closest
 block, and lists every key the root accepts (`root_config_keys`,
@@ -822,6 +823,68 @@ whole run.
   (`convergence`), so a resumed run continues them. A checkpoint written
   without the section cannot be continued with it on: the resume is refused,
   with nothing changed.
+
+### 9.2 `tuning`
+
+Read by `fedbrew tune --config <config>` alone (`fedbrew/core/tuning.py`,
+`fedbrew/cli/tune.py`); `fedbrew run` ignores it. The tune writes one run config
+per candidate and seed — this config with the dials and the seed set, the
+section removed, nothing else changed — runs them with `fedbrew sweep`, so the
+candidates of a step that differ only in numeric hyperparameters run as one
+group (chapter 11 §10), scores each run from its `round_metrics.csv`, takes the
+median over seeds, and picks. A run that did not complete (diverged, stalled) or
+whose metric is not finite ranks worst.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `tuning.method` | `null` (off) | `grid_and_edge` or `pilot`, below |
+| `tuning.metric` | — | the round column scored: `grad_norm_sq`, a central metric bare or as `central_test_<m>`, or (grid_and_edge) any column the run writes |
+| `tuning.dials` | — | dotted config path → its grid: `{base: 2, exponents: [lo, hi]}` is `base^lo .. base^hi`; `{values: [...]}` a stated grid; `{centre: c, decades: n}` is `c·10^k`, `k = −n .. n`. Each may add `extend: false` or `extend: <ratio>`. At least 3 values a dial |
+| `tuning.seeds` | `[]`, the config's own seed | the seeds every candidate runs at |
+| `tuning.rounds` | `null`, the config's horizon | the tuning runs' horizon; required for `pilot` |
+| `tuning.aggregate` | `median` | `median` or `mean` over seeds |
+| `tuning.tie`, `tuning.tie_kind` | the method's | candidates within `tie` of the best are tied: `absolute` in the score's units, or `relative` to the best |
+| `tuning.max_steps` | `6` | extensions past an edge, at most |
+| `tuning.floor` | `1e-16` | grid_and_edge: a value below it counts as it in the log, so an exact zero is a finite score |
+| `tuning.direction` | min, max for an accuracy or F1 | which side of the metric is better |
+| `tuning.output_dir` | `<experiment.output_dir>-tuning` | where the tune writes (`--out` overrides) |
+
+**`grid_and_edge`.** Step sizes on powers of 2, other dials on stated grids. A
+run's score is the **mean of log10 of the metric** over the rounds it is
+evaluated, clamped below at `floor`. Candidates within 0.05 decades of the best
+are tied, and all are reported; the pick is the best score.
+
+**`pilot`.** Every dial is powers of 10 around a stated centre, the runs stop at
+the **pilot horizon** `rounds`, and the tune turns `convergence` on for the
+metric (§9.1), so a run's score is the **final exact running mean** of the
+metric over the pilot's iterates. Candidates within 1e-3 of the best, relative,
+are tied, and the tie is broken **toward the grid's centre** (the fewest grid
+steps from the initial grid's centre, summed over the dials; then the lower
+score). The resolved config keeps the full horizon.
+
+**The edge rule and the stop rule, both methods.** Where the pick is on an edge
+of a dial, the dial is extended one value past it — a `base` grid by its base,
+a `centre` grid by 10, a stated grid that is geometric by its ratio — and every
+new candidate (the new value against every value of the other dials) is run and
+scored. The search stops when the pick is interior on every dial; when an
+extension does not beat the pick before it by more than a tie, which is kept,
+closer to the centre and interior of the extended grid; when the edge is on a
+stated grid that cannot be extended (not geometric, or `extend: false`); or after
+`max_steps` extensions, the pick then reported as on an edge.
+
+**What a tune writes**, into its directory: `configs/` and `runs/` (each
+candidate and seed), `evidence.csv` (a row per candidate and seed: its step, the
+dial values, the run, its status and score, the candidate's aggregate, tied,
+selected), `selection.json` (the settings, each step's grid, tied set and pick,
+every candidate with its runs, the pick, whether it is interior and why the
+search stopped), `analysis/` (`fedbrew analyze` over every run, chapter 08 §6.3)
+and **`selected.yaml`**, this config as one flat file with the chosen values
+and without the section. Run again with the same section, a tune reuses every
+run that finished from the same config. `--plan` writes the first grid's configs
+and prints how `fedbrew sweep` groups them, and runs nothing.
+`tests/test_tune.py` holds each rule on hand-made score landscapes and both
+methods on drift-quad, where the gap is known in closed form and each pick is
+worked out by hand.
 
 ## 10. Keys that were removed
 

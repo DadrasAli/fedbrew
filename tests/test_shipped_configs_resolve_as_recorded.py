@@ -33,8 +33,8 @@ Two differences are allowed, both declared here rather than taken on trust:
   recorded, confirms. ``client.metrics`` is ``MERGED`` into it and not
   compared on its own;
 - a key added since, under ``ADDED``, at the value that leaves a run as it
-  was: ``evaluation.grad_norm`` and ``convergence`` are off unless a config asks
-  for them.
+  was: ``evaluation.grad_norm``, ``convergence`` and ``tuning`` are off unless a
+  config asks for them.
 
 The ``schedule`` block, which ``defaults`` was renamed to, is read at load and
 never stored, so its rename moved nothing in the resolved config.
@@ -113,6 +113,24 @@ ADDED: dict[str, Any] = {
     "evaluation.grad_norm.extra": {},
     "convergence.metrics": [],
     "convergence.extra": {},
+    **{
+        f"tuning.{key}": value
+        for key, value in {
+            "method": None,
+            "metric": None,
+            "dials": {},
+            "seeds": [],
+            "rounds": None,
+            "aggregate": "median",
+            "tie": None,
+            "tie_kind": None,
+            "max_steps": 6,
+            "floor": 1e-16,
+            "direction": None,
+            "output_dir": None,
+            "extra": {},
+        }.items()
+    },
 }
 
 #: Inferred keys whose inferred value may differ from the recorded one.
