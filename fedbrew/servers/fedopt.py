@@ -13,15 +13,10 @@ from fedbrew.core.metrics import filter_metrics
 from fedbrew.core.protocol import FitResult, RoundInfo
 from fedbrew.core.torch_utils import (
     StateDict,
-    add_model_states,
     as_cpu_tensor,
+    as_state_tensor,
     clone_model_state,
-    divide_model_states,
-    scale_model_state,
-    sqrt_model_state,
-    subtract_model_states,
     validate_matching_keys,
-    zeros_like_model_state,
 )
 from fedbrew.servers.fedavg import FedAvgServer
 from fedbrew.tasks.base import TaskAdapter
@@ -250,7 +245,7 @@ class FedOptServer(FedAvgServer):
             raise ValueError("model state was not initialized")
 
         averaged_client_state, raw_metrics = self._accumulate_fit_results(results)
-        delta = subtract_model_states(averaged_client_state, self._model_state)
+        delta = _subtract(_on_the_host(averaged_client_state), _on_the_host(self._model_state))
         self._model_state = self._apply_fedopt_update(delta)
 
         metrics = filter_metrics(raw_metrics, self.metrics)
@@ -334,32 +329,82 @@ class FedOptServer(FedAvgServer):
         self._update_step = int(state.get("update_step", self._update_step))
 
     def _apply_fedopt_update(self, delta: Mapping[str, Any]) -> StateDict:
+        """The model after one update from ``delta = fold - model``; moments and count move."""
+
         if self._model_state is None:
             raise ValueError("model state was not initialized")
-        if self._m is None:
-            self._m = zeros_like_model_state(delta)
-
-        if self.server_optimizer == "fedavgm":
-            update = self._fedavgm_update(delta)
-        elif self.server_optimizer == "fedadam":
-            update = self._fedadam_update(delta)
-        elif self.server_optimizer == "fedyogi":
-            update = self._fedyogi_update(delta)
-        elif self.server_optimizer == "fedadagrad":
-            update = self._fedadagrad_update(delta)
-        else:  # pragma: no cover - guarded by constructor/load validation.
-            raise ValueError(f"unsupported server optimizer: {self.server_optimizer}")
-
+        update, self._m, self._v = self._step(delta, self._m, self._v)
         self._update_step += 1
-        return add_model_states(self._model_state, update)
+        return _add(_on_the_host(self._model_state), update)
 
-    def _fedavgm_update(self, delta: Mapping[str, Any]) -> StateDict:
-        m = cast(Mapping[str, Any], self._m)
-        self._m = add_model_states(
-            scale_model_state(m, self.beta1),
-            delta,
+    # -- the update as a function of the round's fold --------------------------
+    #
+    # The resident round (fedbrew/core/resident.py) keeps the model and the
+    # moments on its device and hands each round's fold to this update there;
+    # the per-round path above runs the same functions on the host's tensors.
+    # They read and write no server state, and no device but their arguments'.
+
+    def update_from_fold(
+        self,
+        model: Mapping[str, Any],
+        fold: Mapping[str, Any],
+        carried: Mapping[str, StateDict] | None,
+    ) -> tuple[StateDict, dict[str, StateDict]]:
+        """The model after a round whose clients' mean is ``fold``, and the moments it leaves.
+
+        The pseudo-gradient is ``fold - model``; ``carried`` is ``{"m": ..., "v": ...}``
+        as the last round left them, or None before the first update (the moments are
+        then made as the first update makes them), and ``v`` is absent for an
+        optimizer with no second moment.
+        """
+
+        delta = _subtract(fold, model)
+        carried = carried or {}
+        update, m, v = self._step(delta, carried.get("m"), carried.get("v"))
+        moments = {"m": m} if v is None else {"m": m, "v": v}
+        return _add(model, update), moments
+
+    def carried_state(self) -> dict[str, StateDict] | None:
+        """The moments the server holds, as ``update_from_fold`` takes them; None before one."""
+
+        if self._m is None:
+            return None
+        return {"m": self._m} if self._v is None else {"m": self._m, "v": self._v}
+
+    def adopt_update(self, model: StateDict, carried: Mapping[str, StateDict] | None) -> None:
+        """Take the model and moments of one round ``update_from_fold`` computed elsewhere."""
+
+        assert carried is not None
+        self._model_state = model
+        self._m, self._v = carried["m"], carried.get("v")
+        self._update_step += 1
+
+    def _step(
+        self, delta: Mapping[str, Any], m: StateDict | None, v: StateDict | None
+    ) -> tuple[StateDict, StateDict, StateDict | None]:
+        """The update ``server_learning_rate``-scaled for ``delta``, and the moments after it."""
+
+        if m is None:
+            m = _zeros_like(delta)
+        if self.server_optimizer == "fedavgm":
+            return self._fedavgm_update(delta, m)
+        if v is None and self.server_optimizer != "fedavgm":
+            v = self._initial_v(delta)
+        if self.server_optimizer == "fedadam":
+            return self._fedadam_update(delta, m, v)
+        if self.server_optimizer == "fedyogi":
+            return self._fedyogi_update(delta, m, v)
+        if self.server_optimizer == "fedadagrad":
+            return self._fedadagrad_update(delta, m, v)
+        raise ValueError(  # pragma: no cover - guarded by constructor/load validation.
+            f"unsupported server optimizer: {self.server_optimizer}"
         )
-        return scale_model_state(self._m, self.server_learning_rate)
+
+    def _fedavgm_update(
+        self, delta: Mapping[str, Any], m: StateDict
+    ) -> tuple[StateDict, StateDict, None]:
+        m = _add(_scale(m, self.beta1), delta)
+        return _scale(m, self.server_learning_rate), m, None
 
     def _initial_v(self, delta: Mapping[str, Any]) -> StateDict:
         """Return the second-moment accumulator's initial value.
@@ -370,77 +415,43 @@ class FedOptServer(FedAvgServer):
         """
 
         tau = cast(float, self.tau)
-        zeros = zeros_like_model_state(delta)
+        zeros = _zeros_like(delta)
         return {key: value + tau**2 for key, value in zeros.items()}
 
-    def _fedadagrad_update(self, delta: Mapping[str, Any]) -> StateDict:
-        if self._v is None:
-            self._v = self._initial_v(delta)
+    def _fedadagrad_update(
+        self, delta: Mapping[str, Any], m: StateDict, v: StateDict
+    ) -> tuple[StateDict, StateDict, StateDict]:
         tau = cast(float, self.tau)
-        m = cast(Mapping[str, Any], self._m)
-        v = cast(Mapping[str, Any], self._v)
-        self._m = add_model_states(
-            scale_model_state(m, self.beta1),
-            scale_model_state(delta, 1.0 - self.beta1),
-        )
+        m = _add(_scale(m, self.beta1), _scale(delta, 1.0 - self.beta1))
         # FedAdagrad accumulates without decay: v <- v + delta^2.
-        self._v = add_model_states(v, _square_model_state(delta))
-        adaptive_step = divide_model_states(
-            self._m,
-            sqrt_model_state(self._v),
-            eps=tau,
-        )
-        return scale_model_state(adaptive_step, self.server_learning_rate)
+        v = _add(v, _square_model_state(delta))
+        adaptive_step = _divide(m, _sqrt(v), eps=tau)
+        return _scale(adaptive_step, self.server_learning_rate), m, v
 
-    def _fedadam_update(self, delta: Mapping[str, Any]) -> StateDict:
-        if self._v is None:
-            self._v = self._initial_v(delta)
+    def _fedadam_update(
+        self, delta: Mapping[str, Any], m: StateDict, v: StateDict
+    ) -> tuple[StateDict, StateDict, StateDict]:
         beta2 = cast(float, self.beta2)
         tau = cast(float, self.tau)
-        m = cast(Mapping[str, Any], self._m)
-        v = cast(Mapping[str, Any], self._v)
         delta_squared = _square_model_state(delta)
-        self._m = add_model_states(
-            scale_model_state(m, self.beta1),
-            scale_model_state(delta, 1.0 - self.beta1),
-        )
-        self._v = add_model_states(
-            scale_model_state(v, beta2),
-            scale_model_state(delta_squared, 1.0 - beta2),
-        )
-        adaptive_step = divide_model_states(
-            self._m,
-            sqrt_model_state(self._v),
-            eps=tau,
-        )
-        return scale_model_state(adaptive_step, self.server_learning_rate)
+        m = _add(_scale(m, self.beta1), _scale(delta, 1.0 - self.beta1))
+        v = _add(_scale(v, beta2), _scale(delta_squared, 1.0 - beta2))
+        adaptive_step = _divide(m, _sqrt(v), eps=tau)
+        return _scale(adaptive_step, self.server_learning_rate), m, v
 
-    def _fedyogi_update(self, delta: Mapping[str, Any]) -> StateDict:
-        if self._v is None:
-            self._v = self._initial_v(delta)
+    def _fedyogi_update(
+        self, delta: Mapping[str, Any], m: StateDict, v: StateDict
+    ) -> tuple[StateDict, StateDict, StateDict]:
         beta2 = cast(float, self.beta2)
         tau = cast(float, self.tau)
-        m = cast(Mapping[str, Any], self._m)
-        v = cast(Mapping[str, Any], self._v)
         delta_squared = _square_model_state(delta)
-        self._m = add_model_states(
-            scale_model_state(m, self.beta1),
-            scale_model_state(delta, 1.0 - self.beta1),
-        )
+        m = _add(_scale(m, self.beta1), _scale(delta, 1.0 - self.beta1))
         signed_delta_squared = _multiply_model_states(
-            delta_squared,
-            _sign_model_state(subtract_model_states(v, delta_squared)),
+            delta_squared, _sign_model_state(_subtract(v, delta_squared))
         )
-        self._v = subtract_model_states(
-            v,
-            scale_model_state(signed_delta_squared, 1.0 - beta2),
-        )
-        adaptive_step = divide_model_states(
-            self._m,
-            sqrt_model_state(self._v),
-            eps=tau,
-        )
-        return scale_model_state(adaptive_step, self.server_learning_rate)
+        v = _subtract(v, _scale(signed_delta_squared, 1.0 - beta2))
+        adaptive_step = _divide(m, _sqrt(v), eps=tau)
+        return _scale(adaptive_step, self.server_learning_rate), m, v
 
     def _validate_hyperparameters(self) -> None:
         reason, unread = unread_fedopt_hyperparameters(self.server_optimizer)
@@ -471,27 +482,59 @@ def _normalize_server_optimizer(value: str) -> str:
     return normalized
 
 
+# The elementwise state operations of the update. Each is the operation torch_utils'
+# helper of the same name does on a state, less its move to the CPU: the tensors are
+# read where they are (``as_state_tensor``), so the same functions serve the host and
+# the resident round's device, and the host's are the CPU ones bit for bit.
+
+
+def _on_the_host(state: Mapping[str, Any]) -> StateDict:
+    return {key: as_cpu_tensor(key, value) for key, value in state.items()}
+
+
+def _subtract(a: Mapping[str, Any], b: Mapping[str, Any]) -> StateDict:
+    validate_matching_keys(a, b)
+    return {key: as_state_tensor(key, a[key]) - as_state_tensor(key, b[key]) for key in a}
+
+
+def _add(a: Mapping[str, Any], b: Mapping[str, Any]) -> StateDict:
+    validate_matching_keys(a, b)
+    return {key: as_state_tensor(key, a[key]) + as_state_tensor(key, b[key]) for key in a}
+
+
+def _multiply_model_states(a: Mapping[str, Any], b: Mapping[str, Any]) -> StateDict:
+    validate_matching_keys(a, b)
+    return {key: as_state_tensor(key, a[key]) * as_state_tensor(key, b[key]) for key in a}
+
+
+def _divide(numerator: Mapping[str, Any], denominator: Mapping[str, Any], eps: float) -> StateDict:
+    validate_matching_keys(numerator, denominator)
+    return {
+        key: as_state_tensor(key, numerator[key])
+        / (as_state_tensor(key, denominator[key]) + float(eps))
+        for key in numerator
+    }
+
+
+def _scale(state: Mapping[str, Any], scale: float) -> StateDict:
+    return {key: as_state_tensor(key, value) * float(scale) for key, value in state.items()}
+
+
+def _zeros_like(state: Mapping[str, Any]) -> StateDict:
+    return {key: torch.zeros_like(as_state_tensor(key, value)) for key, value in state.items()}
+
+
 def _square_model_state(state: Mapping[str, Any]) -> StateDict:
     squared: StateDict = {}
     for key, value in state.items():
-        tensor = as_cpu_tensor(key, value)
+        tensor = as_state_tensor(key, value)
         squared[key] = tensor * tensor
     return squared
 
 
 def _sign_model_state(state: Mapping[str, Any]) -> StateDict:
-    signed: StateDict = {}
-    for key, value in state.items():
-        signed[key] = torch.sign(as_cpu_tensor(key, value))
-    return signed
+    return {key: torch.sign(as_state_tensor(key, value)) for key, value in state.items()}
 
 
-def _multiply_model_states(
-    a: Mapping[str, Any],
-    b: Mapping[str, Any],
-) -> StateDict:
-    validate_matching_keys(a, b)
-    multiplied: StateDict = {}
-    for key in a:
-        multiplied[key] = as_cpu_tensor(key, a[key]) * as_cpu_tensor(key, b[key])
-    return multiplied
+def _sqrt(state: Mapping[str, Any]) -> StateDict:
+    return {key: torch.sqrt(as_state_tensor(key, value) + 0.0) for key, value in state.items()}

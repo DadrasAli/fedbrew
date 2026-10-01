@@ -284,6 +284,45 @@ class FedAvgServer(ServerStrategy):
         round_info.metrics.update(metrics)
         return self._federated_payload(metrics=metrics)
 
+    # -- the update from a round's fold -----------------------------------------
+    #
+    # What a strategy does with the mean of its clients' states, as a function
+    # the resident round (fedbrew/core/resident.py) can run where the mean is:
+    # on its device, so the next round starts from the updated model without
+    # a copy. FedAvg adopts the mean; a strategy that updates from it
+    # overrides all three (FedOptServer) and its aggregate_stream makes the
+    # same update on the host's tensors, from the same function.
+
+    def update_from_fold(
+        self,
+        model: Mapping[str, Any],
+        fold: Mapping[str, Any],
+        carried: Mapping[str, dict[str, Any]] | None,
+    ) -> tuple[dict[str, Any], dict[str, dict[str, Any]] | None]:
+        """The model after a round whose clients' mean is ``fold``, and what it carries on.
+
+        A pure function: it reads and writes no server state, and touches no
+        device but its arguments'. ``carried`` is what the last round returned
+        (named state of the model's shape, such as moments), None before the
+        first update. FedAvg's model is the mean itself, and carries nothing.
+        """
+
+        del model, carried
+        return dict(fold), None
+
+    def carried_state(self) -> dict[str, dict[str, Any]] | None:
+        """What the server holds of ``update_from_fold``'s carried state; None for none."""
+
+        return None
+
+    def adopt_update(
+        self, model: dict[str, Any], carried: Mapping[str, dict[str, Any]] | None
+    ) -> None:
+        """Take the model and carried state of a round ``update_from_fold`` computed elsewhere."""
+
+        del carried
+        self._model_state = model
+
     def _accumulate_fit_results(
         self,
         results: Iterable[FitResult],

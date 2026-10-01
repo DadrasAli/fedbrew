@@ -859,6 +859,23 @@ def validate_matching_keys(*states: Mapping[str, Any]) -> None:
             raise ValueError("all states must have the same keys")
 
 
+def as_state_tensor(key: str, value: Any) -> Tensor:
+    """Return one state value as a detached tensor, where it is.
+
+    The door :func:`as_cpu_tensor` reads through, without its move to the CPU:
+    for an operation that runs wherever its tensors are (the FedOpt update the
+    resident round runs on its device, ``FedOptServer.update_from_fold``).
+
+    Raises:
+        TypeError: If the value is not a Tensor. ``key`` is only ever used to
+            say which one.
+    """
+
+    if not isinstance(value, Tensor):
+        raise TypeError(f"state value for {key} is not a tensor")
+    return value.detach()
+
+
 def as_cpu_tensor(key: str, value: Any) -> Tensor:
     """Return one state value as a detached CPU tensor.
 
@@ -871,9 +888,7 @@ def as_cpu_tensor(key: str, value: Any) -> Tensor:
             say which one.
     """
 
-    if not isinstance(value, Tensor):
-        raise TypeError(f"state value for {key} is not a tensor")
-    return value.detach().cpu()
+    return as_state_tensor(key, value).cpu()
 
 
 def uploaded(tensor: Tensor, device: torch.device | str) -> Tensor:

@@ -186,6 +186,16 @@ denominator away from pure `tau` on the first rounds. The effect is bounded:
 from a zero start, the
 first server step would differ by less than a factor of two, for all three.
 
+**The update is a function of the round's fold.** `FedOptServer.update_from_fold(model,
+fold, carried)` (`fedbrew/servers/fedopt.py`) returns the model after a round whose
+clients' mean is `fold`, and the moments it leaves (`carried`: `m`, and `v` for the
+three optimizers that have one; none before the first update). It reads and writes no
+server state and touches no device but its arguments', so the resident round
+(chapter 11 §9.1) can run it where the fold is, and `aggregate_stream` makes the same
+update on the host's tensors from the same functions. `FedAvgServer` has the same three
+methods (`update_from_fold`, `carried_state`, `adopt_update`) with the identity update,
+which is how a server tells the resident round what it does with a fold.
+
 Yogi differs from Adam only in how `v` moves toward `delta_t^2`. Adam moves it
 by `(1-beta2)` of the gap between them; Yogi by `(1-beta2) * delta_t^2`, in the
 direction the sign term gives. When `delta_t^2` is far below `v`, Adam's `v`
@@ -733,6 +743,7 @@ fedbrew run --config configs/femnist/scaffold.yaml --validate-only
 | `tests/test_active_target_weighting_is_honoured_or_refused.py` | §3.1: which rules ask the task for the weight, measured by running each client's `fit`; `active_target_weighting` on is refused under `fedprox` and `scaffold` through `fedbrew run` and `--validate-only`, and the `causal_lm_sft` default where each path reads the manifest; `false`, unset and an honouring rule still load (`POST-F30`). |
 | `tests/test_aggregation_weight_is_the_train_split_size.py` | §3.1: a classification client's weight, as the server receives it, is its train split's size under `single_batch`, a capped `local_adamw` and a two-pass `drop_last` `sequential_epoch`, none of which reads that many rows. |
 | `tests/test_fedopt_server.py` | The four update rules and the `tau^2` initialisation. |
+| `tests/test_fedopt_fold_update.py` | The update as a function of the round's fold equals the update as it was written, bit for bit, for each optimizer in both widths over rounds; it reads and writes no server state and leaves its arguments; FedAvg adopts the fold. |
 | `tests/test_scaffold_fedprox_communication_cost.py` | SCAFFOLD 2×, FedProx 1×. |
 | `tests/test_amp_composes_with_wrapped_optimizers.py` | §4.4: scaffold and fedprox accept `numerics.use_amp: true` in all three layers, the three rules that step through `_GradientOnlyOptimizer` still refuse it, and the chapter quotes the numbers behind both. |
 | `tests/test_scaffold_fedprox_step_correctness.py` | What the gradient correction and the proximal term actually compute, against a closed-form prediction and a pinned trajectory. |

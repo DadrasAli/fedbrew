@@ -36,7 +36,7 @@ pytestmark = pytest.mark.fast
 PACKAGE = Path(__file__).resolve().parent.parent / "fedbrew"
 
 #: The primitives, and the module that is allowed to define them.
-SHARED = ("as_cpu_tensor", "validate_matching_keys")
+SHARED = ("as_cpu_tensor", "as_state_tensor", "validate_matching_keys")
 HOME = PACKAGE / "core" / "torch_utils.py"
 
 
@@ -66,6 +66,7 @@ class OneDefinitionTest(unittest.TestCase):
 
     def test_fedopt_uses_the_shared_object_and_not_a_lookalike(self) -> None:
         self.assertIs(fedopt.as_cpu_tensor, torch_utils.as_cpu_tensor)
+        self.assertIs(fedopt.as_state_tensor, torch_utils.as_state_tensor)
         self.assertIs(fedopt.validate_matching_keys, torch_utils.validate_matching_keys)
 
 
