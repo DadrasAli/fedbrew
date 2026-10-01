@@ -546,7 +546,10 @@ class ResidentRounds:
         self.carried: dict[str, dict[str, Tensor]] | None = (
             None
             if carried is None
-            else {name: self._placed(state) for name, state in carried.items()}
+            else {
+                name: {key: value.detach().to(self.device) for key, value in state.items()}
+                for name, state in carried.items()
+            }
         )
         if self.scaffold and self.unsupported is None and context.server._server_control is None:
             self.unsupported = "the SCAFFOLD server's control variate is not initialized"
