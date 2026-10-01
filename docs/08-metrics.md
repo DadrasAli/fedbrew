@@ -571,6 +571,44 @@ first round the metric is missing or not finite.
 The metric itself is evaluated every round; it is written only on the rounds
 `evaluation.central_test.every` or `evaluation.grad_norm.every` schedule.
 
+### 6.3 Summarizing runs: `fedbrew analyze`
+
+```bash
+fedbrew analyze outputs/sweep-a/ --metrics grad_norm_sq optimality_gap --quantiles 0.1 0.9 --out analysis/
+fedbrew analyze configs/sweeps/a/*.yaml        # a sweep's configs: their output directories
+```
+
+Reads finished runs (`fedbrew/cli/analyze.py`, `fedbrew/core/analysis.py`): each
+run's `round_metrics.csv`, and from its `run.json` only the config and the seed,
+which group the runs — runs whose configs are the same but for the seed
+(`experiment.seed`) and what only names a run (`experiment.name`, `output_dir`,
+…) are one group, labelled by the settings that differ between groups. It runs
+nothing and loads no model. For each metric (default: `grad_norm_sq`,
+`central_test_optimality_gap`, `central_test_loss`, `central_test_accuracy`,
+those a run wrote; a bare name may leave out `central_test_`):
+
+| Per run | Definition |
+| --- | --- |
+| `last` | the value on the last round the metric is evaluated |
+| `best` | the best value over the evaluated rounds, by the metric's direction (min, except an accuracy or F1: max; `--direction COLUMN=min\|max` overrides), and `best_round` |
+| `mean_log10` | the mean of `log10(m)` over the evaluated rounds with `m > 0`; the rounds left out are counted in `nonpositive` and warned about |
+| `running_mean` | the last value of the run's `<metric>_running_mean` column (§6.2, `running_mean_source: column`), else a reconstruction from the evaluated rows only, `running_mean_source: reconstructed`, with a **warning** that it is the mean over the evaluated rounds and not over every iterate |
+
+A blank cell is a round the metric was not evaluated, not a value. Across the
+runs of a group, for each of those four and for each round of three curves —
+the value, `best_so_far` and `running_mean` — it writes the count `n`, the
+median (the mean of the middle two for an even count), min, max and each
+`--quantiles` value (default 0.25, 0.75), by linear interpolation of the order
+statistics (Hyndman–Fan type 7, `numpy.quantile`'s default); a value that is
+not finite is left out of the statistic and of `n`. Written into `--out`
+(default `analysis/`), tidy, with a blank cell where a value does not exist:
+`runs.csv` (a row per run and metric), `groups.csv` (a row per group, metric and
+statistic), `curves.csv` (a row per group, metric, curve and round) and
+`analysis.json` (the same tables, the settings, the groups' members and every
+warning and note). A run that cannot be read is a note and the rest are
+analyzed; nothing to analyze exits 2 with a message.
+`tests/test_analyze.py` holds every number to a hand computation.
+
 ## 7. Algorithm-specific metrics
 
 Emitted only by the arms that produce them. Each is a real column in
@@ -1112,6 +1150,7 @@ head -1 <output_dir>/round_metrics.csv | tr ',' '\n'
 | `tests/test_divergence_metric_reachable.py` | §12's cross-check: it fires on a name a non-empty `reporting.fit_metrics` would drop, the rule's extras and the strategy's diagnostics included, stays quiet for evaluation columns and `central_test_*`, derives `CLIENT_UNFILTERED_FIT_METRICS` from every rule's `fit`, no shipped config trips it, and the check stays in `validate_config` rather than the preflight module. |
 | `tests/test_client_history_summary.py` | The running totals `client_update_metrics.csv` column names come from. |
 | `tests/test_convergence_running_mean.py` | §6.2: the exact sum is `math.fsum` after every addition; the column is the mean of the metric's values on rounds 1 to t bit for bit; the section changes nothing but the columns it adds; resident, per-round and sequential agree; a resume continues the means and a checkpoint without them refuses it; the names resolve and a bad one is refused. |
+| `tests/test_analyze.py` | §6.3: `fedbrew analyze`'s per-run and across-seed statistics against hand-worked values on hand-made CSVs, the grouping by config without the seed, blank cells as not evaluated, the reconstruction and its warning, the written tables and the command's exits. |
 | `tests/test_grad_norm.py` | §6.1: `grad_norm_sq` is autograd's gradient of the pooled objective at random points on every linear example (fed-lasso's l1 case against its analytic subgradient), the three paths agree, a run with it on writes every other column and checkpoint as one with it off, off runs no pass, and the planned columns are the written ones for every task. |
 | `tests/test_metric_filter_scope.py` | §4.3, §7.2 and §7.3: both servers add diagnostics before the one filter, so the list keeps or drops them, the loop never filters, and §4.3 states the choice as one. Fails if a third server starts emitting diagnostics. |
 

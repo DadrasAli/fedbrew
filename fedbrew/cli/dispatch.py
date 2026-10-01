@@ -19,6 +19,10 @@ COMMANDS: dict[str, tuple[str, str]] = {
         "fedbrew.core.sweep",
         "Run several configs; those differing only in numeric hyperparameters run as one group.",
     ),
+    "analyze": (
+        "fedbrew.cli.analyze",
+        "Summarize finished runs: last, best, mean of log10 and running mean, across seeds.",
+    ),
     "generate": ("fedbrew.data.generate", "Generate federated data manifests."),
     "config": (
         "fedbrew.cli.show_config",

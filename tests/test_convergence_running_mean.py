@@ -437,6 +437,31 @@ class TheConfigTest(ConvergenceRuns):
             self._load(metrics=[GRAD], mean_of="all")
 
 
+class TheAnalysisReadsTheMeansTest(ConvergenceRuns):
+    """``fedbrew analyze`` over real runs: two seeds of one config, the section on."""
+
+    def test_the_written_column_is_the_runs_running_mean(self) -> None:
+        from fedbrew.core.analysis import analyze
+
+        config = with_means(
+            self.config(central_test={"every": 1}, grad_norm={"every": 1}), "optimality_gap", GRAD
+        )
+        outputs = []
+        for seed in (1, 2):
+            seeded = copy.deepcopy(config)
+            seeded["experiment"]["seed"] = seed
+            outputs.append(self.run_config(seeded, "batched"))
+        result = analyze(outputs, metrics=[GAP, GRAD])
+        self.assertEqual(len(result.groups), 1)
+        self.assertEqual(sorted(s.seed for s in result.runs), [1, 1, 2, 2])
+        for summary, output in ((s, outputs[s.seed - 1]) for s in result.runs):
+            values = [float(v) for v in column(output, summary.metric)]
+            self.assertEqual(summary.running_mean_source, "column")
+            self.assertEqual(summary.running_mean, math.fsum(values) / len(values))
+            self.assertEqual(summary.last, values[-1])
+        self.assertEqual([w for w in result.warnings if "reconstructed" in w], [])
+
+
 def _cuda_usable() -> bool:
     import torch
 
