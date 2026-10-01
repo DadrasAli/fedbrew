@@ -85,7 +85,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
 from torch import Tensor, nn, optim
 
@@ -420,12 +419,12 @@ class ProblemSpec:
         coordinate.
         """
 
-        a = self.curvature().numpy()
-        linear = (self.linear() + self.shifts()).numpy()
+        a = self.curvature()
+        linear = self.linear() + self.shifts()
         if self.member == QUADRATIC:
             weights = 1.0 - (1.0 - alpha * a) ** local_steps
-            fixed = self.centre().numpy() + (weights * (-linear / a)).sum(0) / weights.sum(0)
-            return float(self.objective(torch.from_numpy(fixed))) - self.optimal_value()
+            fixed = self.centre() + (weights * (-linear / a)).sum(0) / weights.sum(0)
+            return float(self.objective(fixed)) - self.optimal_value()
         if self.member == LASSO:
             return _lasso_floor(self, a, linear, alpha, local_steps)
         return _double_well_floor(self, a, linear, alpha, local_steps)
@@ -485,54 +484,61 @@ def _double_well_client_minima(a: Tensor, linear: Tensor, theta: float) -> Tenso
 
 
 def _lasso_floor(
-    spec: ProblemSpec, a: np.ndarray, linear: np.ndarray, alpha: float, local_steps: int
+    spec: ProblemSpec, a: Tensor, linear: Tensor, alpha: float, local_steps: int
 ) -> float:
     """FedAvg's exact round map iterated from x̂: the mean gap of its last 2,000 rounds."""
 
-    centre = spec.centre().numpy()
+    centre = spec.centre()
     tail, cap = 2000, 40000
     rounds = int(min(cap, 20.0 / (alpha * local_steps * float(a.min())))) + tail
-    x = centre.copy()
+    x = centre.clone()
     abar, glinear = a.mean(0), linear.mean(0)
     gaps = []
+    # In place, in the order the step is written: (a (u − x̂) + g + λ sign u), times α, from u.
+    u, step, sign = torch.empty_like(a), torch.empty_like(a), torch.empty_like(a)
     for index in range(rounds):
-        u = np.broadcast_to(x, a.shape).copy()
+        u.copy_(x.expand_as(a))
         for _ in range(local_steps):
-            u -= alpha * (a * (u - centre) + linear + spec.lam * np.sign(u))
+            torch.sub(u, centre, out=step)
+            step.mul_(a).add_(linear)
+            torch.sign(u, out=sign)
+            step.add_(sign.mul_(spec.lam)).mul_(alpha)
+            u.sub_(step)
         x = u.mean(0)
         if index >= rounds - tail:
             value = (0.5 * abar * (x - centre) ** 2 + glinear * (x - centre)).sum()
-            gaps.append(value + spec.lam * np.abs(x).sum() - spec.optimal_value())
-    return float(np.mean(gaps))
+            gaps.append(float(value + spec.lam * x.abs().sum()) - spec.optimal_value())
+    return math.fsum(gaps) / len(gaps)
 
 
 def _double_well_floor(
-    spec: ProblemSpec, a: np.ndarray, linear: np.ndarray, alpha: float, local_steps: int
+    spec: ProblemSpec, a: Tensor, linear: Tensor, alpha: float, local_steps: int
 ) -> float:
     """FedAvg's double-well fixed point near x̂ + u₀, every coordinate bisected at once; its gap."""
 
     theta, u0 = spec.theta, well(spec.theta)
 
-    def excess(u: np.ndarray) -> np.ndarray:
+    def excess(u: Tensor) -> Tensor:
         # The round's displacement, accumulated as such: u − α(...) − u would
         # lose it to cancellation where it is smallest, at the fixed point.
-        moved = np.zeros(a.shape)
+        moved = torch.zeros(a.shape, dtype=DTYPE)
         for _ in range(local_steps):
             local = u + moved
             moved -= alpha * (a * local * (1.0 - 2.0 * theta / (1.0 + local * local) ** 2) + linear)
         return moved.mean(0)
 
-    lo, hi = np.full(spec.dim, u0 - 0.2), np.full(spec.dim, u0 + 0.2)
+    lo = torch.full((spec.dim,), u0 - 0.2, dtype=DTYPE)
+    hi = torch.full((spec.dim,), u0 + 0.2, dtype=DTYPE)
     flo = excess(lo)
-    if not bool(np.all(flo * excess(hi) < 0)):
+    if not bool(torch.all(flo * excess(hi) < 0)):
         raise AssertionError("FedAvg's double-well fixed point is not bracketed near u0")
     for _ in range(200):
         mid = 0.5 * (lo + hi)
         fmid = excess(mid)
         left = flo * fmid < 0
-        hi = np.where(left, mid, hi)
-        lo, flo = np.where(left, lo, mid), np.where(left, flo, fmid)
-    x = spec.centre() + torch.from_numpy(0.5 * (lo + hi))
+        hi = torch.where(left, mid, hi)
+        lo, flo = torch.where(left, lo, mid), torch.where(left, flo, fmid)
+    x = spec.centre() + 0.5 * (lo + hi)
     return float(spec.objective(x)) - spec.optimal_value()
 
 
