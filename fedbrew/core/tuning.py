@@ -131,6 +131,17 @@ def validate_section(section: Any) -> None:
         raise RunRefused("tuning.dials must name at least one dial to tune")
     for key, spec in section.dials.items():
         parse_axis(key, spec, method)
+    _validate_choices(section)
+    _validate_horizon_and_seeds(section, method)
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _validate_choices(section: Any) -> None:
+    """The aggregate, the tie, the step cap, the floor and the direction."""
+
     if section.aggregate not in AGGREGATES:
         raise RunRefused(f"tuning.aggregate must be one of {', '.join(AGGREGATES)}")
     if section.tie is not None and not (
@@ -141,7 +152,7 @@ def validate_section(section: Any) -> None:
         raise RunRefused("tuning.tie must be a number, 0 or more")
     if section.tie_kind is not None and section.tie_kind not in TIE_KINDS:
         raise RunRefused(f"tuning.tie_kind must be one of {', '.join(TIE_KINDS)}")
-    if not isinstance(section.max_steps, int) or isinstance(section.max_steps, bool):
+    if not _is_int(section.max_steps):
         raise RunRefused("tuning.max_steps must be an integer, 0 or more")
     if section.max_steps < 0:
         raise RunRefused("tuning.max_steps must be 0 or more")
@@ -149,24 +160,19 @@ def validate_section(section: Any) -> None:
         raise RunRefused("tuning.floor must be positive")
     if section.direction is not None and section.direction not in {"min", "max"}:
         raise RunRefused("tuning.direction must be min or max")
-    if method.needs_rounds and not (
-        isinstance(section.rounds, int)
-        and not isinstance(section.rounds, bool)
-        and section.rounds > 0
-    ):
+
+
+def _validate_horizon_and_seeds(section: Any, method: Method) -> None:
+    """The pilot horizon a method needs, and the seeds."""
+
+    if method.needs_rounds and not (_is_int(section.rounds) and section.rounds > 0):
         raise RunRefused(
             f"tuning.method {method.name} runs a pilot: set tuning.rounds, the pilot horizon"
         )
-    if section.rounds is not None and (
-        not isinstance(section.rounds, int)
-        or isinstance(section.rounds, bool)
-        or section.rounds <= 0
-    ):
+    if section.rounds is not None and not (_is_int(section.rounds) and section.rounds > 0):
         raise RunRefused("tuning.rounds must be a positive integer")
     seeds = section.seeds
-    if not isinstance(seeds, list) or not all(
-        isinstance(s, int) and not isinstance(s, bool) and s >= 0 for s in seeds
-    ):
+    if not isinstance(seeds, list) or not all(_is_int(s) and s >= 0 for s in seeds):
         raise RunRefused("tuning.seeds must be a list of non-negative integers")
     if len(set(seeds)) != len(seeds):
         raise RunRefused("tuning.seeds repeats a seed")
@@ -238,6 +244,18 @@ def parse_axis(key: str, spec: Any, method: Method) -> Axis:
     """A dial's spec as its initial grid; ``RunRefused`` for one the method does not take."""
 
     where = f"tuning.dials.{key}"
+    form = _form_of(where, key, spec, method)
+    values, ratio = _GRID_FORMS[form](where, spec)
+    if "extend" in spec:
+        ratio = _extension(where, spec["extend"])
+    if len(values) < 3:
+        raise RunRefused(f"{where} has {len(values)} values; an interior best needs at least 3")
+    return Axis(key=key, values=values, ratio=ratio)
+
+
+def _form_of(where: str, key: Any, spec: Any, method: Method) -> str:
+    """Which of the three grid forms a dial is written in, refusing one the method does not take."""
+
     if not isinstance(key, str) or not key or key.startswith(".") or ".." in key:
         raise RunRefused(f"tuning.dials key {key!r} must be a dotted path into the config")
     if not isinstance(spec, Mapping):
@@ -258,24 +276,17 @@ def parse_axis(key: str, spec: Any, method: Method) -> Axis:
         raise RunRefused(
             f"{where}: method {method.name} takes a grid; write base and exponents, or values"
         )
-    ratio: float | None
-    if form == "exponents":
-        values, ratio = _powers(where, spec)
-    elif form == "values":
-        values, ratio = _stated(where, spec)
-    else:
-        values, ratio = _around(where, spec)
-    if "extend" in spec:
-        extend = spec["extend"]
-        if extend is False:
-            ratio = None
-        elif _number(extend) and extend > 1:
-            ratio = float(extend)
-        else:
-            raise RunRefused(f"{where}.extend must be false or a ratio above 1")
-    if len(values) < 3:
-        raise RunRefused(f"{where} has {len(values)} values; an interior best needs at least 3")
-    return Axis(key=key, values=values, ratio=ratio)
+    return form
+
+
+def _extension(where: str, extend: Any) -> float | None:
+    """A dial's ``extend``: false is not extendable, a ratio above 1 is its step."""
+
+    if extend is False:
+        return None
+    if _number(extend) and extend > 1:
+        return float(extend)
+    raise RunRefused(f"{where}.extend must be false or a ratio above 1")
 
 
 def _powers(where: str, spec: Mapping[str, Any]) -> tuple[list[float | int], float | None]:
@@ -319,6 +330,16 @@ def _around(where: str, spec: Mapping[str, Any]) -> tuple[list[float | int], flo
         raise RunRefused(f"{where}.decades must be an integer, 1 or more")
     values = [float(_decimal(centre).scaleb(k)) for k in range(-decades, decades + 1)]
     return values, 10.0
+
+
+#: Each grid form and how it is built: ``(values, extension ratio)``.
+_GRID_FORMS: dict[
+    str, Callable[[str, Mapping[str, Any]], tuple[list[float | int], float | None]]
+] = {
+    "exponents": _powers,
+    "values": _stated,
+    "centre": _around,
+}
 
 
 # ---------------------------------------------------------------------------

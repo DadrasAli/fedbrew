@@ -502,38 +502,11 @@ def analyze(
     for q in quantiles:
         if not 0.0 <= q <= 1.0:
             raise AnalysisError(f"a quantile must lie in [0, 1], got {q}")
-    directories, notes = find_runs(paths)
-    runs: list[Run] = []
-    warnings: list[str] = []
-    for directory in directories:
-        try:
-            runs.append(read_run(directory))
-        except (OSError, ValueError, csv.Error) as error:
-            notes.append(f"{directory}: not read ({error})")
-    if not runs:
-        raise AnalysisError("no run to analyze. " + "; ".join(notes))
+    runs, notes = _read_runs(paths)
     chosen = resolve_metrics(runs, metrics)
-    chosen_directions = {
-        metric: (directions or {}).get(metric, default_direction(metric)) for metric in chosen
-    }
-    for metric, direction in chosen_directions.items():
-        if direction not in {"min", "max"}:
-            raise AnalysisError(f"the direction of {metric} must be min or max, got {direction!r}")
+    chosen_directions = _directions_of(chosen, directions)
     groups = group_runs(runs)
-    summaries: list[RunSummary] = []
-    for group, members in groups.items():
-        for run in sorted(members, key=lambda r: (r.seed is None, r.seed, str(r.path))):
-            if run.config is None:
-                warnings.append(
-                    f"{run.path}: no {RUN_JSON} with a config, so its group is its parent directory"
-                )
-            for metric in chosen:
-                if metric not in run.columns:
-                    warnings.append(f"{run.label}: has no {metric} column")
-                    continue
-                summary, found = summarize_run(run, group, metric, chosen_directions[metric])
-                summaries.append(summary)
-                warnings.extend(found)
+    summaries, warnings = _summaries(groups, chosen, chosen_directions)
     return Analysis(
         metrics=chosen,
         quantiles=list(quantiles),
@@ -543,6 +516,54 @@ def analyze(
         warnings=_unique(warnings),
         notes=notes,
     )
+
+
+def _read_runs(paths: Sequence[str | Path]) -> tuple[list[Run], list[str]]:
+    """Every run ``paths`` name or hold, and a note for each that was not one or not read."""
+
+    directories, notes = find_runs(paths)
+    runs: list[Run] = []
+    for directory in directories:
+        try:
+            runs.append(read_run(directory))
+        except (OSError, ValueError, csv.Error) as error:
+            notes.append(f"{directory}: not read ({error})")
+    if not runs:
+        raise AnalysisError("no run to analyze. " + "; ".join(notes))
+    return runs, notes
+
+
+def _directions_of(metrics: Sequence[str], directions: Mapping[str, str] | None) -> dict[str, str]:
+    chosen = {
+        metric: (directions or {}).get(metric, default_direction(metric)) for metric in metrics
+    }
+    for metric, direction in chosen.items():
+        if direction not in {"min", "max"}:
+            raise AnalysisError(f"the direction of {metric} must be min or max, got {direction!r}")
+    return chosen
+
+
+def _summaries(
+    groups: Mapping[str, list[Run]], metrics: Sequence[str], directions: Mapping[str, str]
+) -> tuple[list[RunSummary], list[str]]:
+    """Each run's summary per metric, the runs of a group in seed order, and the warnings."""
+
+    summaries: list[RunSummary] = []
+    warnings: list[str] = []
+    for group, members in groups.items():
+        for run in sorted(members, key=lambda r: (r.seed is None, r.seed, str(r.path))):
+            if run.config is None:
+                warnings.append(
+                    f"{run.path}: no {RUN_JSON} with a config, so its group is its parent directory"
+                )
+            for metric in metrics:
+                if metric not in run.columns:
+                    warnings.append(f"{run.label}: has no {metric} column")
+                    continue
+                summary, found = summarize_run(run, group, metric, directions[metric])
+                summaries.append(summary)
+                warnings.extend(found)
+    return summaries, warnings
 
 
 def _unique(items: Iterable[str]) -> list[str]:
