@@ -13,7 +13,13 @@ What is held:
 - the shipped table: every convex arm has its entry, and each entry's ``F*`` is
   the value that setting's own manifest held when every setting was its own
   generated dataset; on the synthetic corpora, generated here, each convex
-  arm's task finds that same value by its corpus's digest;
+  arm's task finds that same value by its corpus's digest where this build
+  makes the shipped rows, and on any other build the F* ``fedbrew generate``
+  certified beside the data on demand, to the same KKT bound;
+- certified on demand: a corpus whose digest the shipped table lacks gets the
+  shipped table's problems for its name certified beside its data, marked
+  with the machine and build; the shipped table is unchanged; the task and the
+  planned columns read the shipped table first and then the local one;
 - a conditioned design has its condition number, whatever the thread count;
 - a LIBSVM source is read as its rows, pinned by its digest, and dealt by a key
   that does not depend on the order a row is summed in.
@@ -215,7 +221,9 @@ class TheLookupTest(unittest.TestCase):
                 self.assertEqual(task._optimal_objective, at)
 
     def test_a_convex_problem_without_an_entry_is_refused(self) -> None:
-        with self.assertRaisesRegex(ValueError, "has no certified F"):
+        with self.assertRaisesRegex(
+            ValueError, "neither the optima table nor the machine-local table"
+        ):
             _small_task("logistic", "l1", penalty_strength=0.05)
 
     def test_an_entry_at_another_digest_is_refused(self) -> None:
@@ -285,22 +293,163 @@ class TheShippedTableTest(unittest.TestCase):
             with self.subTest(corpus=corpus):
                 self.assertEqual(len(found), 1)
 
-    def test_the_cheap_corpora_find_their_f_star_by_digest(self) -> None:
+    def test_the_cheap_corpora_find_their_f_star_here(self) -> None:
+        """Generated here, each convex arm's task finds its F*: shipped, or certified on demand.
+
+        Where this build makes the shipped rows (the corpus's digest is the shipped
+        entry's), F* is the shipped value, and nothing was certified beside the data.
+        On any other build -- another torch's vectorized kernels, another LAPACK --
+        the rows differ in their last bits, ``fedbrew generate`` certified the same
+        problem on them, and the task's F* is that local entry's, certified on this
+        machine to the same KKT bound, within 1e-9 of the shipped value.
+        """
+
         for corpus in CHEAP_CORPORA:
             config = yaml.safe_load((GENERATOR_CONFIGS / f"{corpus}.yaml").read_text())
             manifest = _generate(config, Path(_root.name) / corpus)
+            digest = yaml.safe_load(manifest.read_text())["reference"]["corpus_digest"]
+            local = {
+                problem._key_of(entry): entry
+                for entry in problem.read_optima(manifest.parent / problem.LOCAL_OPTIMA)
+            }
             for name, arm, model in self._convex_arms():
                 if name != corpus:
                     continue
+                key = (corpus, model["loss"], model["penalty"], float(model["penalty_strength"]))
+                wanted = (digest, *key[1:])
                 with self.subTest(arm=f"{corpus}/{arm.stem}"):
                     task = _task(manifest, model)
-                    key = (
-                        corpus,
-                        model["loss"],
-                        model["penalty"],
-                        float(model["penalty_strength"]),
+                    shipped = [e for e in self.entries if problem._key_of(e) == wanted]
+                    if shipped:
+                        self.assertEqual(task._optimal_objective, PREVIOUS_F_STAR[key])
+                        self.assertNotIn(wanted, local)
+                        continue
+                    entry = local[wanted]
+                    self.assertEqual(entry["certified_on"], problem.CERTIFIED_HERE)
+                    self.assertEqual(entry["build"]["torch"], torch.__version__)
+                    self.assertLessEqual(entry["kkt_residual"], problem.CERTIFICATE)
+                    self.assertEqual(task._optimal_objective, entry["f_star"])
+                    self.assertLess(
+                        abs(entry["f_star"] - PREVIOUS_F_STAR[key]) / PREVIOUS_F_STAR[key], 1e-9
                     )
-                    self.assertEqual(task._optimal_objective, PREVIOUS_F_STAR[key])
+
+
+class CertifiedOnDemandTest(unittest.TestCase):
+    """A corpus the shipped table was not certified on is certified beside its data, on demand.
+
+    Driven on the small corpus with a stand-in shipped table, so the path runs on
+    every build, this one included: ``shipped(digest)`` is a table certifying the
+    small corpus's convex problems at ``digest``.
+    """
+
+    def setUp(self) -> None:
+        manifest, _ = small_corpus()
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.root = Path(self._directory.name)
+        self.data = self.root / "data"
+        self.data.mkdir()
+        for item in manifest.parent.iterdir():
+            target = self.data / item.name
+            if item.is_dir():
+                target.symlink_to(item, target_is_directory=True)
+            elif item.name != problem.LOCAL_OPTIMA:
+                target.write_bytes(item.read_bytes())
+        self.manifest = self.data / manifest.name
+        self.digest = yaml.safe_load(self.manifest.read_text())["reference"]["corpus_digest"]
+        self.spec = _small_spec("logistic", "l1")
+
+    def shipped(self, digest: str, f_star: float | None = None) -> Path:
+        path = self.root / f"shipped-{digest[:6]}.json"
+        for loss, penalty in problem.PROBLEMS:
+            if problem.convex(loss, penalty):
+                entry = problem.certify(_small_spec(loss, penalty))
+                entry["digest"] = digest
+                if f_star is not None:
+                    entry["f_star"] = f_star
+                problem.write_optimum(path, entry)
+        return path
+
+    def model(self, table: Path, loss: str = "logistic", penalty: str = "l1") -> dict[str, Any]:
+        return {
+            "input_dim": 8,
+            "penalty_strength": 0.03,
+            "loss": loss,
+            "penalty": penalty,
+            "optima": str(table),
+        }
+
+    def test_another_builds_rows_are_certified_beside_the_data(self) -> None:
+        table = self.shipped("0" * 64)
+        before = table.read_bytes()
+        made = problem.certify_on_demand(self.spec, self.data, self.digest, table=table)
+        convex = [
+            (loss, penalty) for loss, penalty in problem.PROBLEMS if problem.convex(loss, penalty)
+        ]
+        self.assertEqual(sorted((e["loss"], e["penalty"]) for e in made), sorted(convex))
+        local = problem.read_optima(self.data / problem.LOCAL_OPTIMA)
+        self.assertEqual([problem._key_of(e) for e in local], [problem._key_of(e) for e in made])
+        for entry in local:
+            with self.subTest(problem=(entry["loss"], entry["penalty"])):
+                self.assertEqual(entry["digest"], self.digest)
+                self.assertEqual(entry["certified_on"], problem.CERTIFIED_HERE)
+                self.assertEqual(
+                    set(entry["build"]),
+                    {"torch", "blas", "lapack", "cpu_capability", "cpu", "qr_threads"},
+                )
+                self.assertLessEqual(entry["kkt_residual"], problem.CERTIFICATE)
+                reference = problem.certify(_small_spec(entry["loss"], entry["penalty"]))
+                self.assertEqual(entry["f_star"], reference["f_star"])
+        # The shipped table is not changed, and a second generation certifies nothing more.
+        self.assertEqual(table.read_bytes(), before)
+        self.assertEqual(
+            problem.certify_on_demand(self.spec, self.data, self.digest, table=table), []
+        )
+
+    def test_nothing_is_certified_where_the_shipped_table_holds_the_digest(self) -> None:
+        table = self.shipped(self.digest)
+        self.assertEqual(
+            problem.certify_on_demand(self.spec, self.data, self.digest, table=table), []
+        )
+        self.assertFalse((self.data / problem.LOCAL_OPTIMA).exists())
+
+    def test_nor_for_a_corpus_the_shipped_table_does_not_name(self) -> None:
+        other = dataclasses.replace(self.spec, corpus="another")
+        table = self.shipped("0" * 64)
+        self.assertEqual(problem.certify_on_demand(other, self.data, self.digest, table=table), [])
+
+    def test_the_task_reads_the_shipped_table_then_the_local_one(self) -> None:
+        elsewhere = self.shipped("0" * 64)
+        with self.assertRaisesRegex(ValueError, problem.LOCAL_OPTIMA):
+            _task(self.manifest, self.model(elsewhere))
+        problem.certify_on_demand(self.spec, self.data, self.digest, table=elsewhere)
+        local = {
+            problem._key_of(e): e for e in problem.read_optima(self.data / problem.LOCAL_OPTIMA)
+        }
+        task = _task(self.manifest, self.model(elsewhere))
+        key = (self.digest, "logistic", "l1", 0.03)
+        self.assertEqual(task._optimal_objective, local[key]["f_star"])
+        self.assertEqual(task.optimum_entry["certified_on"], problem.CERTIFIED_HERE)
+        # Where both hold the digest, the shipped entry is the one read.
+        here = self.shipped(self.digest, f_star=0.125)
+        self.assertEqual(_task(self.manifest, self.model(here))._optimal_objective, 0.125)
+
+    def test_the_planned_columns_read_the_local_table_too(self) -> None:
+        from types import SimpleNamespace
+
+        elsewhere = self.shipped("0" * 64)
+        config = SimpleNamespace(
+            data=SimpleNamespace(path=str(self.manifest)),
+            model=SimpleNamespace(
+                input_dim=8,
+                extra={k: v for k, v in self.model(elsewhere).items() if k != "input_dim"},
+            ),
+        )
+        self.assertIsNone(problem.reported_metrics(config))
+        problem.certify_on_demand(self.spec, self.data, self.digest, table=elsewhere)
+        reported = problem.reported_metrics(config)
+        assert reported is not None
+        self.assertIn("optimality_gap", reported.central)
 
 
 class TheConditionNumberDialTest(unittest.TestCase):

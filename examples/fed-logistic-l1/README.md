@@ -233,6 +233,21 @@ shape -- and the task, at the start of a run:
   are then not the ones `F*` was solved on;
 - on a nonconvex problem, looks nothing up and reports no gap.
 
+**Certified on demand.** A corpus's rows depend on the build that makes them:
+the Halton design goes through `torch.special.ndtri`, whose vectorized kernel
+gives other last bits under another torch (torch 2.5.1 against 2.13, on one
+CPU), and a reconditioned design through LAPACK's QR. On another build the
+shipped table therefore holds no entry for the generated digest. So `fedbrew
+generate`, when the corpus's digest is not in the shipped table, certifies on
+these rows every problem the shipped table certifies for the corpus's name --
+`certify`, the same solve and the same KKT bound -- and writes the entries to
+`optima.local.json` beside the generated data, each marked
+`"certified_on": "this machine"` with the build it was made on (torch, BLAS,
+LAPACK, CPU). The shipped table is not changed. The task, and the plan's
+column list, look an entry up in the shipped table (or `model.optima`) first,
+then in the local one, and refuse only when neither holds it. On the build the
+shipped table was certified on, the digests match and nothing is certified.
+
 `python examples/fed-logistic-l1/certify.py --config <corpus config> --problem
 <loss> <penalty> <λ>` makes an entry: it rebuilds the corpus from its
 generator config, bit for bit what `fedbrew generate` writes on the same
@@ -285,6 +300,7 @@ on, and the support exists only at `support_tolerance`.
 | --- | --- |
 | `problem.py` | the losses, penalties and their gradients, the generator, the reference solves, the task and the model, `register()` and `_self_check()` |
 | `optima.json` | the certified optima of the convex problems, keyed by corpus digest, loss, penalty and `λ` |
+| `<generated data>/optima.local.json` | written by `fedbrew generate` on a build whose rows the shipped table was not certified on: the same problems, certified on this machine |
 | `certify.py` | certifies problems on a corpus and writes their entries into the table |
 | `run.py` | runs one corpus's arms through `fedbrew run` and tables their final round |
 | `../../data/configs/examples/fed-logistic-l1-*.yaml` | one generator config per corpus |

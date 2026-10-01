@@ -74,7 +74,11 @@ vector, and kept in one table (:data:`OPTIMA_TABLE`) keyed by the corpus's
 digest, the loss, the penalty and `lam` (:func:`certify`, ``certify.py``). The
 task looks `F*` up there and refuses a convex problem without an entry
 (:func:`find_optimum`): the one structural difference from fed-lasso, whose
-task re-derives its closed form.
+task re-derives its closed form. The rows depend on the build (the vectorized
+normal quantile and the QR), so on a build whose digest the shipped table does
+not hold, ``fedbrew generate`` certifies the table's problems for the corpus on
+these rows into :data:`LOCAL_OPTIMA` beside the data (:func:`certify_on_demand`),
+and the task reads that table after the shipped one.
 
 What this file registers
 ------------------------
@@ -95,6 +99,7 @@ from __future__ import annotations
 import bz2
 import csv
 import ctypes
+import dataclasses
 import hashlib
 import json
 import math
@@ -1460,6 +1465,13 @@ def generate_fed_logistic_l1_from_config(
     }
     manifest_path = save_manifest(output_dir, manifest)
     save_clients_jsonl(output_dir, clients)
+    for entry in certify_on_demand(spec, output_dir, str(reference["corpus_digest"])):
+        print(
+            f"certified on this machine: {entry['corpus']} {entry['loss']}+{entry['penalty']} "
+            f"lam={entry['lam']!r}, F* = {entry['f_star']!r}, KKT {entry['kkt_residual']:.2e} "
+            f"-> {output_dir / LOCAL_OPTIMA}",
+            flush=True,
+        )
     return GenerationSummary(
         manifest_path=manifest_path,
         num_clients=len(clients),
@@ -1561,25 +1573,93 @@ def read_optima(path: Path) -> list[dict[str, Any]]:
     return list(json.loads(path.read_text(encoding="utf-8"))["optima"])
 
 
-def write_optimum(path: Path, entry: Mapping[str, Any]) -> None:
+#: What the shipped table says it is.
+SHIPPED_ABOUT = (
+    "Certified optima of examples/fed-logistic-l1's convex problems, keyed by the "
+    "corpus's content digest (corpus_digest), the loss, the penalty and lam. "
+    "Written by examples/fed-logistic-l1/certify.py."
+)
+
+#: The machine-local table ``fedbrew generate`` writes beside a corpus whose
+#: digest the shipped table does not hold (:func:`certify_on_demand`).
+LOCAL_OPTIMA = "optima.local.json"
+#: How a local entry says where it was certified; ``build`` says on what.
+CERTIFIED_HERE = "this machine"
+LOCAL_ABOUT = (
+    "Optima certified on this machine by fedbrew generate, for a corpus whose rows the "
+    "shipped table (examples/fed-logistic-l1/optima.json) was not certified on: the same "
+    "problems, solved on these rows to the same KKT bound. Each entry records the build "
+    "it was made on. Read after the shipped table, by the task beside this data."
+)
+
+
+def write_optimum(path: Path, entry: Mapping[str, Any], about: str = SHIPPED_ABOUT) -> None:
     """Add an entry to a table, replacing the one with the same key, sorted by corpus."""
 
     key = _key_of(entry)
     entries = [old for old in read_optima(path) if _key_of(old) != key] + [dict(entry)]
     entries.sort(key=lambda item: (item["corpus"], item["loss"], item["penalty"], item["lam"]))
-    payload = {
-        "about": (
-            "Certified optima of examples/fed-logistic-l1's convex problems, keyed by the "
-            "corpus's content digest (corpus_digest), the loss, the penalty and lam. "
-            "Written by examples/fed-logistic-l1/certify.py."
-        ),
-        "optima": entries,
-    }
+    payload = {"about": about, "optima": entries}
     path.write_text(json.dumps(payload, indent=1, allow_nan=False) + "\n", encoding="utf-8")
 
 
 def _key_of(entry: Mapping[str, Any]) -> tuple[str, str, str, float]:
     return (str(entry["digest"]), str(entry["loss"]), str(entry["penalty"]), float(entry["lam"]))
+
+
+def certify_on_demand(
+    spec: ProblemSpec, output_dir: Path, digest: str, table: Path | None = None
+) -> list[dict[str, Any]]:
+    """Certify, on these rows, the problems the shipped table certifies for this corpus elsewhere.
+
+    The corpus's rows depend on the build that made them (:func:`conditioned`,
+    and ``torch.special.ndtri``'s vectorized kernel, which gives other last
+    bits under another torch), so on another build the shipped table holds no
+    entry for this digest. Each problem the shipped table certifies for the
+    corpus's name and neither table holds at this digest is solved here by
+    :func:`certify` -- the solve and the KKT bound ``certify.py`` uses -- and
+    written to :data:`LOCAL_OPTIMA` beside the data, marked certified on this
+    machine, with the build. The shipped table (``table``, default
+    :data:`OPTIMA_TABLE`) is not changed. A corpus whose digest the shipped
+    table holds certifies nothing, so on the build the table was made on
+    generation is what it was.
+    """
+
+    shipped = read_optima(OPTIMA_TABLE if table is None else table)
+    local = Path(output_dir) / LOCAL_OPTIMA
+    held = {_key_of(entry) for entry in (*shipped, *read_optima(local))}
+    problems = sorted(
+        {
+            (str(entry["loss"]), str(entry["penalty"]), float(entry["lam"]))
+            for entry in shipped
+            if entry["corpus"] == spec.corpus
+        }
+    )
+    made = []
+    for loss, penalty, lam in problems:
+        if (digest, loss, penalty, lam) in held:
+            continue
+        problem = dataclasses.replace(spec, loss=loss, penalty=penalty, penalty_strength=lam)
+        entry = certify(problem)
+        if entry["digest"] != digest:
+            raise RuntimeError(
+                f"certified {loss}+{penalty} on digest {entry['digest']}, not the generated "
+                f"{digest}: the corpus was rebuilt with other rows"
+            )
+        entry.update(certified_on=CERTIFIED_HERE, build=lapack_record())
+        local.parent.mkdir(parents=True, exist_ok=True)
+        write_optimum(local, entry, about=LOCAL_ABOUT)
+        made.append(entry)
+    return made
+
+
+def optima_entries(table: Path, data_dir: Path | None) -> list[dict[str, Any]]:
+    """The shipped (or named) table's entries, then the local table's beside the data, if any."""
+
+    entries = read_optima(table)
+    if data_dir is not None:
+        entries += read_optima(Path(data_dir) / LOCAL_OPTIMA)
+    return entries
 
 
 def find_optimum(
@@ -1601,12 +1681,15 @@ def find_optimum(
         if entry["corpus"] == spec.corpus and _key_of(entry)[1:] == wanted[1:]:
             raise ValueError(
                 f"the optima table certifies {problem} on corpus {spec.corpus!r} at digest "
-                f"{entry['digest']}, and this data's digest is {digest}: F* was solved on other "
-                "rows, so it is not this data's optimum. Regenerate the corpus where the table "
-                "was certified, or certify it here with examples/fed-logistic-l1/certify.py."
+                f"{entry['digest']}, and this data's digest is {digest}, which neither it nor "
+                f"the machine-local table beside the data ({LOCAL_OPTIMA}) holds: F* was solved "
+                "on other rows, so it is not this data's optimum. Regenerate the corpus with "
+                "fedbrew generate, which certifies it on this machine, or certify it with "
+                "examples/fed-logistic-l1/certify.py."
             )
     raise ValueError(
-        f"the optima table has no certified F* for {problem} on corpus {spec.corpus!r} "
+        f"neither the optima table nor the machine-local table beside the data "
+        f"({LOCAL_OPTIMA}) has a certified F* for {problem} on corpus {spec.corpus!r} "
         f"(digest {digest}), and the problem is convex, so every run on it reports a gap. "
         "Certify it with examples/fed-logistic-l1/certify.py."
     )
@@ -1720,7 +1803,9 @@ class FedLogisticL1Task(TaskAdapter):
         entry: Mapping[str, Any] = {}
         if spec.certified:
             table = Path(str(model_config.get("optima") or OPTIMA_TABLE))
-            entry = find_optimum(read_optima(table), digest, spec)
+            manifest_path = str(metadata.get("manifest_path") or "")
+            data_dir = Path(manifest_path).parent if manifest_path else None
+            entry = find_optimum(optima_entries(table, data_dir), digest, spec)
             self._optimum = _x_star_of(entry, spec.dim).to(self.device)
             self._optimal_objective = float(entry["f_star"])
         self.optimum_entry = dict(entry)
@@ -2138,6 +2223,7 @@ def reported_metrics(config: Any) -> ReportedMetrics | None:
     """
 
     from fedbrew.core import inferred
+    from fedbrew.core.paths import resolve_data_path
 
     manifest = inferred.read_manifest(config.data.path)
     reference = dict((manifest or {}).get("reference") or {})
@@ -2149,7 +2235,10 @@ def reported_metrics(config: Any) -> ReportedMetrics | None:
         entry: Mapping[str, Any] = {}
         if spec.certified:
             table = Path(str(model_config.get("optima") or OPTIMA_TABLE))
-            entry = find_optimum(read_optima(table), str(reference["corpus_digest"]), spec)
+            data_dir = Path(resolve_data_path(config.data.path)).parent
+            entry = find_optimum(
+                optima_entries(table, data_dir), str(reference["corpus_digest"]), spec
+            )
     except (KeyError, TypeError, ValueError):
         return None
     return _reported(spec, entry)
