@@ -213,13 +213,18 @@ def _cuda_usable() -> bool:
 @pytest.mark.cuda
 @unittest.skipUnless(_cuda_usable(), "needs a usable CUDA device")
 class OnCudaTest(ResidentRuns):
-    """On CUDA the update runs on the device: eager and replayed, the per-round path's."""
+    """On CUDA the update runs on the device, where the per-round path runs it on the host.
+
+    The same arithmetic on another kind of device: the resident round agrees with the
+    per-round path to the executor's float32 tolerance, as a batched run agrees with a
+    sequential one there (docs/11 §9), and its eager and replayed rounds are the same
+    kernels, so they agree with each other bit for bit.
+    """
 
     def test_eager_and_replayed(self) -> None:
         for label, config, data in _arms():
             with self.subTest(arm=label):
                 config = _clean(config)
-                config["schedule"]["rounds"] = 6
                 config["runtime"]["device"] = "cuda"
                 with data():
                     eager = self.run_config(config, "batched")
@@ -227,8 +232,8 @@ class OnCudaTest(ResidentRuns):
                     with per_round():
                         reference = self.run_config(config, "batched")
                 self.assertEqual(_executor(eager)["rounds"], {"used": "resident"})
-                self.assertSameRun(eager, reference)
-                self.assertSameRun(graphed, reference)
+                self.assertAgree(eager, reference, tolerance=1e-4)
+                self.assertSameRun(graphed, eager)
                 self.assertEqual(_executor(graphed)["cuda_graphs"]["used"], "on")
 
 

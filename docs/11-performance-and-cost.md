@@ -606,8 +606,11 @@ computes, bit for bit on the same device:
   own `update_from_fold` there (chapter 07 §3.2): the model it returns is the
   round's, and the moments it carries stay on the device. The update is
   elementwise arithmetic, written without a move to the CPU, so it rounds as
-  the per-round path's does on the CPU; the fold's finiteness is what a round
-  is judged on, as the per-round path judges its aggregate. The flush reads
+  the per-round path's does on the CPU; on CUDA it runs on the device where the
+  per-round path runs it on the host, so the two agree there to the executor's
+  float32 tolerance, as a batched run agrees with a sequential one (§9), while the
+  eager and the graph-replayed resident rounds are the same kernels and agree
+  exactly. The fold's finiteness is what a round is judged on, as the per-round path judges its aggregate. The flush reads
   each round's model and moments back, and the server adopts them
   (`adopt_update`), so a checkpoint holds the moments and the update count the
   per-round path's holds.
@@ -948,7 +951,7 @@ python tools/bench_compare_runs.py --help
 | `tests/test_docs_performance.py` | The dataloader keys, their gates, the staging keys and the tool list here match the code. |
 | `tests/test_client_csv_append.py` | The per-client CSVs append rather than rewrite. |
 | `tests/test_round_metrics_are_appended.py` | `round_metrics.csv` appends rather than rewrites. |
-| `tests/test_resident_fold_update.py` | §9.1: FedOpt's four optimizers resident are the per-round path bit for bit: every CSV cell and checkpoint, the moments and update count included, at full and Bernoulli participation (a round that selects none), uniform weighting, a flush window, a float64 example, a stall and a non-finite aggregate inside a window, and a resume; a server that updates its own way runs per round and says why; on CUDA, eager and replayed. |
+| `tests/test_resident_fold_update.py` | §9.1: FedOpt's four optimizers resident are the per-round path bit for bit: every CSV cell and checkpoint, the moments and update count included, at full and Bernoulli participation (a round that selects none), uniform weighting, a flush window, a float64 example, a stall and a non-finite aggregate inside a window, and a resume; a server that updates its own way runs per round and says why; on CUDA, the resident round against the per-round path to the float32 tolerance, and eager against replayed bit for bit. |
 | `tests/test_resident_clients.py` | §3: a client stays built while its shard is cached, at the released trajectory and within the cache's budget. |
 | `tests/test_long_lived_objects_are_frozen.py` | §3: what the first round built is frozen out of the collector from the second round to the run's end, by any exit, and a process's own freeze or disabled collector is left alone. |
 | `tests/test_finiteness_is_checked_on_the_aggregate.py` | One finiteness check per round on the average, still naming the client. |
