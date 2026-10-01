@@ -75,6 +75,7 @@ from fedbrew.core.batched_executor import (
     trained_state_keys,
     uploaded,
 )
+from fedbrew.core.convergence import observe_round, state_of
 from fedbrew.core.federated_state import model_state_size
 from fedbrew.core.metrics import filter_metrics
 from fedbrew.core.protocol import FitRequest, RoundInfo
@@ -1877,6 +1878,7 @@ class _Loop:
 
         context = self.context
         state, round_id = context.state, round_info.round_id
+        observe_round(context.running_means, round_id, round_info.metrics)
         metrics = dict(round_info.metrics)
         if isinstance(context.server_payload, dict):
             context.server_payload["metrics"] = metrics
@@ -1891,6 +1893,7 @@ class _Loop:
                 metrics,
                 round_id,
                 self.rounds.client_states,
+                state_of(context.running_means),
             ),
             metrics,
             context.output_dir,

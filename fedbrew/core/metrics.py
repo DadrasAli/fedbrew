@@ -188,6 +188,11 @@ POST_FIT_RULE_METRICS = frozenset({"fit_total_loss"})
 GRAD_NORM_COLUMN = "grad_norm_sq"
 GRAD_NORM_DIRECTION = "min"
 
+#: The suffix of a column holding the exact mean of another column over the
+#: run's iterates (``convergence.metrics``, fedbrew/core/convergence.py): the
+#: column keeps the direction of the one it is the mean of.
+RUNNING_MEAN_SUFFIX = "_running_mean"
+
 _SPLIT_PREFIXES = ("central_test_", "fit_", "train_", "val_", "test_")
 #: Aggregates of one metric across clients that keep its direction: an
 #: average, an extreme or the worst-percent mean of accuracies is still better
@@ -206,6 +211,8 @@ def declared_direction(name: str, directions: Mapping[str, str]) -> str | None:
     ``fit_proximal_loss``, a server diagnostic, a spread.
     """
 
+    if name.endswith(RUNNING_MEAN_SUFFIX):
+        return declared_direction(name.removesuffix(RUNNING_MEAN_SUFFIX), directions)
     if name == GRAD_NORM_COLUMN:
         return GRAD_NORM_DIRECTION
     rest = name.removeprefix("personal_")
@@ -491,6 +498,17 @@ def metric_gloss(
     without it, a classification task's.
     """
 
+    if name.endswith(RUNNING_MEAN_SUFFIX):
+        base = metric_gloss(
+            name.removesuffix(RUNNING_MEAN_SUFFIX),
+            split_glosses=split_glosses,
+            metric_glosses=metric_glosses,
+        )
+        return (
+            "Exact mean over the run's iterates x_1 .. x_t (the global model after each of "
+            f"rounds 1 to t) of this metric, the expected value at a uniformly random output "
+            f"iterate: {base[:1].lower()}{base[1:]}"
+        )
     glosses = METRIC_BASE_GLOSSES if metric_glosses is None else metric_glosses
     task = _task_metric_gloss(name, glosses)
     if task is not None:

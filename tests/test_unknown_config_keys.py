@@ -251,6 +251,7 @@ class RootKeysTest(unittest.TestCase):
                 "evaluation",
                 "reporting",
                 "divergence",
+                "convergence",
                 "server_config",
                 "client_config",
                 "extends",

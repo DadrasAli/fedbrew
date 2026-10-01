@@ -555,6 +555,22 @@ with its round's others. The three agree to the executor tolerance. The pass
 restores every random generator and the model's mode, so the other columns and
 the checkpoints are those of a run with it off.
 
+### 6.2 The running mean over the run's iterates
+
+`convergence.metrics` (chapter 04 §9.1; off by default) adds
+`<column>_running_mean` for each metric it names — `grad_norm_sq` or a
+`central_test_*` column (`fedbrew/core/convergence.py`). The value on round `t`
+is the **exact mean** `(1/t) Σ_{s≤t} m(x_s)` over the iterates `x_1, .., x_t`,
+the global model after each of rounds 1 to `t`; `x_0` is not one. On the final
+round it is `E m(x_R)` for `R` uniform on `{1, .., T}`, the quantity Ghadimi and
+Lan's randomized-output bounds are on. It is `math.fsum(values) / t` bit for
+bit (the sum is kept as exact partials, written to the checkpoint). The column
+keeps the direction of the metric (`declared_direction`), and is NaN from the
+first round the metric is missing or not finite.
+
+The metric itself is evaluated every round; it is written only on the rounds
+`evaluation.central_test.every` or `evaluation.grad_norm.every` schedule.
+
 ## 7. Algorithm-specific metrics
 
 Emitted only by the arms that produce them. Each is a real column in
@@ -988,6 +1004,7 @@ Every key that adds, removes or renames a column.
 | `evaluation.central_test.every` | `10` | Same, for every `central_test_*` column. |
 | `evaluation.fit.every` | `1` | Which rounds have values in the `fit_*` task columns and FedProx's `fit_total_loss`, which come from the post-fit pass (§1); `never` removes those columns. |
 | `evaluation.grad_norm.every` | `never` | Adds `grad_norm_sq` (§6.1), with values on the rounds it schedules. |
+| `convergence.metrics` | `[]` | Adds `<column>_running_mean` for each metric named (§6.2), valued on every round. |
 | `evaluation.{train,val,test}.clients` | `participating`, `all`, `all` | Which clients enter the aggregate — changes the numbers, not the column set. |
 | `divergence.metric` | `"fit_loss"` | Requires that metric to be present every round. `validate_config` refuses a name a non-empty `reporting.fit_metrics` would filter out (`config.py`, `_validate_divergence_metric_is_reachable`). |
 | `checkpointing.best_metric` | — | Requires that column to exist; validated against `client_metric_names` at config load. |
@@ -1094,6 +1111,7 @@ head -1 <output_dir>/round_metrics.csv | tr ',' '\n'
 | `tests/test_fedlalr_diagnostics.py` | §7.3: each FedLALR learning-rate column equals its hand-computed estimand for two clients with known rates, no name is both a coordinate and an across-clients statistic, a retired name is refused in every config place that names a metric, and a resume onto CSVs carrying one is refused and changes nothing (`POST-F14`). |
 | `tests/test_divergence_metric_reachable.py` | §12's cross-check: it fires on a name a non-empty `reporting.fit_metrics` would drop, the rule's extras and the strategy's diagnostics included, stays quiet for evaluation columns and `central_test_*`, derives `CLIENT_UNFILTERED_FIT_METRICS` from every rule's `fit`, no shipped config trips it, and the check stays in `validate_config` rather than the preflight module. |
 | `tests/test_client_history_summary.py` | The running totals `client_update_metrics.csv` column names come from. |
+| `tests/test_convergence_running_mean.py` | §6.2: the exact sum is `math.fsum` after every addition; the column is the mean of the metric's values on rounds 1 to t bit for bit; the section changes nothing but the columns it adds; resident, per-round and sequential agree; a resume continues the means and a checkpoint without them refuses it; the names resolve and a bad one is refused. |
 | `tests/test_grad_norm.py` | §6.1: `grad_norm_sq` is autograd's gradient of the pooled objective at random points on every linear example (fed-lasso's l1 case against its analytic subgradient), the three paths agree, a run with it on writes every other column and checkpoint as one with it off, off runs no pass, and the planned columns are the written ones for every task. |
 | `tests/test_metric_filter_scope.py` | §4.3, §7.2 and §7.3: both servers add diagnostics before the one filter, so the list keeps or drops them, the loop never filters, and §4.3 states the choice as one. Fails if a third server starts emitting diagnostics. |
 

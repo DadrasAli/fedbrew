@@ -255,6 +255,7 @@ def _run_loop(
         evaluation_seed=config.experiment.seed,
         divergence=config.divergence,
         divergence_direction=divergence_direction(config),
+        convergence=config.convergence,
         flush_every=config.runtime.extra.get("flush_every", 1),
         on_round_end=_round_progress_reporter(config, progress),
         on_round_flush=_run_json_writer(config, run_metadata, output_dir, run_started),

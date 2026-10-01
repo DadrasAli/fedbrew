@@ -30,6 +30,7 @@ from fedbrew.core.config import (
     CLIENT_METRIC_BASES,
     PERSONAL_SPLIT_PREFIX,
     ClientStatisticsConfig,
+    ConvergenceConfig,
     DivergenceConfig,
     EvaluationConfig,
     ReportingConfig,
@@ -37,6 +38,16 @@ from fedbrew.core.config import (
     parse_evaluation_client_scope,
     parse_evaluation_schedule,
     worst_percent_label,
+)
+from fedbrew.core.convergence import (
+    CHECKPOINT_KEY as CONVERGENCE_CHECKPOINT_KEY,
+)
+from fedbrew.core.convergence import (
+    RunningMeans,
+    continue_from,
+    observe_round,
+    set_up,
+    state_of,
 )
 from fedbrew.core.divergence import (
     STATUS_DIVERGED,
@@ -171,6 +182,10 @@ def run_fl_loop(
     executor: ClientExecutor | None = None,
     aggregator: Aggregator | None = None,
     evaluator: Evaluator | None = None,
+    # The exact means over the run's iterates the config asks for
+    # (fedbrew/core/convergence.py). None, which every config without the
+    # section is, changes nothing about the loop.
+    convergence: ConvergenceConfig | None = None,
 ) -> ExperimentState:
     """Run a minimal task-agnostic federated loop."""
 
@@ -195,6 +210,11 @@ def run_fl_loop(
     grad_norm_schedule = parse_evaluation_schedule(
         evaluation.grad_norm.every, "evaluation.grad_norm"
     )
+    # The passes the means need run every round, and the means drop the columns
+    # of a pass the config's own schedule did not ask for.
+    running_means, central_schedule, grad_norm_schedule = set_up(
+        convergence, central_schedule, grad_norm_schedule, global_rounds
+    )
     executor = executor or SequentialExecutor()
     aggregator = aggregator or StreamingAggregator()
     evaluator = evaluator or SequentialEvaluator()
@@ -202,6 +222,7 @@ def run_fl_loop(
     # Decided before anything is written: a resume that cannot be taken is
     # refused with the directory exactly as it was. POST-F25.
     server_payload, start_round, checkpoint = _initialize_or_resume(server, resume_from, output_dir)
+    continue_from(running_means, checkpoint, start_round, resume_from)
     # A run that was killed inside an artifact write can leave one temp file
     # behind. Swept here, before anything opens one for this run.
     clear_stale_temp_files(output_dir)
@@ -272,6 +293,7 @@ def run_fl_loop(
         central_schedule=central_schedule,
         fit_schedule=fit_schedule,
         grad_norm_schedule=grad_norm_schedule,
+        running_means=running_means,
         executor=executor,
         aggregator=aggregator,
         evaluator=evaluator,
@@ -416,6 +438,7 @@ def run_fl_loop(
             global_eval_seconds = time.perf_counter() - global_eval_started
 
             num_examples = fit_totals.num_examples
+            observe_round(running_means, round_id, round_info.metrics)
             metrics = dict(round_info.metrics)
             if isinstance(server_payload, dict):
                 server_payload["metrics"] = metrics
@@ -428,7 +451,14 @@ def run_fl_loop(
             # writer -- so checkpoint_sec times the snapshot; visible only at
             # the flush's commit, after the CSV rows and run.json. POST-F24.
             staged = _update_checkpoints(
-                _checkpoint_payload_builder(server, client, server_payload, metrics, round_id),
+                _checkpoint_payload_builder(
+                    server,
+                    client,
+                    server_payload,
+                    metrics,
+                    round_id,
+                    convergence_state=state_of(running_means),
+                ),
                 metrics,
                 output_dir,
                 round_id,
@@ -562,6 +592,7 @@ class LoopContext:
     central_schedule: int | None
     fit_schedule: int | None
     grad_norm_schedule: int | None
+    running_means: RunningMeans | None
     executor: ClientExecutor
     aggregator: Aggregator
     evaluator: Evaluator
@@ -1841,6 +1872,7 @@ def _checkpoint_payload_builder(
     metrics: dict[str, float],
     round_id: int,
     client_states: Callable[[], dict[str, Any] | None] | None = None,
+    convergence_state: dict[str, Any] | None = None,
 ) -> Callable[[], dict[str, Any] | None] | None:
     """Build the round's checkpoint payload on demand; None when there is no model.
 
@@ -1853,7 +1885,7 @@ def _checkpoint_payload_builder(
     if "model_state" not in server_payload:
         return None
     return lambda: _build_checkpoint_payload(
-        server, client, server_payload, metrics, round_id, client_states
+        server, client, server_payload, metrics, round_id, client_states, convergence_state
     )
 
 
@@ -1864,6 +1896,7 @@ def _build_checkpoint_payload(
     metrics: dict[str, float],
     round_id: int,
     client_states: Callable[[], dict[str, Any] | None] | None = None,
+    convergence_state: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """The round's checkpoint; ``client_states`` gives the stacked client states, if it is given.
 
@@ -1913,6 +1946,8 @@ def _build_checkpoint_payload(
     stacked = client_states() if client_states is not None else _stacked_client_states(client)
     if stacked is not None:
         checkpoint_state["client_states"] = stacked
+    if convergence_state is not None:
+        checkpoint_state[CONVERGENCE_CHECKPOINT_KEY] = convergence_state
     return checkpoint_state
 
 

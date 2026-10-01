@@ -33,7 +33,8 @@ Two differences are allowed, both declared here rather than taken on trust:
   recorded, confirms. ``client.metrics`` is ``MERGED`` into it and not
   compared on its own;
 - a key added since, under ``ADDED``, at the value that leaves a run as it
-  was: ``evaluation.grad_norm`` is off unless a config asks for it.
+  was: ``evaluation.grad_norm`` and ``convergence`` are off unless a config asks
+  for them.
 
 The ``schedule`` block, which ``defaults`` was renamed to, is read at load and
 never stored, so its rename moved nothing in the resolved config.
@@ -110,6 +111,8 @@ MOVED_FROM_ABSENT: dict[str, Any] = {
 ADDED: dict[str, Any] = {
     "evaluation.grad_norm.every": "never",
     "evaluation.grad_norm.extra": {},
+    "convergence.metrics": [],
+    "convergence.extra": {},
 }
 
 #: Inferred keys whose inferred value may differ from the recorded one.

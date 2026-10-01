@@ -489,6 +489,27 @@ class DivergenceConfig:
 
 
 @dataclass
+class ConvergenceConfig:
+    """What the run measures for its convergence rate: ``convergence``, off by default.
+
+    ``metrics`` names round columns -- ``grad_norm_sq``, or a task metric the
+    central pass reports (``optimality_gap`` or ``central_test_optimality_gap``,
+    ``loss`` or ``central_test_loss``, ...). For each, the run evaluates it at
+    every round's global model and writes ``<column>_running_mean``: the exact
+    mean of it over the iterates ``x_1 .. x_t``, the global model after each
+    of the rounds 1 to ``t``. That is the expected value of the metric at a
+    uniformly random output iterate (Ghadimi and Lan's randomized output,
+    SIAM J. Optim. 23(4), 2013); the initial model ``x_0`` is not one of the
+    iterates (``fedbrew/core/convergence.py``). Written resolved to the full
+    column names, as ``evaluation``'s splits are resolved to what the data
+    carries. Empty: the section is off, and nothing about the run changes.
+    """
+
+    metrics: list[str] = field(default_factory=list)
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class FullConfig:
     """Resolved benchmark configuration."""
 
@@ -503,6 +524,7 @@ class FullConfig:
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     reporting: ReportingConfig = field(default_factory=ReportingConfig)
     divergence: DivergenceConfig = field(default_factory=DivergenceConfig)
+    convergence: ConvergenceConfig = field(default_factory=ConvergenceConfig)
     #: The keys the loader inferred because the config left them out, each
     #: with where from: ``model.input_dim`` and ``model.num_classes`` from the
     #: manifest, ``experiment.output_dir`` and ``experiment.name`` from the
@@ -682,6 +704,7 @@ def load_config(common_path: str | Path) -> FullConfig:
         evaluation=_build_evaluation_config(common.get("evaluation", {})),
         reporting=_build_reporting_config(common.get("reporting", {})),
         divergence=_build_divergence_config(common.get("divergence", {})),
+        convergence=_build_convergence_config(common.get("convergence", {})),
         inferred=inferred,
     )
     # Before validate_config, so the checks that read a split's schedule
@@ -902,6 +925,7 @@ _KNOWN_EXTRA_KEYS: dict[str, frozenset[str]] = {
     "reporting": frozenset(),
     "reporting.statistics": frozenset(),
     "divergence": frozenset(),
+    "convergence": frozenset(),
     # data.extra is forwarded as keyword arguments only to
     # synthetic_classification, whose every parameter is already a named
     # DataConfig field; for manifest_dataset it is dropped entirely.
@@ -1269,6 +1293,7 @@ def _validate_unknown_keys(config: FullConfig) -> None:
     _validate_known_keys("reporting", config.reporting.extra)
     _validate_known_keys("reporting.statistics", config.reporting.statistics.extra)
     _validate_known_keys("divergence", config.divergence.extra)
+    _validate_known_keys("convergence", config.convergence.extra)
 
     for name in ("checkpointing", "performance", "data_staging"):
         block = config.runtime.extra.get(name)
@@ -1618,6 +1643,7 @@ def validate_config(config: FullConfig) -> None:
     _refuse_ignored_active_target_weighting(config)
     _refuse_retired_metric_names(config)
     _validate_evaluation(config)
+    _validate_convergence(config)
     _validate_evaluation_model_scope(config)
     _validate_reporting(config.reporting)
     _validate_divergence(config.divergence)
@@ -1817,6 +1843,22 @@ def _build_divergence_config(values: object) -> DivergenceConfig:
     return DivergenceConfig(**known, extra=extra)
 
 
+def _build_convergence_config(values: object) -> ConvergenceConfig:
+    if values is None:
+        return ConvergenceConfig()
+    if not isinstance(values, Mapping):
+        raise RunRefused("convergence must be a mapping or null")
+    known, extra = _split_extra(values, ConvergenceConfig)
+    metrics = known.get("metrics", [])
+    if metrics is None:
+        metrics = []
+    if isinstance(metrics, str):
+        metrics = [metrics]
+    if not isinstance(metrics, list | tuple) or not all(isinstance(m, str) for m in metrics):
+        raise RunRefused("convergence.metrics must be a list of metric names")
+    return ConvergenceConfig(metrics=list(metrics), extra=extra)
+
+
 def parse_evaluation_schedule(value: object, context: str) -> int | None:
     """Turn an ``every`` value into an interval in rounds.
 
@@ -1963,6 +2005,30 @@ def _validate_grad_norm_evaluation(config: FullConfig) -> None:
             f"which {' and '.join(watched)} watches. Measure it on a schedule, or watch "
             "another metric."
         )
+
+
+def _validate_convergence(config: FullConfig) -> None:
+    """convergence.metrics names columns the run can evaluate at every round; resolved in place.
+
+    A name is ``grad_norm_sq`` (for a task that declares F's gradient), a
+    column the central pass reports (``central_test_<metric>``), or the bare
+    name of a metric the task reports centrally, which means that column.
+    Refused: a name that is none of these, a repeat, and a name the task's
+    central pass does not report.
+    """
+
+    from fedbrew.core.convergence import resolve_convergence_metrics
+
+    metrics = config.convergence.metrics
+    if not metrics:
+        return
+    reported = task_reported_metrics(config).central
+    config.convergence.metrics = resolve_convergence_metrics(
+        metrics,
+        central=reported,
+        grad_norm=task_grad_norm_gloss(config) is not None,
+        task=config.task.name,
+    )
 
 
 def _validate_evaluation(config: FullConfig) -> None:

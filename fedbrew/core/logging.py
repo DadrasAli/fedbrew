@@ -57,6 +57,7 @@ from fedbrew.core.console import (
     build_surface,
     measure,
 )
+from fedbrew.core.convergence import running_mean_column
 from fedbrew.core.divergence import DivergenceVerdict
 from fedbrew.core.metrics import (
     FIXED_METRIC_GLOSSES,
@@ -498,6 +499,9 @@ def _metrics_rows(config: FullConfig, *, verbose: bool) -> list[Row]:
     if grad_norm is not None:
         rows.append(Row("evaluation.grad_norm", grad_norm))
     rows.append(Row("evaluation.model_scope", config.evaluation.model_scope))
+    if config.convergence.metrics:
+        listed = ", ".join(config.convergence.metrics)
+        rows.append(Row("convergence", f"every round, the mean over the iterates of {listed}"))
 
     checkpointing = config.runtime.extra.get("checkpointing")
     if isinstance(checkpointing, Mapping) and checkpointing.get("best_metric"):
@@ -686,6 +690,7 @@ def _planned_metric_names(config: FullConfig) -> list[str]:
         names.extend(f"central_test_{name}" for name in reported.central)
     if _grad_norm_is_measured(config):
         names.append(GRAD_NORM_COLUMN)
+    names.extend(running_mean_column(metric) for metric in config.convergence.metrics)
     return _ordered_metric_names(_deduplicate(names))
 
 

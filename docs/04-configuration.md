@@ -79,13 +79,14 @@ cheapest way to check a new config, and worth running before any long job.
 | `evaluation` | no | per-split schedules and client scope |
 | `reporting` | no | which columns are written: the one fit-metric filter, the cross-client statistics, the per-client CSVs — §9 |
 | `divergence` | no | when to stop a run that is not learning |
+| `convergence` | no | exact means of chosen metrics over the run's iterates, written every round — §9.1 |
 
-`numerics` and the last three have complete dataclass defaults, so a config
+`numerics` and the last four have complete dataclass defaults, so a config
 may omit them entirely -- though every shipped config states `numerics` in
 full (§7.5). The first seven have required fields and cannot be omitted.
 
 The root is closed like every block. A top-level key that is none of these
-eleven, and not `extends` (§2.2) or `server_config` or `client_config` below, is
+twelve, and not `extends` (§2.2) or `server_config` or `client_config` below, is
 refused at load,
 before anything is built: the message names the key, suggests the closest
 block, and lists every key the root accepts (`root_config_keys`,
@@ -779,6 +780,48 @@ without failing. `validate_config` refuses it, so the config fails to load and
 no run starts. Evaluation columns and `central_test_*` are exempt, because the
 list does not reach those — chapter 08 §4.3 says why. The empty default keeps
 everything and cannot go wrong.
+
+### 9.1 `convergence`
+
+Off by default (`metrics: []`). Convergence rates for stochastic non-convex
+methods are bounds on a **randomized output**: the method returns `x_R` with `R`
+drawn uniformly from `{1, .., T}` (Ghadimi and Lan, SIAM J. Optim. 23(4), 2013),
+and the bound is on `E‖∇F(x_R)‖² = (1/T) Σ_t ‖∇F(x_t)‖²`. The mean of an
+optimality gap `F(x_t) − F*` is what the convex rates bound for an averaged
+output. Neither can be read off a curve evaluated every tenth round.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `convergence.metrics` | `[]` | Round columns to take the mean of: `grad_norm_sq` (a task that declares F's gradient), or a metric the task's central pass reports, as `central_test_optimality_gap` or bare as `optimality_gap`. Resolved to the full column names at load. A name nothing evaluates, and a repeat, are refused. |
+
+For each metric the run evaluates it at **every round's global model** and
+writes `<column>_running_mean`, for example `grad_norm_sq_running_mean` and
+`central_test_optimality_gap_running_mean`. **The iterates are `x_1, .., x_t`:
+the global model after the aggregation of each of rounds 1 to `t`** — the model
+every `central_test_*` column and `grad_norm_sq` is measured at. The initial
+model `x_0` is not an iterate. The value on round `t` is `(1/t) Σ_{s≤t} m(x_s)`,
+and on the final round it is the expected metric at the randomized output of the
+whole run.
+
+- **Exact.** The sum is kept as Shewchuk's exact partials (the algorithm of
+  `math.fsum`), so the column is `math.fsum(values) / t` bit for bit, whatever
+  the number of rounds, the executor or a resume. `tests/test_convergence_running_mean.py`.
+- **Only the mean is added.** The passes the means need run every round, on the
+  device in the batched and resident paths, with the round's other evaluations
+  staged and read back at the flush; the host adds one value per metric per
+  round. A pass that `evaluation.central_test.every` or `evaluation.grad_norm.every`
+  did not ask for on a round is dropped from that round's row, so the CSV holds
+  the evaluations `evaluation` schedules plus the means. Every other cell and
+  every checkpoint tensor is that of the run without the section.
+- **Cost.** `grad_norm_sq` every round is a forward and backward over every
+  client's train rows per round; the central pass is a forward over the test set.
+  A run without the section pays nothing and builds nothing.
+- **A value that is missing or not finite** (a diverged model) makes the mean
+  NaN from that round on, which is the mean of a set with such a member.
+- **Resume.** Each checkpoint holds the partial sums of its round
+  (`convergence`), so a resumed run continues them. A checkpoint written
+  without the section cannot be continued with it on: the resume is refused,
+  with nothing changed.
 
 ## 10. Keys that were removed
 
