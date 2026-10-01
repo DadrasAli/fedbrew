@@ -11,7 +11,9 @@ the whole run:
   bucket's rows are its clients' rows gathered from that stack -- the tensors
   the round's own stacking gives, padded to the bucket's longest split;
 - **model**: the server's state is the round's mean, on the device, where the
-  fold left it; the next round's clients start from it without a copy;
+  fold left it -- or, for a server that updates from its fold (FedOpt), the
+  model its own ``update_from_fold`` makes of it there, with the moments it
+  carries; the next round's clients start from it without a copy;
 - **records**: each round's per-client outputs wait on the device until the
   flush, which reads them back in one copy and builds every record from them
   with the code the round itself would run, in the same order: each rule's
@@ -141,6 +143,7 @@ def resident_unsupported(context: Any) -> str | None:
 
 def _server_unsupported(context: Any) -> str | None:
     from fedbrew.servers.fedavg import FedAvgServer
+    from fedbrew.servers.fedopt import FedOptServer
     from fedbrew.servers.scaffold import ScaffoldServer
 
     server = context.server
@@ -150,10 +153,17 @@ def _server_unsupported(context: Any) -> str | None:
         "_accumulate_fit_results",
         "_accumulate_stacks",
         "_federated_payload",
+        "update_from_fold",
+        "carried_state",
+        "adopt_update",
     )
-    base = ScaffoldServer if _scaffold(context) else FedAvgServer
-    if base is ScaffoldServer:
+    if _scaffold(context):
+        base = ScaffoldServer
         own = (*own, "_aggregate", "aggregate_folded", "save_state", "load_state")
+    else:
+        # A server that updates from its fold declares it in its own class
+        # (FedOptServer); one that only inherits it is a FedAvg server.
+        base = FedOptServer if isinstance(server, FedOptServer) else FedAvgServer
     if not isinstance(server, base) or any(
         getattr(cls, name) is not getattr(base, name) for name in own
     ):
@@ -174,6 +184,14 @@ def _pipeline_unsupported(context: Any) -> str | None:
     if context.evaluation.model_scope != "global":
         return f"evaluation.model_scope is {context.evaluation.model_scope}"
     return None
+
+
+def _updates_from_its_fold(server: Any) -> bool:
+    """Whether the server does something with its fold but adopt it (``update_from_fold``)."""
+
+    from fedbrew.servers.fedavg import FedAvgServer
+
+    return type(server).update_from_fold is not FedAvgServer.update_from_fold
 
 
 def _scaffold(context: Any) -> bool:
@@ -439,6 +457,9 @@ class DeviceRound:
     #: The model after the round, where the fold left it; None for a round
     #: with no clients, whose model is the one before it.
     mean: dict[str, Tensor] | None = None
+    #: What the server's update carried on from the round, on the device (the
+    #: moments of a FedOpt server); None for a server that carries nothing.
+    carried: dict[str, dict[str, Tensor]] | None = None
     finite: Tensor | None = None
     staged: Tensor | None = None
     staged_layouts: list[StagedLayout] = field(default_factory=list)
@@ -517,6 +538,16 @@ class ResidentRounds:
         if self.unsupported is None:
             self.rows = ResidentRows(self.task, self.splits)
         self.model = self._placed(context.server._model_state)
+        #: Whether the server updates from its fold, and what that carries between
+        #: rounds: its moments, on the device, None before the first update.
+        server = context.server
+        self.updates = _updates_from_its_fold(server)
+        carried = server.carried_state() if self.updates else None
+        self.carried: dict[str, dict[str, Tensor]] | None = (
+            None
+            if carried is None
+            else {name: self._placed(state) for name, state in carried.items()}
+        )
         if self.scaffold and self.unsupported is None and context.server._server_control is None:
             self.unsupported = "the SCAFFOLD server's control variate is not initialized"
         if self.scaffold and self.unsupported is None:
@@ -706,7 +737,14 @@ class ResidentRounds:
             # The graph's own outputs are what its next replay writes over.
             mean = {name: value.clone() for name, value in mean.items()}
             finite = finite.clone()
+        if self.updates:
+            # The fold's finiteness is what the round is judged on, as the
+            # per-round path judges its aggregate; the update runs on it where it is.
+            mean, self.carried = self.context.server.update_from_fold(
+                self.model, mean, self.carried
+            )
         device_round.mean, device_round.finite = mean, finite
+        device_round.carried = self.carried
         self.model = mean
 
     def _prepare(self, planned: PlannedRound, device_round: DeviceRound) -> RoundPlan:
@@ -1115,8 +1153,8 @@ class ResidentRounds:
 
     def read_back(
         self, rounds: Sequence[DeviceRound]
-    ) -> list[tuple[list[float], dict[str, Tensor] | None]]:
-        """Every round's staged values and mean on the host, in one copy with one wait.
+    ) -> list[tuple[list[float], dict[str, Tensor] | None, dict[str, dict[str, Tensor]] | None]]:
+        """Every round's staged values, model and carried state on the host, in one copy.
 
         The copy waits for the window's last round alone, not for a round
         queued after it (``HostCopy``).
@@ -1128,21 +1166,31 @@ class ResidentRounds:
                 tensors.append(device_round.staged)
             if device_round.mean is not None:
                 tensors.extend(device_round.mean.values())
+            if device_round.mean is not None and device_round.carried is not None:
+                for state in device_round.carried.values():
+                    tensors.extend(state.values())
             for _, stack in device_round.trained:
                 tensors.extend(stack.values())
         copies = iter(self.copier.copy(tensors, rounds[-1].end))
-        read: list[tuple[list[float], dict[str, Tensor] | None]] = []
+        read: list[
+            tuple[list[float], dict[str, Tensor] | None, dict[str, dict[str, Tensor]] | None]
+        ] = []
         for device_round in rounds:
             values = next(copies).tolist() if device_round.staged is not None else []
-            mean = None
+            mean = carried = None
             if device_round.mean is not None:
                 mean = {name: next(copies) for name in device_round.mean}
+                if device_round.carried is not None:
+                    carried = {
+                        name: {key: next(copies) for key in state}
+                        for name, state in device_round.carried.items()
+                    }
             # SCAFFOLD's trained states, now the host's.
             device_round.trained = [
                 (slots, {name: next(copies) for name in stack})
                 for slots, stack in device_round.trained
             ]
-            read.append((values, mean))
+            read.append((values, mean, carried))
         return read
 
     def stacked_results(
@@ -1239,15 +1287,18 @@ class ResidentRounds:
         observer: Any,
         host_mean: dict[str, Tensor],
         start: dict[str, Tensor] | None = None,
+        host_carried: dict[str, dict[str, Tensor]] | None = None,
     ) -> dict[str, Any]:
         """What ``aggregate_stacked`` does with the round, from its staged values and its mean.
 
         ``start`` is the model before the round, on the host: SCAFFOLD's
-        control update reads it.
+        control update reads it. ``host_mean`` is the model the round leaves, and
+        ``host_carried`` what the server's update carried on (``adopt_update``).
 
         The observer is handed each chunk's stacked results as the executor
         hands them; the server's metrics are summed as ``_accumulate_stacks``
-        sums them; its state becomes the round's mean.
+        sums them; its state becomes the model the round left (the mean, for
+        FedAvg).
         """
 
         if self.scaffold:
@@ -1270,7 +1321,7 @@ class ResidentRounds:
                 continue
             columns, reported = stacked.metric_columns()
             metric_accumulator.add_columns(columns, stacked.counts(), reported)
-        server._model_state = host_mean
+        server.adopt_update(host_mean, host_carried)
         metrics = filter_metrics(metric_accumulator.result(), server.metrics)
         round_info.metrics.update(metrics)
         return server._federated_payload(metrics=metrics)
@@ -1688,15 +1739,19 @@ class _Loop:
 
         if not window:
             return False
-        for device_round, (values, host_mean) in zip(
+        for device_round, (values, host_mean, host_carried) in zip(
             window, self.rounds.read_back(window), strict=True
         ):
-            if self._record_round(device_round, values, host_mean):
+            if self._record_round(device_round, values, host_mean, host_carried):
                 return True
         return False
 
     def _record_round(
-        self, device_round: DeviceRound, values: list[float], host_mean: dict[str, Tensor] | None
+        self,
+        device_round: DeviceRound,
+        values: list[float],
+        host_mean: dict[str, Tensor] | None,
+        host_carried: dict[str, dict[str, Tensor]] | None,
     ) -> bool:
         """One round, recorded as ``run_fl_loop``'s body records it; whether the run stops here."""
 
@@ -1720,7 +1775,13 @@ class _Loop:
                 return self._refused(device_round, round_info, observer)
             assert host_mean is not None
             context.server_payload = rounds.aggregate(
-                device_round, values, round_info, observer, host_mean, start=self.host_model
+                device_round,
+                values,
+                round_info,
+                observer,
+                host_mean,
+                start=self.host_model,
+                host_carried=host_carried,
             )
             _check_weights(device_round, state)
             self.host_model = host_mean

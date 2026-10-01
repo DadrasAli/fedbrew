@@ -601,7 +601,16 @@ computes, bit for bit on the same device:
   step reads the same values in the same layout.
 - **Model.** The server's state is the round's mean, where the fold left it.
   The next round's clients start from it without a copy, and the host holds
-  it only as the checkpoints and the evaluation read it.
+  it only as the checkpoints and the evaluation read it. A server that
+  updates from its fold -- FedOpt's four optimizers -- hands the mean to its
+  own `update_from_fold` there (chapter 07 §3.2): the model it returns is the
+  round's, and the moments it carries stay on the device. The update is
+  elementwise arithmetic, written without a move to the CPU, so it rounds as
+  the per-round path's does on the CPU; the fold's finiteness is what a round
+  is judged on, as the per-round path judges its aggregate. The flush reads
+  each round's model and moments back, and the server adopts them
+  (`adopt_update`), so a checkpoint holds the moments and the update count the
+  per-round path's holds.
 - **The fold.** Each bucket's `weights @ rows` is added into sums on the
   device, and the sums are divided there by the total weight as a device
   tensor. Float addition rounds the same on either device, and so does that
@@ -686,7 +695,8 @@ computes, bit for bit on the same device:
   refused after the rounds before it are recorded.
 
 It applies when the run is batched with a planner (§9);
-uses FedAvg's server, fold and payload (or SCAFFOLD's, with its rule), the
+uses FedAvg's server, fold and payload, FedOpt's (its update from the fold),
+or SCAFFOLD's with its rule, the
 streaming aggregator and the batched evaluator at the global scope; trains
 `fedavg`, `local_sgd`, `local_adamw` or `scaffold`; holds every client's rows
 -- and, for SCAFFOLD, the control table and a flush window's trained states --
@@ -704,7 +714,9 @@ dataset, a stall and a non-finite aggregate inside a flush window, and a run
 stopped at a flush and between two and resumed from its `latest.pt`; SCAFFOLD
 in one bucket and several, with runs of one client, under both of its modes,
 with its norms reported, on a float64 example, with a control that stops
-being finite, and resumed from inside a flush window; and of
+being finite, and resumed from inside a flush window; FedOpt's four
+optimizers at full and Bernoulli participation, with the moments a checkpoint
+holds, stopped inside a window and resumed; and of
 the evaluation, that it is measured on the device, under mixed schedules and
 client scopes, a shuffled evaluation loader, a client without a `val` split,
 and a missing `test` split refused in the per-round path's words.
@@ -936,6 +948,7 @@ python tools/bench_compare_runs.py --help
 | `tests/test_docs_performance.py` | The dataloader keys, their gates, the staging keys and the tool list here match the code. |
 | `tests/test_client_csv_append.py` | The per-client CSVs append rather than rewrite. |
 | `tests/test_round_metrics_are_appended.py` | `round_metrics.csv` appends rather than rewrites. |
+| `tests/test_resident_fold_update.py` | §9.1: FedOpt's four optimizers resident are the per-round path bit for bit: every CSV cell and checkpoint, the moments and update count included, at full and Bernoulli participation (a round that selects none), uniform weighting, a flush window, a float64 example, a stall and a non-finite aggregate inside a window, and a resume; a server that updates its own way runs per round and says why; on CUDA, eager and replayed. |
 | `tests/test_resident_clients.py` | §3: a client stays built while its shard is cached, at the released trajectory and within the cache's budget. |
 | `tests/test_long_lived_objects_are_frozen.py` | §3: what the first round built is frozen out of the collector from the second round to the run's end, by any exit, and a process's own freeze or disabled collector is left alone. |
 | `tests/test_finiteness_is_checked_on_the_aggregate.py` | One finiteness check per round on the average, still naming the client. |
