@@ -187,14 +187,17 @@ from a zero start, the
 first server step would differ by less than a factor of two, for all three.
 
 **The update is a function of the round's fold.** `FedOptServer.update_from_fold(model,
-fold, carried)` (`fedbrew/servers/fedopt.py`) returns the model after a round whose
+fold, carried, round_info)` (`fedbrew/servers/fedopt.py`) returns the model after a round whose
 clients' mean is `fold`, and the moments it leaves (`carried`: `m`, and `v` for the
 three optimizers that have one; none before the first update). It reads and writes no
 server state and touches no device but its arguments', so the resident round
 (chapter 11 §9.1) can run it where the fold is, and `aggregate_stream` makes the same
 update on the host's tensors from the same functions. `FedAvgServer` has the same three
 methods (`update_from_fold`, `carried_state`, `adopt_update`) with the identity update,
-which is how a server tells the resident round what it does with a fold.
+which is how a server tells the resident round what it does with a fold; `adopt_update`
+returns the server's own metrics of the round, which join the clients'. The weights of
+the fold are the server's too (`fold_weights`: the example counts, or 1 each under
+`uniform`), read by the per-round path's fold and the resident round's alike.
 
 Yogi differs from Adam only in how `v` moves toward `delta_t^2`. Adam moves it
 by `(1-beta2)` of the gap between them; Yogi by `(1-beta2) * delta_t^2`, in the

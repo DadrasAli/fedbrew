@@ -349,15 +349,17 @@ class FedOptServer(FedAvgServer):
         model: Mapping[str, Any],
         fold: Mapping[str, Any],
         carried: Mapping[str, StateDict] | None,
+        round_info: RoundInfo,
     ) -> tuple[StateDict, dict[str, StateDict]]:
         """The model after a round whose clients' mean is ``fold``, and the moments it leaves.
 
         The pseudo-gradient is ``fold - model``; ``carried`` is ``{"m": ..., "v": ...}``
         as the last round left them, or None before the first update (the moments are
         then made as the first update makes them), and ``v`` is absent for an
-        optimizer with no second moment.
+        optimizer with no second moment. The update does not read ``round_info``.
         """
 
+        del round_info
         delta = _subtract(fold, model)
         carried = carried or {}
         update, m, v = self._step(delta, carried.get("m"), carried.get("v"))
@@ -371,13 +373,20 @@ class FedOptServer(FedAvgServer):
             return None
         return {"m": self._m} if self._v is None else {"m": self._m, "v": self._v}
 
-    def adopt_update(self, model: StateDict, carried: Mapping[str, StateDict] | None) -> None:
+    def adopt_update(
+        self,
+        model: StateDict,
+        carried: Mapping[str, StateDict] | None,
+        round_info: RoundInfo,
+    ) -> dict[str, float]:
         """Take the model and moments of one round ``update_from_fold`` computed elsewhere."""
 
+        del round_info
         assert carried is not None
         self._model_state = model
         self._m, self._v = carried["m"], carried.get("v")
         self._update_step += 1
+        return {}
 
     def _step(
         self, delta: Mapping[str, Any], m: StateDict | None, v: StateDict | None

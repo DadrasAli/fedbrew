@@ -284,30 +284,41 @@ class FedAvgServer(ServerStrategy):
         round_info.metrics.update(metrics)
         return self._federated_payload(metrics=metrics)
 
-    # -- the update from a round's fold -----------------------------------------
+    # -- the fold and the update from it ----------------------------------------
     #
-    # What a strategy does with the mean of its clients' states, as a function
-    # the resident round (fedbrew/core/resident.py) can run where the mean is:
-    # on its device, so the next round starts from the updated model without
-    # a copy. FedAvg adopts the mean; a strategy that updates from it
-    # overrides all three (FedOptServer) and its aggregate_stream makes the
-    # same update on the host's tensors, from the same function.
+    # What a strategy does with its clients' states, as functions the resident
+    # round (fedbrew/core/resident.py) can run where the states are: on its
+    # device, so the next round starts from the updated model without a copy.
+    # The fold's weights are the server's (fold_weights); what it does with the
+    # fold is update_from_fold. FedAvg adopts the mean; a strategy that updates
+    # from it overrides the update's three methods (FedOptServer), and its
+    # aggregate_stream makes the same update on the host's tensors, from the
+    # same function.
+
+    def fold_weights(self, counts: Sequence[int]) -> list[float]:
+        """Each client's weight in the fold, from the example counts its results report."""
+
+        if self.aggregation_weighting == "uniform":
+            return [1.0] * len(counts)
+        return [float(count) for count in counts]
 
     def update_from_fold(
         self,
         model: Mapping[str, Any],
         fold: Mapping[str, Any],
         carried: Mapping[str, dict[str, Any]] | None,
+        round_info: RoundInfo,
     ) -> tuple[dict[str, Any], dict[str, dict[str, Any]] | None]:
         """The model after a round whose clients' mean is ``fold``, and what it carries on.
 
         A pure function: it reads and writes no server state, and touches no
         device but its arguments'. ``carried`` is what the last round returned
         (named state of the model's shape, such as moments), None before the
-        first update. FedAvg's model is the mean itself, and carries nothing.
+        first update; ``round_info`` names the round. FedAvg's model is the
+        mean itself, and carries nothing.
         """
 
-        del model, carried
+        del model, carried, round_info
         return dict(fold), None
 
     def carried_state(self) -> dict[str, dict[str, Any]] | None:
@@ -316,12 +327,20 @@ class FedAvgServer(ServerStrategy):
         return None
 
     def adopt_update(
-        self, model: dict[str, Any], carried: Mapping[str, dict[str, Any]] | None
-    ) -> None:
-        """Take the model and carried state of a round ``update_from_fold`` computed elsewhere."""
+        self,
+        model: dict[str, Any],
+        carried: Mapping[str, dict[str, Any]] | None,
+        round_info: RoundInfo,
+    ) -> dict[str, float]:
+        """Take the model and carried state of a round ``update_from_fold`` computed elsewhere.
 
-        del carried
+        Returns the server's own metrics of the round, which join the clients'
+        before the run's one filter; FedAvg has none.
+        """
+
+        del carried, round_info
         self._model_state = model
+        return {}
 
     def _accumulate_fit_results(
         self,
@@ -388,11 +407,7 @@ class FedAvgServer(ServerStrategy):
                 continue
             self._compatible_stack(stacked)
             counts = stacked.counts()
-            weights = (
-                [1.0] * len(counts)
-                if self.aggregation_weighting == "uniform"
-                else [float(count) for count in counts]
-            )
+            weights = self.fold_weights(counts)
             accumulator.add_stacked(stacked.states, weights, stacked.client_ids)
             columns, reported = stacked.metric_columns()
             metric_accumulator.add_columns(columns, counts, reported)

@@ -18,6 +18,7 @@ from typing import cast
 import pytest
 import torch
 
+from fedbrew.core.protocol import RoundInfo
 from fedbrew.core.torch_utils import (
     StateDict,
     add_model_states,
@@ -31,6 +32,8 @@ from fedbrew.servers.fedavg import FedAvgServer
 from fedbrew.servers.fedopt import FedOptServer, unread_fedopt_hyperparameters
 
 pytestmark = pytest.mark.fast
+
+ROUND = RoundInfo(round_id=1, total_rounds=5)
 
 OPTIMIZERS = ("fedavgm", "fedadam", "fedyogi", "fedadagrad")
 SHAPES = {"weight": (5, 3), "bias": (3,), "scalar": ()}
@@ -104,7 +107,7 @@ class TheUpdateIsWhatItWasTest(unittest.TestCase):
                     m = v = None
                     for _ in range(5):
                         fold = _state(generator, dtype)
-                        model, carried = server.update_from_fold(model, fold, carried)
+                        model, carried = server.update_from_fold(model, fold, carried, ROUND)
                         reference_model, m, v = reference(server, reference_model, fold, m, v)
                         self.assertEqual(list(model), list(reference_model))
                         for key in model:
@@ -126,7 +129,7 @@ class TheUpdateIsWhatItWasTest(unittest.TestCase):
                     fold = _state(generator, torch.float64)
                     delta = subtract_model_states(fold, host._model_state)
                     host._model_state = host._apply_fedopt_update(delta)
-                    model, carried = functional.update_from_fold(model, fold, carried)
+                    model, carried = functional.update_from_fold(model, fold, carried, ROUND)
                     for key in model:
                         self.assertTrue(torch.equal(host._model_state[key], model[key]), key)
                     self.assertEqual(host._update_step, step + 1)
@@ -145,7 +148,7 @@ class AFunctionTest(unittest.TestCase):
                 generator = torch.Generator().manual_seed(5)
                 server = _server(optimizer)
                 model, fold = _state(generator, torch.float64), _state(generator, torch.float64)
-                _, carried = server.update_from_fold(model, fold, None)
+                _, carried = server.update_from_fold(model, fold, None, ROUND)
                 kept = {
                     "model": {k: t.clone() for k, t in model.items()},
                     "fold": {k: t.clone() for k, t in fold.items()},
@@ -153,7 +156,7 @@ class AFunctionTest(unittest.TestCase):
                         n: {k: t.clone() for k, t in s.items()} for n, s in carried.items()
                     },
                 }
-                server.update_from_fold(model, fold, carried)
+                server.update_from_fold(model, fold, carried, ROUND)
                 self.assertIsNone(server._model_state)
                 self.assertIsNone(server._m)
                 self.assertIsNone(server._v)
@@ -168,17 +171,17 @@ class AFunctionTest(unittest.TestCase):
         generator = torch.Generator().manual_seed(9)
         server = _server("fedadam")
         model, fold = _state(generator, torch.float64), _state(generator, torch.float64)
-        once, carried = server.update_from_fold(model, fold, None)
-        again, _ = server.update_from_fold(once, fold, carried)
-        fresh, _ = server.update_from_fold(once, fold, None)
+        once, carried = server.update_from_fold(model, fold, None, ROUND)
+        again, _ = server.update_from_fold(once, fold, carried, ROUND)
+        fresh, _ = server.update_from_fold(once, fold, None, ROUND)
         self.assertFalse(all(torch.equal(again[key], fresh[key]) for key in again))
 
     def test_the_server_adopts_a_round_computed_elsewhere(self) -> None:
         generator = torch.Generator().manual_seed(2)
         server = _server("fedyogi")
         model, fold = _state(generator, torch.float32), _state(generator, torch.float32)
-        new, carried = server.update_from_fold(model, fold, None)
-        server.adopt_update(new, carried)
+        new, carried = server.update_from_fold(model, fold, None, ROUND)
+        self.assertEqual(server.adopt_update(new, carried, ROUND), {})
         self.assertIs(server._model_state, new)
         self.assertIs(server._m, carried["m"])
         self.assertIs(server._v, carried["v"])
@@ -186,17 +189,25 @@ class AFunctionTest(unittest.TestCase):
         self.assertEqual(server.carried_state(), carried)
 
 
+class TheFoldsWeightsAreTheServersTest(unittest.TestCase):
+    def test_examples_and_uniform(self) -> None:
+        examples = FedAvgServer(participation_rate=1.0, seed=0)
+        uniform = FedAvgServer(participation_rate=1.0, seed=0, aggregation_weighting="uniform")
+        self.assertEqual(examples.fold_weights([3, 5, 0]), [3.0, 5.0, 0.0])
+        self.assertEqual(uniform.fold_weights([3, 5, 0]), [1.0, 1.0, 1.0])
+
+
 class FedAvgAdoptsTheFoldTest(unittest.TestCase):
     def test_the_model_is_the_fold_and_nothing_is_carried(self) -> None:
         server = FedAvgServer(participation_rate=1.0, seed=0)
         generator = torch.Generator().manual_seed(1)
         model, fold = _state(generator, torch.float64), _state(generator, torch.float64)
-        new, carried = server.update_from_fold(model, fold, None)
+        new, carried = server.update_from_fold(model, fold, None, ROUND)
         self.assertIsNone(carried)
         self.assertIsNone(server.carried_state())
         for key in fold:
             self.assertTrue(torch.equal(new[key], fold[key]))
-        server.adopt_update(new, carried)
+        self.assertEqual(server.adopt_update(new, carried, ROUND), {})
         self.assertIs(server._model_state, new)
 
 

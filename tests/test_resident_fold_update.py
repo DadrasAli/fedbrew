@@ -175,8 +175,8 @@ class WhoTakesItTest(ResidentRuns):
 
     def test_a_server_that_updates_its_own_way_is_not(self) -> None:
         class Own(FedOptServer):
-            def update_from_fold(self, model: Any, fold: Any, carried: Any) -> Any:
-                return super().update_from_fold(model, fold, carried)
+            def update_from_fold(self, model: Any, fold: Any, carried: Any, round_info: Any) -> Any:
+                return super().update_from_fold(model, fold, carried, round_info)
 
         with mock.patch("fedbrew.core.registry._build_fedopt_server", lambda *a, **k: Own(*a, **k)):
             output = self.run_config(_clean(fedopt("fedadam")), "batched")

@@ -741,7 +741,10 @@ class ResidentRounds:
             # The fold's finiteness is what the round is judged on, as the
             # per-round path judges its aggregate; the update runs on it where it is.
             mean, self.carried = self.context.server.update_from_fold(
-                self.model, mean, self.carried
+                self.model,
+                mean,
+                self.carried,
+                RoundInfo(round_id=device_round.round_id, total_rounds=self.context.global_rounds),
             )
         device_round.mean, device_round.finite = mean, finite
         device_round.carried = self.carried
@@ -755,10 +758,7 @@ class ResidentRounds:
             cut_chunks(self._costs(planned, device_round, program), self.executor.chunk_bytes)
         )
         server = self.context.server
-        if server.aggregation_weighting == "uniform":
-            weights = [1.0] * len(planned.positions)
-        else:
-            weights = [float(rows) for rows in device_round.eval_rows]
+        weights = server.fold_weights(device_round.eval_rows)
         total_weight = 0.0
         for weight in weights:
             total_weight += float(weight)
@@ -1321,8 +1321,8 @@ class ResidentRounds:
                 continue
             columns, reported = stacked.metric_columns()
             metric_accumulator.add_columns(columns, stacked.counts(), reported)
-        server.adopt_update(host_mean, host_carried)
-        metrics = filter_metrics(metric_accumulator.result(), server.metrics)
+        own = server.adopt_update(host_mean, host_carried, round_info)
+        metrics = filter_metrics({**metric_accumulator.result(), **own}, server.metrics)
         round_info.metrics.update(metrics)
         return server._federated_payload(metrics=metrics)
 
