@@ -604,7 +604,11 @@ runs of a group, for each of those four and for each round of three curves —
 the value, `best_so_far` and `running_mean` — it writes the count `n`, the
 median (the mean of the middle two for an even count), min, max and each
 `--quantiles` value (default 0.25, 0.75), by linear interpolation of the order
-statistics (Hyndman–Fan type 7, `numpy.quantile`'s default); a value that is
+statistics (Hyndman–Fan type 7, `numpy.quantile`'s default), and the `mean`
+with its upward and downward RMS deviations: with `m` the mean, `rms_up` is the
+root mean square of `v − m` over the values above `m` and `rms_down` that of
+`m − v` over the values below it (0 where there is none), so the band
+`[m − rms_down, m + rms_up]` lies inside `[min, max]`; a value that is
 not finite is left out of the statistic and of `n`. Written into `--out`
 (default `analysis/`), tidy, with a blank cell where a value does not exist:
 `runs.csv` (a row per run and metric), `groups.csv` (a row per group, metric and

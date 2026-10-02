@@ -12,8 +12,9 @@ computes, for each chosen metric ``m``:
   run wrote one (``convergence.metrics``, exact over every round) and
   otherwise a reconstruction from the evaluated rows only, with a warning;
 - across the runs of a group -- the runs whose configs are the same but for
-  their seed -- the median, minimum, maximum and the chosen quantiles of each
-  of those, per round and at the end.
+  their seed -- the median, minimum, maximum, the chosen quantiles, and the
+  mean with its upward and downward RMS deviations, of each of those, per
+  round and at the end.
 
 Evaluated rows. A cell the run left blank (a split not evaluated that round)
 is not a value: the last iterate is the last non-blank, the best and the
@@ -26,6 +27,13 @@ says which, and a run that reconstructs is warned about.
 Statistics. Quantiles interpolate linearly between order statistics (Hyndman
 and Fan's type 7, ``numpy.quantile``'s default); the median of an even count
 is the mean of the two middle values. Sums are ``math.fsum``.
+
+RMS deviations. With ``m`` the mean of the values, the upward RMS deviation
+is the root mean square of ``v - m`` over the values above ``m``, the
+downward one that of ``m - v`` over the values below it; 0 where there is no
+such value. ``[m - rms_down, m + rms_up]`` is the band they draw: inside
+``[min, max]``, so positive wherever every value is, and wider on the side the
+seeds spread to.
 """
 
 from __future__ import annotations
@@ -58,6 +66,9 @@ STATISTICS = ("last", "best", "mean_log10", "running_mean")
 CURVES = ("value", "best_so_far", "running_mean")
 
 DEFAULT_QUANTILES = (0.25, 0.75)
+
+#: The across-runs statistics every spread has, before the chosen quantiles.
+SPREAD = ("n", "median", "min", "max", "mean", "rms_up", "rms_down")
 
 
 class AnalysisError(Exception):
@@ -295,7 +306,7 @@ def median(values: Sequence[float]) -> float:
 
 
 def spread(values: Sequence[float], quantiles: Sequence[float]) -> dict[str, float]:
-    """n, median, min, max and each chosen quantile of ``values`` (the finite ones)."""
+    """n, median, min, max, the mean and its RMS deviations, and each quantile (finite values)."""
 
     finite = [v for v in values if math.isfinite(v)]
     out: dict[str, float] = {
@@ -303,10 +314,28 @@ def spread(values: Sequence[float], quantiles: Sequence[float]) -> dict[str, flo
         "median": median(finite),
         "min": min(finite) if finite else math.nan,
         "max": max(finite) if finite else math.nan,
+        **mean_and_rms_deviations(finite),
     }
     for q in quantiles:
         out[quantile_name(q)] = quantile(finite, q)
     return out
+
+
+def mean_and_rms_deviations(values: Sequence[float]) -> dict[str, float]:
+    """The mean, and the RMS deviation of the values above it and of those below it."""
+
+    if not values:
+        return {"mean": math.nan, "rms_up": math.nan, "rms_down": math.nan}
+    mean = math.fsum(values) / len(values)
+    above = [v - mean for v in values if v > mean]
+    below = [mean - v for v in values if v < mean]
+    return {"mean": mean, "rms_up": _rms(above), "rms_down": _rms(below)}
+
+
+def _rms(deviations: Sequence[float]) -> float:
+    if not deviations:
+        return 0.0
+    return math.sqrt(math.fsum(d * d for d in deviations) / len(deviations))
 
 
 def quantile_name(q: float) -> str:
@@ -646,7 +675,7 @@ def write_tables(result: Analysis, out: str | Path) -> list[Path]:
 
     directory = Path(out)
     directory.mkdir(parents=True, exist_ok=True)
-    spread_names = ["n", "median", "min", "max", *(quantile_name(q) for q in result.quantiles)]
+    spread_names = [*SPREAD, *(quantile_name(q) for q in result.quantiles)]
     run_rows, group_rows, curve_rows = result.run_rows(), result.group_rows(), result.curve_rows()
     _write_csv(
         directory / "runs.csv",

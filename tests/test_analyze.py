@@ -35,6 +35,7 @@ from fedbrew.core.analysis import (
     AnalysisError,
     analyze,
     default_direction,
+    mean_and_rms_deviations,
     median,
     quantile,
     quantile_name,
@@ -149,6 +150,24 @@ class TheStatisticsAreTheHandWorkedOnesTest(HandMade):
         log = self.row(result, "0.1", NORM, "mean_log10")
         self.assertAlmostEqual(log["median"], 0.5 * LOG2, places=14)
 
+    def test_the_mean_across_seeds_and_its_deviations(self) -> None:
+        # Group lr 0.2's last iterates are 1 and 3: mean 2, one deviation of 1 on each side.
+        last = self.row(self.result(), "0.2", NORM, "last")
+        self.assertEqual((last["mean"], last["rms_up"], last["rms_down"]), (2.0, 1.0, 1.0))
+        # Group lr 0.1's round-1 values 4, 8, 2: mean 14/3; above it 8, below it 4 and 2.
+        curve = {
+            (r["variable"], r["round_id"]): r
+            for r in self.result().curve_rows()
+            if r["metric"] == NORM and r["group"] == "client.learning_rate=0.1"
+        }
+        first = curve[("value", 1)]
+        mean = 14.0 / 3.0
+        self.assertEqual(first["mean"], mean)
+        self.assertEqual(first["rms_up"], 8.0 - mean)
+        self.assertEqual(
+            first["rms_down"], math.sqrt(math.fsum([(mean - 4) ** 2, (mean - 2) ** 2]) / 2)
+        )
+
     def test_an_even_count_has_the_mean_of_the_middle_two_as_its_median(self) -> None:
         result = self.result()
         last = self.row(result, "0.2", NORM, "last")
@@ -236,6 +255,22 @@ class TheStatisticsFunctionsTest(unittest.TestCase):
             (out["n"], out["median"], out["min"], out["max"], out["q50"]), (2.0, 2.0, 1.0, 3.0, 2.0)
         )
 
+    def test_the_mean_and_its_rms_deviations(self) -> None:
+        # 1, 2, 3, 10: mean 4; above it 10 (6); below it 1, 2, 3 (3, 2, 1).
+        out = mean_and_rms_deviations([1.0, 2.0, 3.0, 10.0])
+        self.assertEqual(out["mean"], 4.0)
+        self.assertEqual(out["rms_up"], 6.0)
+        self.assertEqual(out["rms_down"], math.sqrt(14.0 / 3.0))
+        self.assertEqual(
+            mean_and_rms_deviations([2.0, 2.0]), {"mean": 2.0, "rms_up": 0.0, "rms_down": 0.0}
+        )
+        self.assertTrue(all(math.isnan(v) for v in mean_and_rms_deviations([]).values()))
+        # In the spread, over the finite values only; the band stays inside [min, max].
+        out = spread([1.0, math.nan, 3.0, 10.0, 2.0], [])
+        self.assertEqual((out["mean"], out["rms_up"]), (4.0, 6.0))
+        self.assertGreaterEqual(out["mean"] - out["rms_down"], out["min"])
+        self.assertLessEqual(out["mean"] + out["rms_up"], out["max"])
+
     def test_names(self) -> None:
         self.assertEqual(
             (quantile_name(0.25), quantile_name(0.025), quantile_name(0.9)), ("q25", "q2.5", "q90")
@@ -266,7 +301,10 @@ class TheTablesTest(HandMade):
         groups = list(csv.DictReader((out / "groups.csv").open()))
         self.assertEqual(len(groups), 2 * 2 * 4)  # groups x metrics x statistics
         self.assertEqual(list(groups[0])[:3], ["group", "metric", "statistic"])
-        self.assertEqual(list(groups[0])[3:], ["n", "median", "min", "max", "q10", "q90"])
+        self.assertEqual(
+            list(groups[0])[3:],
+            ["n", "median", "min", "max", "mean", "rms_up", "rms_down", "q10", "q90"],
+        )
         curves = list(csv.DictReader((out / "curves.csv").open()))
         # ACC is evaluated on rounds 2 to 4 only: no value row for round 1.
         self.assertFalse(
