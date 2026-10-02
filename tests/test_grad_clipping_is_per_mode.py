@@ -367,6 +367,7 @@ class RefusedAtConfigLoadTest(unittest.TestCase):
                 "fedprox",
                 "scaffold",
                 "fedlalr",
+                "fedlada",
                 "local_sgd",
                 "local_adamw",
             },

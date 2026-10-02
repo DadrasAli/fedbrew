@@ -61,6 +61,11 @@ DELTA_SGD_CLIENT_RULES = {"delta_sgd"}
 #: AMSGrad reads, so neither half works with anything else.
 FEDLALR_SERVER_STRATEGIES = {"fedlalr"}
 FEDLALR_CLIENT_RULES = {"fedlalr"}
+#: FedLADA (arXiv:2308.00522). A matched pair: the server sends the second
+#: moment and the amended direction the client's local AMSGrad steps with, and
+#: takes its server step eta_g toward the clients' mean.
+FEDLADA_SERVER_STRATEGIES = {"fedlada"}
+FEDLADA_CLIENT_RULES = {"fedlada"}
 LOCAL_TRAINING_CLIENT_RULES = {
     "local_adamw",
     "fedprox",
@@ -68,6 +73,7 @@ LOCAL_TRAINING_CLIENT_RULES = {
     *SCAFFOLD_CLIENT_RULES,
     *DELTA_SGD_CLIENT_RULES,
     *FEDLALR_CLIENT_RULES,
+    *FEDLADA_CLIENT_RULES,
     *FEDAVG_FT_CLIENT_RULES,
 }
 
@@ -454,6 +460,14 @@ def _build_server(
             **common_kwargs,
             epsilon=_client_extra_positive_float_with_default(config, "epsilon", DEFAULT_EPSILON),
         )
+    if config.server.strategy in FEDLADA_SERVER_STRATEGIES:
+        # epsilon from the client block, as for FedLALR: it seeds v = epsilon^2
+        # and is the client's AMSGrad floor. Every value stated, none defaulted.
+        return server_factory(
+            **common_kwargs,
+            epsilon=_client_extra_positive_float(config, "epsilon"),
+            server_learning_rate=_server_extra_float(config, "server_learning_rate"),
+        )
     if config.server.strategy in FEDOPT_SERVER_STRATEGIES:
         # `fedopt` is the only strategy whose optimizer the config chooses. For
         # the four named ones the builder supplies its own, which used to be
@@ -649,11 +663,27 @@ def _training_client_kwargs(
             ),
         )
 
+    kwargs.update(_adaptive_rule_kwargs(config))
+    return kwargs
+
+
+def _adaptive_rule_kwargs(config: FullConfig) -> dict[str, Any]:
+    """The settings of the rules that adapt their own step: FedLALR's, FedLADA's, Delta-SGD's."""
+
+    kwargs: dict[str, Any] = {}
     if config.client.update_rule in FEDLALR_CLIENT_RULES:
         kwargs.update(
             beta1=_client_extra_positive_float_with_default(config, "beta1", DEFAULT_BETA1),
             beta2=_client_extra_positive_float_with_default(config, "beta2", DEFAULT_BETA2),
             epsilon=_client_extra_positive_float_with_default(config, "epsilon", DEFAULT_EPSILON),
+        )
+
+    if config.client.update_rule in FEDLADA_CLIENT_RULES:
+        kwargs.update(
+            beta1=_client_extra_float(config, "beta1"),
+            beta2=_client_extra_float(config, "beta2"),
+            epsilon=_client_extra_positive_float(config, "epsilon"),
+            lada_alpha=_client_extra_float(config, "lada_alpha"),
         )
 
     if config.client.update_rule in DELTA_SGD_CLIENT_RULES:

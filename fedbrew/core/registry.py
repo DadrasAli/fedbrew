@@ -610,6 +610,7 @@ def register_builtin_components() -> None:
     _register_once(server_strategies, "fedopt", _build_fedopt_server)
     _register_once(server_strategies, "scaffold", _build_scaffold_server)
     _register_once(server_strategies, "fedlalr", _build_fedlalr_server)
+    _register_once(server_strategies, "fedlada", _build_fedlada_server)
     # The centralized baseline runs the FedAvg server and client unchanged over a
     # single pooled client (see fedbrew/data/centralized_dataset.py). Averaging one
     # result is the identity, so the baseline differs from a FedAvg run only in how
@@ -623,6 +624,7 @@ def register_builtin_components() -> None:
     _register_once(client_updates, "scaffold", _build_torch_scaffold_client)
     _register_once(client_updates, "delta_sgd", _build_delta_sgd_client)
     _register_once(client_updates, "fedlalr", _build_fedlalr_client)
+    _register_once(client_updates, "fedlada", _build_fedlada_client)
     _register_once(client_updates, "fedavg_ft", _build_fedavg_ft_client)
     _register_once(datasets, "synthetic_classification", _build_synthetic_dataset)
     _register_once(datasets, "manifest_dataset", _build_manifest_dataset)
@@ -985,6 +987,20 @@ def _build_fedlalr_server(*args: Any, **kwargs: Any) -> ServerStrategy:
         from fedbrew.servers.fedlalr import FedLALRServer
 
     return FedLALRServer(*args, **kwargs)
+
+
+def _build_fedlada_client(*args: Any, **kwargs: Any) -> ClientUpdate:
+    with _suppress_torch_numpy_warning():
+        from fedbrew.clients.torch_fedlada_client import TorchFedLADAClient
+
+    return TorchFedLADAClient(*args, **kwargs)
+
+
+def _build_fedlada_server(*args: Any, **kwargs: Any) -> ServerStrategy:
+    with _suppress_torch_numpy_warning():
+        from fedbrew.servers.fedlada import FedLADAServer
+
+    return FedLADAServer(*args, **kwargs)
 
 
 @contextmanager

@@ -34,6 +34,7 @@ from fedbrew.clients.torch_delta_sgd_client import (
     DEFAULT_THETA_0,
     TorchDeltaSGDClient,
 )
+from fedbrew.clients.torch_fedlada_client import TorchFedLADAClient
 from fedbrew.clients.torch_fedlalr_client import (
     DEFAULT_BETA1,
     DEFAULT_BETA2,
@@ -113,6 +114,9 @@ BUILDERS = {
     "fedlalr": lambda: TorchFedLALRClient(
         **_kwargs(), beta1=DEFAULT_BETA1, beta2=DEFAULT_BETA2, epsilon=DEFAULT_EPSILON
     ),
+    "fedlada": lambda: TorchFedLADAClient(
+        **_kwargs(), beta1=0.9, beta2=0.99, epsilon=1e-8, lada_alpha=0.1
+    ),
 }
 
 
@@ -135,6 +139,7 @@ def _request() -> FitRequest:
             "server_control": zeros,
             "momentum_state": zeros,
             "second_moment_state": zeros,
+            "amended_direction_state": zeros,
         },
     )
 
@@ -199,6 +204,7 @@ class MeterMatchesPayloadTest(unittest.TestCase):
             "delta_sgd": 1,
             "scaffold": 2,
             "fedlalr": 3,
+            "fedlada": 3,
         }
         self.assertEqual(set(expected), set(BUILDERS))
 

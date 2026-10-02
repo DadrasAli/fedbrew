@@ -39,6 +39,9 @@ FULL_STATE_ONLY_CLIENT_RULES: Mapping[str, str] = {
     "fedlalr": "its local AMSGrad looks its moments up by the model's parameter "
     "names, which under a PEFT adapter carry the adapter name the federated "
     "state's keys do not",
+    "fedlada": "its local AMSGrad looks its moments and amended direction up by "
+    "the model's parameter names, which under a PEFT adapter carry the adapter "
+    "name the federated state's keys do not",
 }
 
 
@@ -78,7 +81,16 @@ def refuse_adapter_state(client: Any, rule: str, model: Any) -> None:
 #: task answers that question with `model.active_target_weighting`, so under
 #: the second set the key has no effect. FINDINGS.csv POST-F30.
 AGGREGATION_WEIGHT_HOOK_CLIENT_RULES = frozenset(
-    {"fedavg", "centralized", "fedavg_ft", "local_sgd", "local_adamw", "delta_sgd", "fedlalr"}
+    {
+        "fedavg",
+        "centralized",
+        "fedavg_ft",
+        "local_sgd",
+        "local_adamw",
+        "delta_sgd",
+        "fedlalr",
+        "fedlada",
+    }
 )
 AGGREGATION_WEIGHT_HOOK_BYPASS_RULES = frozenset({"fedprox", "scaffold"})
 

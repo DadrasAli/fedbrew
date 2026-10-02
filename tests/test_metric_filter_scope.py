@@ -44,6 +44,7 @@ import pytest
 import torch
 
 from fedbrew.core.protocol import FitResult, RoundInfo
+from fedbrew.servers.fedlada import FedLADAServer
 from fedbrew.servers.fedlalr import FedLALRServer
 from fedbrew.servers.scaffold import ScaffoldServer
 
@@ -68,6 +69,7 @@ DIAGNOSTICS = {
         "effective_learning_rate_across_clients_min",
         "effective_learning_rate_across_clients_max",
     ),
+    "fedlada.py": ("second_moment_norm", "amended_direction_norm"),
 }
 
 
@@ -150,7 +152,45 @@ def _fedlalr_round(metrics: list[str]) -> RoundInfo:
     return round_info
 
 
-ROUNDS = {"scaffold.py": _scaffold_round, "fedlalr.py": _fedlalr_round}
+def _fedlada_round(metrics: list[str]) -> RoundInfo:
+    server = FedLADAServer(
+        epsilon=1e-8,
+        server_learning_rate=1.0,
+        participation_rate=1.0,
+        seed=0,
+        metrics=metrics,
+        aggregation_weighting="uniform",
+    )
+    _seed_model_state(server)
+    server._ensure_state()
+    round_info = RoundInfo(round_id=1)
+    server.aggregate(
+        round_info,
+        [
+            FitResult(
+                round_id=1,
+                client_id=client_id,
+                num_examples=10,
+                payload={
+                    "model_state": _state(rate),
+                    "model_state_scope": "full",
+                    "model_state_metadata": {"model_state_scope": "full"},
+                    "second_moment_state": _state(1.0),
+                    "amended_direction_state": _state(rate),
+                },
+                metrics=_client_metrics(),
+            )
+            for client_id, rate in (("a", 2.0), ("b", 4.0))
+        ],
+    )
+    return round_info
+
+
+ROUNDS = {
+    "scaffold.py": _scaffold_round,
+    "fedlalr.py": _fedlalr_round,
+    "fedlada.py": _fedlada_round,
+}
 
 
 class DiagnosticsGoThroughTheListTest(unittest.TestCase):

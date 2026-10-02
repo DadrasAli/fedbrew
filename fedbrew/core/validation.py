@@ -34,6 +34,8 @@ from fedbrew.core.factory import (
     CENTRALIZED_SERVER_STRATEGIES,
     DELTA_SGD_CLIENT_RULES,
     FEDAVG_FT_CLIENT_RULES,
+    FEDLADA_CLIENT_RULES,
+    FEDLADA_SERVER_STRATEGIES,
     FEDLALR_CLIENT_RULES,
     FEDLALR_SERVER_STRATEGIES,
     FEDOPT_SERVER_STRATEGIES,
@@ -104,6 +106,7 @@ AGGREGATION_WEIGHTING_NOTICE: Mapping[str, str | None] = {
     "fedyogi": "algorithm.fedopt_aggregation_weighting",
     "fedadagrad": "algorithm.fedopt_aggregation_weighting",
     "fedlalr": "algorithm.fedlalr_aggregation_weighting",
+    "fedlada": "algorithm.fedlada_aggregation_weighting",
     # FedAvg is the source of example weighting: McMahan et al. Algorithm 1
     # averages by n_k, so the default is the paper and there is nothing to say.
     "fedavg": None,
@@ -971,6 +974,8 @@ def _validate_shipped_algorithm_compatibility(
         _validate_fedavg_ft(config, issues)
     if strategy in FEDLALR_SERVER_STRATEGIES or update_rule in FEDLALR_CLIENT_RULES:
         _validate_fedlalr(config, issues)
+    if strategy in FEDLADA_SERVER_STRATEGIES or update_rule in FEDLADA_CLIENT_RULES:
+        _validate_fedlada(config, issues)
     if update_rule in FEDPROX_CLIENT_RULES:
         proximal_mu = config.client.extra.get("proximal_mu")
         if proximal_mu is None:
@@ -1273,6 +1278,54 @@ def _validate_fedlalr(
         "algorithm.fedlalr_communication_cost",
         "FedLALR sends x, m and v_hat every round: 3x the per-round volume of "
         "a FedAvg arm in both directions",
+        "Compare arms on communicated_bytes, not on round count alone.",
+    )
+
+
+def _validate_fedlada(
+    config: FullConfig,
+    issues: list[ValidationIssue],
+) -> None:
+    """Preflight the FedLADA pair (arXiv:2308.00522); the values are checked at load."""
+
+    server_is = config.server.strategy in FEDLADA_SERVER_STRATEGIES
+    client_is = config.client.update_rule in FEDLADA_CLIENT_RULES
+    if server_is and not client_is:
+        _add(
+            issues,
+            "error",
+            "algorithm.fedlada_client_incompatible",
+            "FedLADA server requires client.update_rule=fedlada",
+            "The server averages the second moments and amended directions only "
+            "the FedLADA client returns.",
+        )
+    if client_is and not server_is:
+        _add(
+            issues,
+            "error",
+            "algorithm.fedlada_server_incompatible",
+            "FedLADA client requires server.strategy=fedlada",
+            "Only that server broadcasts the second moment and amended direction "
+            "the client's local AMSGrad steps with.",
+        )
+    if not client_is:
+        return
+    if config.server.extra.get("aggregation_weighting") != "uniform":
+        _add(
+            issues,
+            "info",
+            "algorithm.fedlada_aggregation_weighting",
+            "FedLADA as published averages clients uniformly, but this run "
+            "weights them by example count",
+            "Set server.aggregation_weighting: uniform to match the paper, or "
+            "keep examples to stay comparable with the other arms.",
+        )
+    _add(
+        issues,
+        "info",
+        "algorithm.fedlada_communication_cost",
+        "FedLADA sends x, v and g_a every round: 3x the per-round volume of a "
+        "FedAvg arm in both directions",
         "Compare arms on communicated_bytes, not on round count alone.",
     )
 

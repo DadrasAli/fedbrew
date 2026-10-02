@@ -154,7 +154,7 @@ load for the built-in tasks in `NON_EXAMPLE_MEAN_TASKS` (`causal_lm`), and for
 any task whose class overrides `train_loss_denominator`, an extension task
 among them, before its first update. On the causal-LM loss it was 53.5% from
 the gradient of the pass (FINDINGS.csv `POST-F19`).
-`fedprox`, `scaffold`, `fedlalr`, `local_sgd` and `local_adamw` run their own
+`fedprox`, `scaffold`, `fedlalr`, `fedlada`, `local_sgd` and `local_adamw` run their own
 loop, and take two modes: `sequential_epoch`, one pass with one step of the
 rule's update per batch, which is also what an unset `update_mode` means; and
 `full_gradient`, one step of that update per iteration on the exact gradient of
@@ -236,7 +236,7 @@ base counts for every arm that extends it
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `strategy` | enum | inferred | One of the nine below. Unset, the one `client.update_rule` implies (§6.1): `scaffold`, `fedlalr` and `centralized` for the rule of the same name, `fedavg` for the FedAvg family's rules. A FedOpt strategy is stated. |
+| `strategy` | enum | inferred | One of the ten below. Unset, the one `client.update_rule` implies (§6.1): `scaffold`, `fedlalr`, `fedlada` and `centralized` for the rule of the same name, `fedavg` for the FedAvg family's rules. A FedOpt strategy is stated. |
 | `participation_rate` | float | — | In `(0, 1]`. A fixed number of clients per round, `ceil(rate × clients)` and at least one. **Exactly one** of this and `participation_probability` is required. |
 | `participation_probability` | float | — | In `(0, 1]`. Bernoulli participation, for any strategy: each client joins each round independently with this probability, one value for every client. The count varies by round and can be zero; a round that selects no client is not aggregated, so the model and the server's state carry over unchanged, and it records `num_clients` 0. **Exactly one** of this and `participation_rate` is required. |
 
@@ -244,7 +244,7 @@ Registered strategies — `server_strategies` (`fedbrew/core/registry.py`):
 
 ```
 fedavg  fedavgm  fedadam  fedyogi  fedadagrad  fedopt
-scaffold  fedlalr  centralized
+scaffold  fedlalr  fedlada  centralized
 ```
 
 **A name outside this list fails at config load**, with the registered names
@@ -261,7 +261,7 @@ would be the wrong problem in the wrong words.
 | --- | --- | --- | --- |
 | `aggregation_weighting` | `examples` \| `uniform` | `"examples"` | any strategy. Weights the **parameter** average only; metrics stay example-weighted in both modes. |
 | `server_optimizer` | str | — | `strategy: fedopt` only, and **refused** under the four aliases. |
-| `server_learning_rate` | float | — | the FedOpt family. |
+| `server_learning_rate` | float | — | the FedOpt family; `strategy: fedlada`, its server step `eta_g`, required. |
 | `beta1` | float | — | the FedOpt family. |
 | `beta2`, `tau` | float | — | the FedOpt optimizers that read them, and **refused** by the ones that do not. |
 
@@ -287,7 +287,7 @@ rule `UNHONOURED_CLIENT_OPTIONS` already applies on the client side.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `update_rule` | enum | **required** | One of the nine below. |
+| `update_rule` | enum | **required** | One of the ten below. |
 | `batch_size` | int | **required** | Training batch size. |
 | `learning_rate` | float \| null | `null` | |
 
@@ -295,7 +295,7 @@ Registered update rules — `client_updates` (`fedbrew/core/registry.py`):
 
 ```
 local_sgd  fedavg  centralized  local_adamw  fedprox
-scaffold  delta_sgd  fedlalr  fedavg_ft
+scaffold  delta_sgd  fedlalr  fedlada  fedavg_ft
 ```
 
 ### 5.1 `client.extra` — the shared SGD engine
@@ -314,7 +314,7 @@ Read by `local_sgd`, `fedavg` and `centralized`, and partly by the others.
 | `nesterov` | bool | `false` | required with positive `momentum`, which it needs to be `true`; nothing reads it without |
 | `learning_rate_schedule` | `constant` \| … | — | `_training_client_kwargs` (`fedbrew/core/factory.py`) |
 | `min_learning_rate` | float | — | the floor of `cosine`, required there; a `constant` schedule reads none |
-| `update_mode` | `sequential_epoch` \| `single_batch` \| `frozen_batch_gradients` \| `full_gradient` | — | required for `fedavg`, `centralized` and `fedavg_ft`; `delta_sgd` takes all four and runs `sequential_epoch` when unset; `fedprox`, `scaffold`, `fedlalr`, `local_sgd` and `local_adamw` take `sequential_epoch` (also when unset) or `full_gradient`; `frozen_batch_gradients` is refused on `causal_lm` (§2.1) |
+| `update_mode` | `sequential_epoch` \| `single_batch` \| `frozen_batch_gradients` \| `full_gradient` | — | required for `fedavg`, `centralized` and `fedavg_ft`; `delta_sgd` takes all four and runs `sequential_epoch` when unset; `fedprox`, `scaffold`, `fedlalr`, `fedlada`, `local_sgd` and `local_adamw` take `sequential_epoch` (also when unset) or `full_gradient`; `frozen_batch_gradients` is refused on `causal_lm` (§2.1) |
 | `frozen_gradient_weighting` | `examples` \| `uniform` \| `sum` | — | required under `update_mode: frozen_batch_gradients`, the one mode that reads it; checked when stated under another |
 | `max_local_steps` | int \| null | `null` | caps steps per round |
 | `max_grad_norm` | float \| null | **`null` — no clipping** | `_training_client_kwargs` (`fedbrew/core/factory.py`); bounds a different quantity per `update_mode` — chapter 07 §4.1 |
@@ -338,9 +338,10 @@ optimiser does:
 | Key | Type | Default | Rule |
 | --- | --- | --- | --- |
 | `proximal_mu` | float | — | `fedprox` |
-| `beta1` | float | `0.9` | `fedlalr` |
-| `beta2` | float | `0.999` | `fedlalr` |
-| `epsilon` | float | `1e-8` | `fedlalr` — **read by the server too**, see below |
+| `beta1` | float | `0.9` | `fedlalr`; `fedlada`, required |
+| `beta2` | float | `0.999` | `fedlalr`; `fedlada`, required |
+| `epsilon` | float | `1e-8` | `fedlalr`; `fedlada`, required — **read by the server too**, see below |
+| `lada_alpha` | float in [0, 1] | — | `fedlada`, required: the weight of the local adaptive direction against the amended one |
 | `eta_0` | float | — | `delta_sgd` |
 | `theta_0` | float | `1.0` | `delta_sgd` |
 | `gamma` | float | `2.0` | `delta_sgd` |
@@ -441,7 +442,7 @@ Five keys may be left out, because the loader can find them out
 | `model.input_dim`, `model.num_classes` | the manifest's own `input_dim` and `num_classes`, for a model registered as sized by that key (`models.register(..., shape_keys=)`: `mlp` both, `cnn`, `small_cnn`, `femnist_resnet18` and `openimage_shufflenet` `num_classes`, the four vector examples `input_dim`) | checked against the manifest at load, and refused if they disagree |
 | `experiment.output_dir` | `outputs/<the config's path under its nearest configs/ directory, without .yaml>`; required outside a `configs/` directory | kept as an override, and the plan header says `(overrides the inferred <value>)` where it differs: 13 shipped configs write to a directory of their own |
 | `experiment.name` | `<directory>-<file stem>` for a config in a directory under `configs/`, the file stem otherwise | kept as an override, marked in the plan header the same way; `tests/test_shipped_config_explicitness.py` refuses a stated name equal to the inferred one |
-| `server.strategy` | `client.update_rule`: a paired rule (`PAIRED_STRATEGIES`: `scaffold`, `fedlalr`, `centralized`) implies the strategy of its own name, a FedAvg-family rule (`FEDAVG_FAMILY_CLIENT_RULES`: `fedavg`, `fedavg_ft`, `fedprox`, `local_sgd`, `local_adamw`, `delta_sgd`) implies `fedavg`. An extension's rule implies none, so its config states one | checked against the rule as before: half of a paired rule is refused (§4); a FedOpt strategy over a FedAvg-family rule is the config's choice. `tests/test_shipped_config_explicitness.py` refuses a stated strategy equal to the implied one |
+| `server.strategy` | `client.update_rule`: a paired rule (`PAIRED_STRATEGIES`: `scaffold`, `fedlalr`, `fedlada`, `centralized`) implies the strategy of its own name, a FedAvg-family rule (`FEDAVG_FAMILY_CLIENT_RULES`: `fedavg`, `fedavg_ft`, `fedprox`, `local_sgd`, `local_adamw`, `delta_sgd`) implies `fedavg`. An extension's rule implies none, so its config states one | checked against the rule as before: half of a paired rule is refused (§4); a FedOpt strategy over a FedAvg-family rule is the config's choice. `tests/test_shipped_config_explicitness.py` refuses a stated strategy equal to the implied one |
 
 An inferred value is written into the resolved config like a stated one, so
 `run.json` records it, and `config.inferred` there names each inferred key and
@@ -593,7 +594,7 @@ extends (`tests/test_shipped_config_explicitness.py`).
 | `matmul_precision` | `highest` \| `high` \| `medium` \| null | `null` → torch's `highest` | See below. |
 | `cudnn_benchmark` | bool \| null | `null` → torch's `false` | **Ignored when `deterministic: true`** — `configure_runtime` (`fedbrew/core/runtime_setup.py`). Must be a real bool: it is read through `bool()`, which takes `"false"` as true. |
 | `precision` | `reference` \| `f32_f64` \| `tf32` \| `bf16` | `reference` | **Changes the numbers.** The batched executor's training step at a lower precision: `f32_f64` steps a float64 model in float32, `tf32` lets CUDA's float32 matmuls use TensorFloat32, `bf16` runs the loss under bfloat16 autocast. Every evaluation stays at the model's precision. A mode that does not apply to the model or device runs the reference, and the plan header and `run.json` say why. Needs `runtime.performance.executor: batched`. Chapter 11 §11. |
-| `use_amp` | bool | `false` | Refused as `true` on a task with no autocast path (`causal_lm`, any extension task), and wherever the local step passes a gradient collector with no `param_groups`: `delta_sgd`, `fedlalr`, `update_mode: frozen_batch_gradients` and `update_mode: full_gradient`. Everything else accepts it. Chapters 06 §3 and 07 §4.4. |
+| `use_amp` | bool | `false` | Refused as `true` on a task with no autocast path (`causal_lm`, any extension task), and wherever the local step passes a gradient collector with no `param_groups`: `delta_sgd`, `fedlalr`, `fedlada`, `update_mode: frozen_batch_gradients` and `update_mode: full_gradient`. Everything else accepts it. Chapters 06 §3 and 07 §4.4. |
 
 **`matmul_precision`.** `high` puts
 fp32 matmuls on TensorFloat32 (10 stored mantissa bits) or a bfloat16 pair

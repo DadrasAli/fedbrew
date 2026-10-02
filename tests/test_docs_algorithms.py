@@ -37,11 +37,11 @@ CHAPTER = REPO_ROOT / "docs" / "07-algorithms.md"
 
 #: (strategy, rule) pairs the chapter says are enforced, and the module whose
 #: source must still contain the rule that enforces them.
-#: The three matched pairs, as the chapter's table lists them. The authority is
+#: The four matched pairs, as the chapter's table lists them. The authority is
 #: PAIRED_STRATEGIES in fedbrew/core/config.py and this is diffed against it,
 #: so the chapter cannot list a pairing the code does not enforce or miss one
 #: it does.
-ENFORCED_PAIRINGS = ("centralized", "fedlalr", "scaffold")
+ENFORCED_PAIRINGS = ("centralized", "fedlada", "fedlalr", "scaffold")
 
 
 def _chapter_text() -> str:
@@ -113,7 +113,7 @@ class RegistryTest(unittest.TestCase):
 
 
 class PairingTest(unittest.TestCase):
-    """The three enforced pairings must still be enforced, and still documented."""
+    """The four enforced pairings must still be enforced, and still documented."""
 
     def test_the_chapter_lists_exactly_what_the_code_enforces(self) -> None:
         """Against the table, not against a proximity match in a module.
@@ -136,14 +136,14 @@ class PairingTest(unittest.TestCase):
 
     def test_each_pairing_has_a_row(self) -> None:
         text = _chapter_text()
-        section = text[text.index("Three algorithms need both halves") : text.index("`fedprox`, ")]
+        section = text[text.index("Four algorithms need both halves") : text.index("`fedprox`, ")]
         for strategy in ENFORCED_PAIRINGS:
             with self.subTest(pairing=strategy):
                 self.assertIn(f"`{strategy}` ⟷ `{strategy}`", section)
 
     def test_the_stated_count_matches(self) -> None:
-        self.assertEqual(len(ENFORCED_PAIRINGS), 3)
-        self.assertIn("Three algorithms need both halves", _chapter_text())
+        self.assertEqual(len(ENFORCED_PAIRINGS), 4)
+        self.assertIn("Four algorithms need both halves", _chapter_text())
 
 
 class CommunicationCostTest(unittest.TestCase):

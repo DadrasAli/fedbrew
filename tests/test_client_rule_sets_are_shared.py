@@ -112,6 +112,7 @@ class OneDefinitionTest(unittest.TestCase):
                 "fedprox",
                 "scaffold",
                 "fedlalr",
+                "fedlada",
                 "local_sgd",
                 "local_adamw",
             },
@@ -127,7 +128,7 @@ class OneDefinitionTest(unittest.TestCase):
         fedavg_engine = {"fedavg", "centralized", "fedavg_ft"}
         self.assertEqual(config_module.FEDAVG_ENGINE_CLIENT_RULES, fedavg_engine)
         self.assertEqual(config_module.FROZEN_WEIGHTING_CLIENT_RULES, fedavg_engine)
-        own_loop = {"fedprox", "scaffold", "fedlalr", "local_sgd", "local_adamw"}
+        own_loop = {"fedprox", "scaffold", "fedlalr", "fedlada", "local_sgd", "local_adamw"}
         self.assertEqual(
             config_module.UPDATE_MODES_BY_CLIENT_RULE,
             {

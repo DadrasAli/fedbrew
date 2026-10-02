@@ -83,8 +83,8 @@ class ClientConfig:
     #:   updates.
     #:
     #: ``fedavg``, ``centralized``, ``fedavg_ft`` and ``delta_sgd`` take every
-    #: ``update_mode``. ``fedprox``, ``scaffold``, ``fedlalr``, ``local_sgd``
-    #: and ``local_adamw`` run their own loop, which is ``sequential_epoch``
+    #: ``update_mode``. ``fedprox``, ``scaffold``, ``fedlalr``, ``fedlada``,
+    #: ``local_sgd`` and ``local_adamw`` run their own loop, which is ``sequential_epoch``
     #: (also when the mode is unset), or ``full_gradient``. So arms differing
     #: in update shape are not comparable at equal ``local_iterations``
     #: (FINDINGS.csv POST-F15). ``max_local_steps`` caps the steps of
@@ -820,7 +820,7 @@ FIXED_LR_SGD_CLIENT_RULES = {"local_sgd", *FEDAVG_ENGINE_CLIENT_RULES}
 #: of the rule's own update per batch. They also take ``full_gradient``: one
 #: step of that same update per iteration, on the exact gradient of the whole
 #: train split (`local_update_modes.full_gradient_into_grad`).
-OWN_LOOP_CLIENT_RULES = {"fedprox", "scaffold", "fedlalr", "local_sgd", "local_adamw"}
+OWN_LOOP_CLIENT_RULES = {"fedprox", "scaffold", "fedlalr", "fedlada", "local_sgd", "local_adamw"}
 OWN_LOOP_UPDATE_MODES = frozenset({"sequential_epoch", FULL_GRADIENT_UPDATE_MODE})
 UPDATE_MODES_BY_CLIENT_RULE: dict[str, frozenset[str]] = {
     **{rule: frozenset(UPDATE_MODES) for rule in sorted(FEDAVG_ENGINE_CLIENT_RULES)},
@@ -900,6 +900,11 @@ UNHONOURED_CLIENT_OPTIONS: dict[str, tuple[str, tuple[str, ...]]] = {
     "fedlalr": (
         "steps with its own local AMSGrad, whose per-coordinate rate and "
         "synchronised moments are the algorithm",
+        tuple(name for name in ENGINE_CLIENT_OPTIONS if name != "update_mode"),
+    ),
+    "fedlada": (
+        "steps with its own local AMSGrad amended by the server's direction, "
+        "whose rate and moments are the algorithm",
         tuple(name for name in ENGINE_CLIENT_OPTIONS if name != "update_mode"),
     ),
     "delta_sgd": (
@@ -1002,6 +1007,7 @@ _KNOWN_EXTRA_KEYS: dict[str, frozenset[str]] = {
             "finetune_learning_rate",
             "frozen_gradient_weighting",
             "gamma",
+            "lada_alpha",
             "learning_rate_schedule",
             "max_grad_norm",
             "max_local_steps",
@@ -1728,6 +1734,7 @@ def validate_config(config: FullConfig) -> None:
     _validate_sampling(config)
     _validate_delta_sgd_options(config)
     _validate_fedlalr_options(config)
+    _validate_fedlada_options(config)
     _validate_fedavg_ft_options(config)
     _validate_local_adamw_options(config)
     _validate_sgd_engine_amp(config)
@@ -2988,6 +2995,11 @@ PAIRED_STRATEGIES: dict[str, str] = {
         "the server synchronizes the momentum and second moment that the "
         "client's local AMSGrad reads"
     ),
+    "fedlada": (
+        "the server sends the second moment and the amended direction the "
+        "client's local AMSGrad steps with, and steps by eta_g toward the "
+        "clients' mean"
+    ),
 }
 
 #: Built-in rules whose client runs against the plain FedAvg server as it is:
@@ -3363,6 +3375,50 @@ def _validate_fedlalr_options(config: FullConfig) -> None:
 # fedlalr and delta_sgd keep theirs: they step through _GradientOnlyOptimizer,
 # which exposes no param_groups, and GradScaler needs those. That refusal is
 # now a measurement too, not a prediction.
+
+
+def _validate_fedlada_options(config: FullConfig) -> None:
+    """Validate FedLADA's settings (arXiv:2308.00522): every one stated, none defaulted.
+
+    The paper's and its code's values differ across sources, so a FedLADA
+    config states its local rate, both decays, the floor, alpha and the
+    server step rather than inheriting one that may not be the comparison's.
+    """
+
+    if config.client.update_rule != "fedlada":
+        return
+    if config.client.learning_rate is None or config.client.learning_rate <= 0.0:
+        raise RunRefused("fedlada requires client.learning_rate (its local rate) > 0")
+    extra = config.client.extra
+    for name in ("beta1", "beta2"):
+        value = _required_extra(extra, "client", name)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or not 0.0 <= float(value) < 1.0
+        ):
+            raise RunRefused(f"client.{name} must be in [0, 1)" + yaml_number_cause(value))
+    _require_positive_number(_required_extra(extra, "client", "epsilon"), "epsilon")
+    alpha = _required_extra(extra, "client", "lada_alpha")
+    if (
+        isinstance(alpha, bool)
+        or not isinstance(alpha, int | float)
+        or not 0.0 <= float(alpha) <= 1.0
+    ):
+        raise RunRefused("client.lada_alpha must be in [0, 1]" + yaml_number_cause(alpha))
+    step = _required_extra(config.server.extra, "server", "server_learning_rate")
+    if (
+        isinstance(step, bool)
+        or not isinstance(step, int | float)
+        or not math.isfinite(float(step))
+        or float(step) <= 0.0
+    ):
+        raise RunRefused(
+            "server.server_learning_rate (FedLADA's eta_g) must be a finite positive number"
+            + yaml_number_cause(step)
+        )
+    if config.numerics.use_amp:
+        raise RunRefused("fedlada is incompatible with numerics.use_amp: true")
 
 
 def _require_positive_number(value: object, name: str) -> None:

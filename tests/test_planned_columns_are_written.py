@@ -122,6 +122,18 @@ RULES: dict[str, dict[str, Any]] = {
         "client": {"batch_size": 32, "eta_0": 0.05, **_ENGINE_KEYS},
     },
     "fedlalr": {"strategy": "fedlalr", "client": {"batch_size": 32, "learning_rate": 0.003}},
+    "fedlada": {
+        "strategy": "fedlada",
+        "server": {"server_learning_rate": 1.0},
+        "client": {
+            "batch_size": 32,
+            "learning_rate": 0.003,
+            "beta1": 0.9,
+            "beta2": 0.99,
+            "epsilon": 1.0e-8,
+            "lada_alpha": 0.1,
+        },
+    },
 }
 
 

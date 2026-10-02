@@ -76,6 +76,7 @@ COUPLED_STRATEGIES = {"ScaffoldServer": {"server_control": "client_control"}}
 #: rather than slipping through a sweep that silently found one class fewer.
 SHIPPED_STRATEGY_CLASSES = [
     "FedAvgServer",
+    "FedLADAServer",
     "FedLALRServer",
     "FedOptServer",
     "ScaffoldServer",

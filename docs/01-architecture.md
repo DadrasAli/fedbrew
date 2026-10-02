@@ -136,8 +136,8 @@ same six, and every name carries where it came from (chapter 12).
 
 | Registry | Config key that selects from it | Count |
 | --- | --- | --- |
-| `server_strategies` | `server.strategy` | 9 |
-| `client_updates` | `client.update_rule` | 9 |
+| `server_strategies` | `server.strategy` | 10 |
+| `client_updates` | `client.update_rule` | 10 |
 | `models` | `model.name` | 8 |
 | `datasets` | `data.name` | 2 |
 | `tasks` | `task.name` | 2 |
@@ -150,9 +150,9 @@ Registered names:
 
 ```
 server_strategies  fedavg fedavgm fedadam fedyogi fedadagrad fedopt
-                   scaffold fedlalr centralized
+                   scaffold fedlalr fedlada centralized
 client_updates     local_sgd fedavg centralized local_adamw fedprox
-                   scaffold delta_sgd fedlalr fedavg_ft
+                   scaffold delta_sgd fedlalr fedlada fedavg_ft
 models             mlp cnn small_cnn femnist_resnet18 openimage_shufflenet
                    tiny_gpt2 hf_causal_lm hf_causal_lm_lora
 datasets           synthetic_classification manifest_dataset
@@ -227,7 +227,7 @@ not always the whole model** — `TaskAdapter` (`fedbrew/tasks/base.py`):
 
 Under LoRA only the adapter tensors move. `model_state_scope` rides along in
 the metadata, and every built-in server -- `fedavg`, the FedOpt family,
-`scaffold` and `fedlalr` -- runs one check on every fit result before folding
+`scaffold`, `fedlalr` and `fedlada` -- runs one check on every fit result before folding
 anything (`_compatible_model_state`, `fedbrew/servers/fedavg.py`): the scope
 must equal its own, an adapter's base model, revision, adapter name and LoRA
 config must equal its own (`validate_federated_state_metadata`), and the keys

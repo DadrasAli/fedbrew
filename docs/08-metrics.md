@@ -732,6 +732,17 @@ No server-side diagnostics. `fedopt` and its four aliases (`fedadam`,
 `fedyogi`, `fedadagrad`, `fedavgm`) emit only the weighted client metrics
 (`FedOptServer.aggregate_stream`, `fedbrew/servers/fedopt.py`).
 
+### 7.6 FedLADA — client `TorchFedLADAClient.fit` (`fedbrew/clients/torch_fedlada_client.py`), server `FedLADAServer.aggregate_stream` (`fedbrew/servers/fedlada.py`)
+
+| Name | Definition | Side |
+| --- | --- | --- |
+| `local_steps`, `optimizer_steps` | the local steps the client took this round | client |
+| `second_moment_norm` | `||v||_2` of the averaged second moment the server broadcasts next | server |
+| `amended_direction_norm` | `||g_a||_2`, the clients' mean `(x_t - x_i) / (alpha_l K_i)` (float64) | server |
+
+The two server columns are added before the server's one `filter_metrics` pass,
+as FedLALR's are.
+
 ## 8. Timing and count columns
 
 Appended after the metric columns so adding a timing never shifts an existing
