@@ -29,6 +29,8 @@ from fedbrew.core.config import PAIRED_STRATEGIES, load_config, validate_config
 from fedbrew.core.factory import (
     CENTRALIZED_CLIENT_RULES,
     CENTRALIZED_SERVER_STRATEGIES,
+    FAFED_CLIENT_RULES,
+    FAFED_SERVER_STRATEGIES,
     FEDLADA_CLIENT_RULES,
     FEDLADA_SERVER_STRATEGIES,
     FEDLALR_CLIENT_RULES,
@@ -45,6 +47,7 @@ SHIPPED = {
     "scaffold": "configs/femnist/scaffold.yaml",
     "fedlalr": "configs/femnist/fedlalr.yaml",
     "fedlada": "configs/dev/fedlada.yaml",
+    "fafed": "configs/dev/fafed.yaml",
 }
 
 #: What the other half is set to when one half is knocked out. fedavg for the
@@ -120,6 +123,8 @@ class TheTableMatchesTheFactoryTest(unittest.TestCase):
             | FEDLALR_CLIENT_RULES
             | FEDLADA_SERVER_STRATEGIES
             | FEDLADA_CLIENT_RULES
+            | FAFED_SERVER_STRATEGIES
+            | FAFED_CLIENT_RULES
         )
         self.assertEqual(
             set(PAIRED_STRATEGIES),

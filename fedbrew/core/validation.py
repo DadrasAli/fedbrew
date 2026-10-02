@@ -33,6 +33,8 @@ from fedbrew.core.factory import (
     CENTRALIZED_CLIENT_RULES,
     CENTRALIZED_SERVER_STRATEGIES,
     DELTA_SGD_CLIENT_RULES,
+    FAFED_CLIENT_RULES,
+    FAFED_SERVER_STRATEGIES,
     FEDAVG_FT_CLIENT_RULES,
     FEDLADA_CLIENT_RULES,
     FEDLADA_SERVER_STRATEGIES,
@@ -107,6 +109,7 @@ AGGREGATION_WEIGHTING_NOTICE: Mapping[str, str | None] = {
     "fedadagrad": "algorithm.fedopt_aggregation_weighting",
     "fedlalr": "algorithm.fedlalr_aggregation_weighting",
     "fedlada": "algorithm.fedlada_aggregation_weighting",
+    "fafed": "algorithm.fafed_aggregation_weighting",
     # FedAvg is the source of example weighting: McMahan et al. Algorithm 1
     # averages by n_k, so the default is the paper and there is nothing to say.
     "fedavg": None,
@@ -976,6 +979,8 @@ def _validate_shipped_algorithm_compatibility(
         _validate_fedlalr(config, issues)
     if strategy in FEDLADA_SERVER_STRATEGIES or update_rule in FEDLADA_CLIENT_RULES:
         _validate_fedlada(config, issues)
+    if strategy in FAFED_SERVER_STRATEGIES or update_rule in FAFED_CLIENT_RULES:
+        _validate_fafed(config, issues)
     if update_rule in FEDPROX_CLIENT_RULES:
         proximal_mu = config.client.extra.get("proximal_mu")
         if proximal_mu is None:
@@ -1326,6 +1331,54 @@ def _validate_fedlada(
         "algorithm.fedlada_communication_cost",
         "FedLADA sends x, v and g_a every round: 3x the per-round volume of a "
         "FedAvg arm in both directions",
+        "Compare arms on communicated_bytes, not on round count alone.",
+    )
+
+
+def _validate_fafed(
+    config: FullConfig,
+    issues: list[ValidationIssue],
+) -> None:
+    """Preflight the FAFED pair (arXiv:2212.00974); the values are checked at load."""
+
+    server_is = config.server.strategy in FAFED_SERVER_STRATEGIES
+    client_is = config.client.update_rule in FAFED_CLIENT_RULES
+    if server_is and not client_is:
+        _add(
+            issues,
+            "error",
+            "algorithm.fafed_client_incompatible",
+            "FAFED server requires client.update_rule=fafed",
+            "The server synchronises the momenta and second moments only the FAFED "
+            "client tracks, and asks every client for its initial gradient.",
+        )
+    if client_is and not server_is:
+        _add(
+            issues,
+            "error",
+            "algorithm.fafed_server_incompatible",
+            "FAFED client requires server.strategy=fafed",
+            "Only that server starts the moments, synchronises them and takes the "
+            "round's last step.",
+        )
+    if not client_is:
+        return
+    if config.server.extra.get("aggregation_weighting") != "uniform":
+        _add(
+            issues,
+            "info",
+            "algorithm.fafed_aggregation_weighting",
+            "FAFED as published averages clients uniformly, but this run weights "
+            "them by example count",
+            "Set server.aggregation_weighting: uniform to match the paper, or keep "
+            "examples to stay comparable with the other arms.",
+        )
+    _add(
+        issues,
+        "info",
+        "algorithm.fafed_communication_cost",
+        "FAFED sends x, m and v every round: 3x the per-round volume of a FedAvg "
+        "arm in both directions, and two gradients per local step",
         "Compare arms on communicated_bytes, not on round count alone.",
     )
 

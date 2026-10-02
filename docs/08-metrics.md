@@ -743,6 +743,16 @@ No server-side diagnostics. `fedopt` and its four aliases (`fedadam`,
 The two server columns are added before the server's one `filter_metrics` pass,
 as FedLALR's are.
 
+### 7.7 FAFED — client `TorchFAFEDClient.fit` (`fedbrew/clients/torch_fafed_client.py`), server `FAFEDServer.aggregate_stream` (`fedbrew/servers/fafed.py`)
+
+| Name | Definition | Side |
+| --- | --- | --- |
+| `local_steps`, `optimizer_steps` | the local steps the client took this round, each with two gradients | client |
+| `momentum_norm` | `||m||_2` of the synchronised momentum the server broadcasts next | server |
+| `second_moment_norm` | `||v||_2` of the synchronised second moment the server broadcasts next | server |
+
+Both server columns are added before the server's one `filter_metrics` pass.
+
 ## 8. Timing and count columns
 
 Appended after the metric columns so adding a timing never shifts an existing

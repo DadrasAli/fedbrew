@@ -62,6 +62,7 @@ SERVER_DIAGNOSTIC_METRICS: Mapping[str, frozenset[str]] = {
         }
     ),
     "fedlada": frozenset({"second_moment_norm", "amended_direction_norm"}),
+    "fafed": frozenset({"momentum_norm", "second_moment_norm"}),
 }
 
 #: Metric names no longer written, mapped to what replaced them. FedLALR's
@@ -115,7 +116,7 @@ def retired_metric_message(name: str) -> str:
 #: The convention is not applied uniformly. The rules built on
 #: TorchSGDClient.fit and FedAvgClient.fit filter the task metrics and then
 #: add their extras, so those extras always survive; fedprox, scaffold,
-#: delta_sgd, fedlalr and fedlada assemble everything first and filter the lot,
+#: delta_sgd, fedlalr, fedlada and fafed assemble everything first and filter the lot,
 #: so for those nothing survives a list that does not name it. They have no row.
 #:
 #: tests/test_divergence_metric_reachable.py runs every rule's fit under a
@@ -174,6 +175,7 @@ RULE_FIT_METRICS: Mapping[str, frozenset[str]] = {
         "effective_learning_rate_coordinate_max",
     },
     "fedlada": _VOLUME | {"local_steps", "optimizer_steps"},
+    "fafed": _VOLUME | {"local_steps", "optimizer_steps"},
 }
 
 #: The rule columns that exist only on a round with a post-fit pass, because

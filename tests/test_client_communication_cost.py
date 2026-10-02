@@ -34,6 +34,7 @@ from fedbrew.clients.torch_delta_sgd_client import (
     DEFAULT_THETA_0,
     TorchDeltaSGDClient,
 )
+from fedbrew.clients.torch_fafed_client import TorchFAFEDClient
 from fedbrew.clients.torch_fedlada_client import TorchFedLADAClient
 from fedbrew.clients.torch_fedlalr_client import (
     DEFAULT_BETA1,
@@ -117,7 +118,17 @@ BUILDERS = {
     "fedlada": lambda: TorchFedLADAClient(
         **_kwargs(), beta1=0.9, beta2=0.99, epsilon=1e-8, lada_alpha=0.1
     ),
+    "fafed": lambda: _fafed_client(),
 }
+
+
+def _fafed_client() -> TorchFAFEDClient:
+    """A FAFED client as its initial pass leaves it: x_0 kept as its previous iterate."""
+
+    client = TorchFAFEDClient(**_kwargs(), beta2=0.99, fafed_alpha=0.1, fafed_rho=0.01)
+    model = client.task.build_model()
+    client._previous = {name: p.detach().clone() for name, p in model.named_parameters()}
+    return client
 
 
 def _request() -> FitRequest:
@@ -205,6 +216,7 @@ class MeterMatchesPayloadTest(unittest.TestCase):
             "scaffold": 2,
             "fedlalr": 3,
             "fedlada": 3,
+            "fafed": 3,
         }
         self.assertEqual(set(expected), set(BUILDERS))
 

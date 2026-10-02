@@ -63,6 +63,7 @@ RULE_CONFIGS: dict[str, str] = {
     "centralized": "configs/femnist/centralized.yaml",
     "delta_sgd": "configs/femnist/delta_sgd.yaml",
     "fedlada": "configs/dev/fedlada.yaml",
+    "fafed": "configs/dev/fafed.yaml",
     "fedavg": "configs/femnist/fedavg.yaml",
     "fedavg_ft": "configs/femnist/fedavg_ft.yaml",
     "fedlalr": "configs/femnist/fedlalr.yaml",

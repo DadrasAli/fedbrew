@@ -84,9 +84,10 @@ class ClientConfig:
     #:
     #: ``fedavg``, ``centralized``, ``fedavg_ft`` and ``delta_sgd`` take every
     #: ``update_mode``. ``fedprox``, ``scaffold``, ``fedlalr``, ``fedlada``,
-    #: ``local_sgd`` and ``local_adamw`` run their own loop, which is ``sequential_epoch``
-    #: (also when the mode is unset), or ``full_gradient``. So arms differing
-    #: in update shape are not comparable at equal ``local_iterations``
+    #: ``fafed``, ``local_sgd`` and ``local_adamw`` run their own loop, which
+    #: is ``sequential_epoch`` (also when the mode is unset), or
+    #: ``full_gradient``. So arms differing in update shape are not comparable
+    #: at equal ``local_iterations``
     #: (FINDINGS.csv POST-F15). ``max_local_steps`` caps the steps of
     #: ``local_adamw``, the one rule that honours it, in either of its modes.
     #: docs/04-configuration.md section 2.1.
@@ -820,7 +821,15 @@ FIXED_LR_SGD_CLIENT_RULES = {"local_sgd", *FEDAVG_ENGINE_CLIENT_RULES}
 #: of the rule's own update per batch. They also take ``full_gradient``: one
 #: step of that same update per iteration, on the exact gradient of the whole
 #: train split (`local_update_modes.full_gradient_into_grad`).
-OWN_LOOP_CLIENT_RULES = {"fedprox", "scaffold", "fedlalr", "fedlada", "local_sgd", "local_adamw"}
+OWN_LOOP_CLIENT_RULES = {
+    "fedprox",
+    "scaffold",
+    "fedlalr",
+    "fedlada",
+    "fafed",
+    "local_sgd",
+    "local_adamw",
+}
 OWN_LOOP_UPDATE_MODES = frozenset({"sequential_epoch", FULL_GRADIENT_UPDATE_MODE})
 UPDATE_MODES_BY_CLIENT_RULE: dict[str, frozenset[str]] = {
     **{rule: frozenset(UPDATE_MODES) for rule in sorted(FEDAVG_ENGINE_CLIENT_RULES)},
@@ -905,6 +914,10 @@ UNHONOURED_CLIENT_OPTIONS: dict[str, tuple[str, tuple[str, ...]]] = {
     "fedlada": (
         "steps with its own local AMSGrad amended by the server's direction, "
         "whose rate and moments are the algorithm",
+        tuple(name for name in ENGINE_CLIENT_OPTIONS if name != "update_mode"),
+    ),
+    "fafed": (
+        "steps with its own tracked momentum over a synchronised denominator, at a constant step",
         tuple(name for name in ENGINE_CLIENT_OPTIONS if name != "update_mode"),
     ),
     "delta_sgd": (
@@ -1003,6 +1016,8 @@ _KNOWN_EXTRA_KEYS: dict[str, frozenset[str]] = {
             "eta_max",
             "eval_batch_size",
             "eval_shuffle",
+            "fafed_alpha",
+            "fafed_rho",
             "finetune_epochs",
             "finetune_learning_rate",
             "frozen_gradient_weighting",
@@ -1735,6 +1750,7 @@ def validate_config(config: FullConfig) -> None:
     _validate_delta_sgd_options(config)
     _validate_fedlalr_options(config)
     _validate_fedlada_options(config)
+    _validate_fafed_options(config)
     _validate_fedavg_ft_options(config)
     _validate_local_adamw_options(config)
     _validate_sgd_engine_amp(config)
@@ -3000,6 +3016,11 @@ PAIRED_STRATEGIES: dict[str, str] = {
         "client's local AMSGrad steps with, and steps by eta_g toward the "
         "clients' mean"
     ),
+    "fafed": (
+        "the server starts the moments from the clients' initial gradients, "
+        "synchronises the momentum and second moment every round and takes the "
+        "round's last step with them"
+    ),
 }
 
 #: Built-in rules whose client runs against the plain FedAvg server as it is:
@@ -3419,6 +3440,49 @@ def _validate_fedlada_options(config: FullConfig) -> None:
         )
     if config.numerics.use_amp:
         raise RunRefused("fedlada is incompatible with numerics.use_amp: true")
+
+
+def _validate_fafed_options(config: FullConfig) -> None:
+    """Validate FAFED's settings (arXiv:2212.00974): every one stated, full participation.
+
+    A client's momentum tracking reads its own previous iterate, which would go
+    stale while the client sat out, and the paper has no partial participation:
+    every client takes part every round.
+    """
+
+    if config.client.update_rule != "fafed":
+        return
+    if config.client.learning_rate is None or config.client.learning_rate <= 0.0:
+        raise RunRefused("fafed requires client.learning_rate (its step eta) > 0")
+    extra = config.client.extra
+    beta = _required_extra(extra, "client", "beta2")
+    if isinstance(beta, bool) or not isinstance(beta, int | float) or not 0.0 <= float(beta) < 1.0:
+        raise RunRefused("client.beta2 (FAFED's beta) must be in [0, 1)" + yaml_number_cause(beta))
+    alpha = _required_extra(extra, "client", "fafed_alpha")
+    if (
+        isinstance(alpha, bool)
+        or not isinstance(alpha, int | float)
+        or not 0.0 <= float(alpha) <= 1.0
+    ):
+        raise RunRefused("client.fafed_alpha must be in [0, 1]" + yaml_number_cause(alpha))
+    _require_positive_number(_required_extra(extra, "client", "fafed_rho"), "fafed_rho")
+    server = config.server
+    partial = [
+        f"server.{name}={value}"
+        for name, value in (
+            ("participation_rate", server.participation_rate),
+            ("participation_probability", server.participation_probability),
+        )
+        if value is not None and float(value) != 1.0
+    ]
+    if partial:
+        raise RunRefused(
+            f"fafed takes every client every round, and {', '.join(partial)} would let a "
+            "client sit out while its previous iterate, which its momentum tracking reads, "
+            "went stale; set it to 1"
+        )
+    if config.numerics.use_amp:
+        raise RunRefused("fafed is incompatible with numerics.use_amp: true")
 
 
 def _require_positive_number(value: object, name: str) -> None:

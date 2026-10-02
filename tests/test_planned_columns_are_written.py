@@ -134,6 +134,16 @@ RULES: dict[str, dict[str, Any]] = {
             "lada_alpha": 0.1,
         },
     },
+    "fafed": {
+        "strategy": "fafed",
+        "client": {
+            "batch_size": 32,
+            "learning_rate": 0.003,
+            "beta2": 0.99,
+            "fafed_alpha": 0.1,
+            "fafed_rho": 0.01,
+        },
+    },
 }
 
 

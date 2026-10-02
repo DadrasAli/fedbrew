@@ -70,11 +70,15 @@ from fedbrew.servers.scaffold import ScaffoldServer
 #: The one strategy class whose server state is defined in terms of its
 #: clients'. Every other shipped class declares nothing, which is the answer
 #: this test wants recorded rather than assumed.
-COUPLED_STRATEGIES = {"ScaffoldServer": {"server_control": "client_control"}}
+COUPLED_STRATEGIES = {
+    "ScaffoldServer": {"server_control": "client_control"},
+    "FAFEDServer": {"momentum_state": "previous_iterate"},
+}
 
 #: Written out so that a strategy added, renamed or removed moves this list
 #: rather than slipping through a sweep that silently found one class fewer.
 SHIPPED_STRATEGY_CLASSES = [
+    "FAFEDServer",
     "FedAvgServer",
     "FedLADAServer",
     "FedLALRServer",

@@ -42,6 +42,9 @@ FULL_STATE_ONLY_CLIENT_RULES: Mapping[str, str] = {
     "fedlada": "its local AMSGrad looks its moments and amended direction up by "
     "the model's parameter names, which under a PEFT adapter carry the adapter "
     "name the federated state's keys do not",
+    "fafed": "its momentum tracking looks its moments and previous iterate up by "
+    "the model's parameter names, which under a PEFT adapter carry the adapter "
+    "name the federated state's keys do not",
 }
 
 
@@ -90,6 +93,7 @@ AGGREGATION_WEIGHT_HOOK_CLIENT_RULES = frozenset(
         "delta_sgd",
         "fedlalr",
         "fedlada",
+        "fafed",
     }
 )
 AGGREGATION_WEIGHT_HOOK_BYPASS_RULES = frozenset({"fedprox", "scaffold"})

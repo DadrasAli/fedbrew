@@ -13,12 +13,12 @@ pairings are meaningless and are refused at config load rather than run.
 
 ```
 server_strategies  fedavg fedavgm fedadam fedyogi fedadagrad fedopt
-                   scaffold fedlalr fedlada centralized
+                   scaffold fedlalr fedlada fafed centralized
 client_updates     local_sgd fedavg centralized local_adamw fedprox
-                   scaffold delta_sgd fedlalr fedlada fedavg_ft
+                   scaffold delta_sgd fedlalr fedlada fafed fedavg_ft
 ```
 
-Five names appear in both. They are separate objects: `server.strategy:
+Six names appear in both. They are separate objects: `server.strategy:
 scaffold` selects the SCAFFOLD server, `client.update_rule: scaffold` selects
 the SCAFFOLD client. A config may leave the strategy out: the loader then
 takes the one the rule implies — the paired rule's own, `fedavg` for the
@@ -27,7 +27,7 @@ checked against the rule.
 
 ## 2. Which pairings are enforced
 
-Four algorithms need both halves, **in both directions**, and naming one half
+Five algorithms need both halves, **in both directions**, and naming one half
 without the other fails at config load rather than letting a half-configured
 arm run.
 
@@ -37,12 +37,13 @@ arm run.
 | `scaffold` ⟷ `scaffold` | the server broadcasts a control variate the client corrects its step with; the client returns the control delta the server updates it from |
 | `fedlalr` ⟷ `fedlalr` | the server synchronizes the momentum and second moment the client's local AMSGrad reads |
 | `fedlada` ⟷ `fedlada` | the server sends the second moment and the amended direction the client's local AMSGrad steps with, and steps by `eta_g` toward the clients' mean |
+| `fafed` ⟷ `fafed` | the server starts the moments from the clients' initial gradients, synchronises the momentum and second moment every round and takes the round's last step with them |
 
 One table, `PAIRED_STRATEGIES` in `fedbrew/core/config.py`, read by
 `_validate_paired_strategies` — which `validate_config` calls before it judges
 any algorithm-specific option, because a half-paired config is wrong about
 which algorithm is running and every later message would answer the wrong
-question. `fedbrew/core/validation.py` reports the same four earlier, under
+question. `fedbrew/core/validation.py` reports the same five earlier, under
 `--validate-only`; it does not gate, so it is not where the refusal lives.
 
 Either half alone would silently change what runs, or fail in round 1. The
@@ -365,6 +366,32 @@ none is defaulted: `server.server_learning_rate` (`eta_g`), and the client's
 arm** (§5), and two columns are its own: `second_moment_norm` and
 `amended_direction_norm`. Sequential: the rule declares no batched update.
 
+### 3.7 `fafed`
+
+FAFED, Algorithm 2 of Wu et al., AAAI 2023,
+[arXiv:2212.00974](https://arxiv.org/abs/2212.00974), with q = K and a constant step
+and alpha, as AdaFed's port reads it (`FAFEDServer`, `fedbrew/servers/fafed.py`).
+**Before round 1** the loop asks every client for its gradient `g_0` at `x_0` on an
+initial batch (`initial_requests`, `absorb_initial`; `_initial_pass` in
+`fedbrew/core/loop.py`, which no other strategy declares and a resumed run skips),
+and the server starts `m = mean_i g_0,i`, `v = mean_i g_0,i^2`. Each round it
+broadcasts `x_t`, `m` and `v`; each client steps K - 1 times (§4.9) and returns its
+last iterate, `m_i` and `v_i`; the server takes the round's last step:
+
+```
+m = mean_i m_i,   v = mean_i v_i,   den = sqrt(v) + rho
+x_{t+1} = mean_i x_i - eta m / den
+```
+
+so the server reads `client.learning_rate` (`eta`) and `client.fafed_rho`.
+**Full participation only**: a client's momentum tracking reads its own previous
+iterate, which would go stale while it sat out, and the paper has none; a
+participation below 1 is refused at load. The clients' previous iterates are their
+checkpointed state, and the server declares them coupled to its momentum
+(`coupled_client_state`), so a resume from `best.pt` is refused. It moves **3× a
+FedAvg arm**, with two gradients per local step (§5); two columns are its own:
+`momentum_norm` and `second_moment_norm`. Sequential.
+
 ## 4. Client update rules
 
 ### 4.1 `local_sgd`, `fedavg`, `centralized`
@@ -625,6 +652,31 @@ the `K_i` steps it took. `update_mode` is `sequential_epoch` (unset; one step pe
 batch, so one per local iteration under `client.sampling: with_replacement`) or
 `full_gradient`. Nothing is kept between rounds.
 
+### 4.9 `fafed`
+
+The client half of §3.7 (`TorchFAFEDClient`, `fedbrew/clients/torch_fafed_client.py`).
+Asked for its initial gradient, it returns `g_0` at `x_0` on every row under
+`full_gradient`, otherwise on one batch of `min(n, batch_size * local_iterations)`
+rows drawn as its training loader draws (with replacement under `client.sampling:
+with_replacement`) from its own seed (phase `fafed_initial`), and keeps `x_0` as its
+previous iterate. Each round it starts from `x_t`, `m`, `v` and `den = sqrt(v) + rho`;
+in round 1 it first steps `x = x_0 - eta m` (Algorithm 2's line 3 as printed, without
+`A_0^-1`: round 1 applies one more update). Per local step, on one batch, with `g`
+the gradient at `x` and `g_p` at the previous iterate on the same batch:
+
+```
+m    = g + (1 - alpha) (m - g_p)
+v    = beta v + (1 - beta) g^2
+prev = x
+x    = x - eta m / den            (every step but the round's last)
+```
+
+with `alpha` = `client.fafed_alpha`, `beta` = `client.beta2`. It returns its last
+iterate, `m` and `v`, and keeps `prev` (`get_state`'s `previous_iterate`). A round
+with no previous iterate -- one the initial pass never reached and no checkpoint
+restored -- is refused. Every setting is required: `learning_rate`, `beta2`,
+`fafed_alpha`, `fafed_rho`.
+
 ## 5. Communication cost per round
 
 Model-shaped states moved per direction per round, relative to FedAvg.
@@ -636,6 +688,7 @@ Model-shaped states moved per direction per round, relative to FedAvg.
 | `scaffold` | **2×** | model + control-variate delta |
 | `fedlalr` | **3×** | model + momentum + second moment |
 | `fedlada` | **3×** | model + second moment + amended direction |
+| `fafed` | **3×** | model + momentum + second moment |
 | LoRA, on the rules §5.1 lists | ≪1× | adapter tensors only — chapter 06 §3.4 |
 
 **Compare arms on `communicated_bytes`, not on round count alone.** Preflight
@@ -664,7 +717,7 @@ trains a real adapter-only round on a tiny GPT-2 LoRA model in
 | `fedavg`, `fedavg_ft`, `local_sgd`, `local_adamw`, `delta_sgd` | `fedavg`, `fedopt`, `fedadam`, `fedyogi`, `fedadagrad` |
 | `centralized` | `centralized` |
 
-Four rules cannot, and are refused with an adapter-scoped model
+Five rules cannot, and are refused with an adapter-scoped model
 (`ADAPTER_SCOPED_MODELS`, `fedbrew/core/config.py`: `hf_causal_lm_lora`) at
 config load, by `fedbrew run` and `--validate-only` alike, before anything is
 built. The client refuses too, before its first update, when the task reports
@@ -678,6 +731,7 @@ messages name the rule and the rules that can (`FULL_STATE_ONLY_CLIENT_RULES`,
 | `scaffold` | the same, and keys its control variates by that `state_dict` |
 | `fedlalr` | its local AMSGrad looks its moments up by the model's parameter names, which under a PEFT adapter carry the adapter name the federated state's keys do not |
 | `fedlada` | its local AMSGrad looks its moments and amended direction up by the model's parameter names, which under a PEFT adapter carry the adapter name the federated state's keys do not |
+| `fafed` | its momentum tracking looks its moments and previous iterate up by the model's parameter names, which under a PEFT adapter carry the adapter name the federated state's keys do not |
 
 Chapter 07 said "any rule" until all three were measured failing in round 1,
 after the model was built (FINDINGS.csv `POST-F29`).
@@ -701,12 +755,13 @@ by `validate_config` against `UNHONOURED_CLIENT_OPTIONS`:
 | `scaffold` | plain SGD, `(c - c_i)` written into the step; `update_mode` `sequential_epoch` (unset) or `full_gradient` | `momentum` `weight_decay` `nesterov` `learning_rate_schedule` `min_learning_rate` `frozen_gradient_weighting` `max_local_steps` `max_grad_norm` |
 | `fedlalr` | local AMSGrad at a per-coordinate rate; `update_mode` `sequential_epoch` (unset) or `full_gradient` | `momentum` `weight_decay` `nesterov` `learning_rate_schedule` `min_learning_rate` `frozen_gradient_weighting` `max_local_steps` `max_grad_norm` |
 | `fedlada` | local AMSGrad amended by the server's direction; `update_mode` `sequential_epoch` (unset) or `full_gradient` | `momentum` `weight_decay` `nesterov` `learning_rate_schedule` `min_learning_rate` `frozen_gradient_weighting` `max_local_steps` `max_grad_norm` |
+| `fafed` | tracked momentum over a synchronised denominator, at a constant step; `update_mode` `sequential_epoch` (unset) or `full_gradient` | `momentum` `weight_decay` `nesterov` `learning_rate_schedule` `min_learning_rate` `frozen_gradient_weighting` `max_local_steps` `max_grad_norm` |
 | `delta_sgd` | a step size measured from the local smoothness; any `update_mode`, `sequential_epoch` (unset) | `momentum` `weight_decay` `nesterov` `learning_rate_schedule` `min_learning_rate` `max_local_steps` |
 | `local_adamw` | `torch.optim.AdamW`; `update_mode` `sequential_epoch` (unset) or `full_gradient` | `momentum` `nesterov` `frozen_gradient_weighting` `max_grad_norm` |
 | `local_sgd` | the base SGD client; `update_mode` `sequential_epoch` (unset) or `full_gradient` | `frozen_gradient_weighting` `max_local_steps` `max_grad_norm` |
 | `fedavg`, `centralized`, `fedavg_ft` | the shared local-update engine | none — all nine reach the client |
 
-Seven of these rules also check the options in `__init__`. That check is
+Eight of these rules also check the options in `__init__`. That check is
 reachable by direct construction only: it tests an attribute the factory sets
 only for the rules that honour the option, so for a rule that does not, it is
 the base class's default and never fires. `delta_sgd` with `momentum: 0.9` and
@@ -728,6 +783,7 @@ from the factory's own gates. Chapter 04 §5.3.
 | `fedbrew/servers/scaffold.py` | the server control variate |
 | `fedbrew/servers/fedlalr.py` | synchronised optimizer state |
 | `fedbrew/servers/fedlada.py` | FedLADA's server step, averaged second moment and amended direction |
+| `fedbrew/servers/fafed.py` | FAFED's initial moments, synchronised moments and the round's last step |
 | `fedbrew/clients/torch_sgd_client.py` | the shared SGD engine |
 | `fedbrew/clients/local_update_modes.py` | the three `update_mode` variants |
 | `fedbrew/clients/torch_fedprox_client.py` | the proximal term |
@@ -735,6 +791,7 @@ from the factory's own gates. Chapter 04 §5.3.
 | `fedbrew/clients/torch_delta_sgd_client.py` | the step-size schedule and its trace |
 | `fedbrew/clients/torch_fedlalr_client.py` | per-coordinate rates |
 | `fedbrew/clients/torch_fedlada_client.py` | local AMSGrad amended by `g_a` |
+| `fedbrew/clients/torch_fafed_client.py` | momentum tracking with a second gradient at the previous iterate |
 | `fedbrew/clients/fedavg_ft_client.py` | fine-tuning, the ordering that keeps both passes honest, and the dataloader phase that keeps their batch orders apart |
 | `fedbrew/core/config.py` | `PAIRED_STRATEGIES` and `_validate_paired_strategies` — the enforced pairings |
 | `fedbrew/core/validation.py` | `_validate_shipped_algorithm_compatibility` — the SCAFFOLD pairing, and the cost notices |

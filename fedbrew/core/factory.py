@@ -66,6 +66,11 @@ FEDLALR_CLIENT_RULES = {"fedlalr"}
 #: takes its server step eta_g toward the clients' mean.
 FEDLADA_SERVER_STRATEGIES = {"fedlada"}
 FEDLADA_CLIENT_RULES = {"fedlada"}
+#: FAFED (AAAI 2023, arXiv:2212.00974). A matched pair: the server starts the
+#: moments from the clients' initial gradients, synchronises them every round
+#: and takes the round's last step with them.
+FAFED_SERVER_STRATEGIES = {"fafed"}
+FAFED_CLIENT_RULES = {"fafed"}
 LOCAL_TRAINING_CLIENT_RULES = {
     "local_adamw",
     "fedprox",
@@ -74,6 +79,7 @@ LOCAL_TRAINING_CLIENT_RULES = {
     *DELTA_SGD_CLIENT_RULES,
     *FEDLALR_CLIENT_RULES,
     *FEDLADA_CLIENT_RULES,
+    *FAFED_CLIENT_RULES,
     *FEDAVG_FT_CLIENT_RULES,
 }
 
@@ -468,6 +474,14 @@ def _build_server(
             epsilon=_client_extra_positive_float(config, "epsilon"),
             server_learning_rate=_server_extra_float(config, "server_learning_rate"),
         )
+    if config.server.strategy in FAFED_SERVER_STRATEGIES:
+        # The client's step and rho: the server takes the round's last step,
+        # with the synchronised m and sqrt(v) + rho.
+        return server_factory(
+            **common_kwargs,
+            learning_rate=_learning_rate(config),
+            fafed_rho=_client_extra_positive_float(config, "fafed_rho"),
+        )
     if config.server.strategy in FEDOPT_SERVER_STRATEGIES:
         # `fedopt` is the only strategy whose optimizer the config chooses. For
         # the four named ones the builder supplies its own, which used to be
@@ -668,7 +682,7 @@ def _training_client_kwargs(
 
 
 def _adaptive_rule_kwargs(config: FullConfig) -> dict[str, Any]:
-    """The settings of the rules that adapt their own step: FedLALR's, FedLADA's, Delta-SGD's."""
+    """The settings of the rules that adapt their own step: FedLALR, FedLADA, FAFED, Delta-SGD."""
 
     kwargs: dict[str, Any] = {}
     if config.client.update_rule in FEDLALR_CLIENT_RULES:
@@ -684,6 +698,13 @@ def _adaptive_rule_kwargs(config: FullConfig) -> dict[str, Any]:
             beta2=_client_extra_float(config, "beta2"),
             epsilon=_client_extra_positive_float(config, "epsilon"),
             lada_alpha=_client_extra_float(config, "lada_alpha"),
+        )
+
+    if config.client.update_rule in FAFED_CLIENT_RULES:
+        kwargs.update(
+            beta2=_client_extra_float(config, "beta2"),
+            fafed_alpha=_client_extra_float(config, "fafed_alpha"),
+            fafed_rho=_client_extra_positive_float(config, "fafed_rho"),
         )
 
     if config.client.update_rule in DELTA_SGD_CLIENT_RULES:

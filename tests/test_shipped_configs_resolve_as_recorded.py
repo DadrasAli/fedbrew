@@ -153,8 +153,8 @@ DEFAULTS_CHANGED: dict[str, tuple[str, str]] = {
 #: the new default: every config but the eight heterogeneous-quadratic arms,
 #: which state executor: batched, and every config for the gradient form.
 LEFT_OUT: dict[str, int] = {
-    "runtime.extra.performance.executor": 132,
-    "runtime.extra.performance.gradient_form": 140,
+    "runtime.extra.performance.executor": 133,
+    "runtime.extra.performance.gradient_form": 141,
 }
 
 
@@ -192,7 +192,7 @@ class EveryShippedConfigResolvesAsRecordedTest(unittest.TestCase):
     @pytest.mark.fast
     def test_the_record_covers_every_shipped_config(self) -> None:
         self.assertEqual(sorted(self.record), sorted(str(path) for path in shipped_run_configs()))
-        self.assertEqual(len(self.record), 140)
+        self.assertEqual(len(self.record), 141)
 
     def test_each_resolves_to_its_record(self) -> None:
         for path in shipped_run_configs():

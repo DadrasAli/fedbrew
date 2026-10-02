@@ -137,7 +137,7 @@ class ShippedConfigTest(unittest.TestCase):
 
         self.assertEqual(
             self._rules_that_measure_and_filter(),
-            {"delta_sgd", "fedlada", "fedlalr", "fedprox", "scaffold"},
+            {"delta_sgd", "fafed", "fedlada", "fedlalr", "fedprox", "scaffold"},
         )
 
     def test_no_run_gives_a_client_a_list(self) -> None:

@@ -271,6 +271,8 @@ def run_fl_loop(
     }
     _setup_clients(client, client_infos)
     _restore_client_states(client, checkpoint)
+    if start_round == 1:
+        _initial_pass(server, client, client_infos)
     if start_round > global_rounds:
         state.checkpointing = _checkpointing_summary(
             output_dir, checkpoint_policy, checkpoint_tracker
@@ -1084,6 +1086,25 @@ def _stream_fit_results(
     yield from _fit_one_at_a_time(
         client, requests, _RoundFitObserver(state, totals, round_id, on_progress)
     )
+
+
+def _initial_pass(server: ServerStrategy, client: ClientPool, infos: list[ClientInfo]) -> None:
+    """Before round 1, what a strategy asks of every client, if it asks (FAFED's ``g_0``).
+
+    A strategy that declares ``initial_requests`` is handed every client's
+    answer through ``absorb_initial`` before its first round is configured. A
+    resumed run skips it: what it set is in the checkpoint, the server's state
+    and the clients'. No strategy without the method is touched.
+    """
+
+    ask = getattr(server, "initial_requests", None)
+    if ask is None:
+        return
+    results = []
+    for request in ask(infos):
+        results.append(_fit_client(client, request))
+        _release_client(client, request.client_id)
+    server.absorb_initial(results)
 
 
 def _fit_client(client: ClientPool, request: FitRequest) -> FitResult:

@@ -89,6 +89,7 @@ from fedbrew.core.checkpointing import (
     refuse_a_reconfigured_resume,
 )
 from fedbrew.core.refusal import RunRefused
+from fedbrew.servers.fafed import FAFEDServer
 from fedbrew.servers.fedavg import FedAvgServer
 from fedbrew.servers.fedlada import FedLADAServer
 from fedbrew.servers.fedlalr import FedLALRServer
@@ -169,6 +170,13 @@ CLIENT_HYPERPARAMETERS: dict[str, dict[str, Any]] = {
         "lada_alpha": 0.5,
         "update_mode": "full_gradient",
     },
+    "fafed": {
+        **CONFIGURED,
+        "beta2": 0.5,
+        "fafed_alpha": 0.5,
+        "fafed_rho": 1e-3,
+        "update_mode": "full_gradient",
+    },
 }
 
 #: Per update rule, the keys `load_state` restores that a run *learns*. These
@@ -184,6 +192,7 @@ CLIENT_LEARNED: dict[str, dict[str, Any]] = {
     "delta_sgd": {"num_examples": 999},
     "fedlalr": {"num_examples": 999},
     "fedlada": {"num_examples": 999},
+    "fafed": {"num_examples": 999, "previous_iterate": {"w": torch.ones(2)}},
 }
 
 #: Checkpointed, compared, and restored by nothing. POST-F04's set: before it
@@ -408,6 +417,12 @@ def _server_builds() -> Iterator[tuple[str, Callable[[], Any]]]:
     yield "FedAvgServer", lambda: _prepared(FedAvgServer(**common))
     yield "ScaffoldServer", lambda: _prepared(ScaffoldServer(**common))
     yield "FedLALRServer", lambda: _prepared(FedLALRServer(epsilon=1e-8, **common))
+    yield (
+        "FAFEDServer",
+        lambda: _prepared(
+            FAFEDServer(learning_rate=0.01, fafed_rho=0.01, participation_rate=1.0, seed=7)
+        ),
+    )
     yield (
         "FedLADAServer",
         lambda: _prepared(FedLADAServer(epsilon=1e-8, server_learning_rate=1.0, **common)),
