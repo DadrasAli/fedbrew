@@ -501,6 +501,12 @@ def set_path(mapping: dict[str, Any], key: str, value: Any) -> None:
     node[parts[-1]] = value
 
 
+def _names_column(name: str, column: str) -> bool:
+    """Whether a ``convergence.metrics`` entry, bare or prefixed, is the column ``column``."""
+
+    return name == column or f"central_test_{name.removeprefix('central_test_')}" == column
+
+
 def resolve_metric(config: Any, name: str, method: Method) -> str:
     """The round column ``name`` means for this run, checked against what the run evaluates."""
 
@@ -647,7 +653,7 @@ class Tuner:
         if settings.method.score == "running_mean":
             convergence = dict(mapping.get("convergence") or {})
             held = list(convergence.get("metrics") or [])
-            if settings.metric not in held:
+            if not any(_names_column(name, settings.metric) for name in held):
                 held.append(settings.metric)
             convergence["metrics"] = held
             mapping["convergence"] = convergence

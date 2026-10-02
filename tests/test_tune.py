@@ -405,6 +405,23 @@ class PilotOnDriftQuadTest(TuneRuns):
         self.assertEqual(resolved["client"]["learning_rate"], 1e-2)
         self.assertNotIn("convergence", resolved)
 
+    def test_a_config_that_already_asks_for_the_mean_by_its_bare_name(self) -> None:
+        config = drift_quad()
+        config["schedule"]["rounds"] = 200
+        config["convergence"] = {"metrics": ["optimality_gap"]}
+        config["tuning"] = {
+            "method": "pilot",
+            "metric": "optimality_gap",
+            "rounds": 10,
+            "dials": {"client.learning_rate": {"centre": 1e-3, "decades": 1}},
+        }
+        _, out = self.tune(config)
+        selection = json.loads((out / "selection.json").read_text())
+        self.assertEqual(selection["selected"]["values"], {"client.learning_rate": 1e-2})
+        for path in (out / "configs").glob("*.yaml"):
+            mapping = yaml.safe_load(path.read_text())
+            self.assertEqual(mapping["convergence"]["metrics"], ["optimality_gap"], path.name)
+
     def test_the_plan_runs_nothing(self) -> None:
         config = drift_quad()
         config["tuning"] = {
