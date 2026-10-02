@@ -868,7 +868,7 @@ whose metric is not finite ranks worst.
 | --- | --- | --- |
 | `tuning.method` | `null` (off) | `grid_and_edge` or `pilot`, below |
 | `tuning.metric` | — | the round column scored: `grad_norm_sq`, a central metric bare or as `central_test_<m>`, or (grid_and_edge) any column the run writes |
-| `tuning.dials` | — | dotted config path → its grid: `{base: 2, exponents: [lo, hi]}` is `base^lo .. base^hi`; `{values: [...]}` a stated grid; `{centre: c, decades: n}` is `c·10^k`, `k = −n .. n`. Each may add `extend: false` or `extend: <ratio>`. At least 3 values a dial |
+| `tuning.dials` | — | dotted config path → its grid: `{base: 2, exponents: [lo, hi]}` is `base^lo .. base^hi`; `{values: [...]}` a stated grid; `{centre: c, decades: n}` is `c·10^k`, `k = −n .. n`. Each may add `extend: false` or `extend: <ratio>`, and `bounds: [lo, hi]`, the closed interval its grid stays in (the initial grid inside it). At least 3 values a dial |
 | `tuning.seeds` | `[]`, the config's own seed | the seeds every candidate runs at |
 | `tuning.rounds` | `null`, the config's horizon | the tuning runs' horizon; required for `pilot` |
 | `tuning.aggregate` | `median` | `median` or `mean` over seeds |
@@ -883,7 +883,8 @@ run's score is the **mean of log10 of the metric** over the rounds it is
 evaluated, clamped below at `floor`. Candidates within 0.05 decades of the best
 are tied, and all are reported; the pick is the best score.
 
-**`pilot`.** Every dial is powers of 10 around a stated centre, the runs stop at
+**`pilot`.** Every dial is powers of 10 around a stated centre, or a stated grid
+(`values`, extended by its `extend` ratio), the runs stop at
 the **pilot horizon** `rounds`, and the tune turns `convergence` on for the
 metric (§9.1), so a run's score is the **final exact running mean** of the
 metric over the pilot's iterates. Candidates within 1e-3 of the best, relative,
@@ -891,15 +892,17 @@ are tied, and the tie is broken **toward the grid's centre** (the fewest grid
 steps from the initial grid's centre, summed over the dials; then the lower
 score). The resolved config keeps the full horizon.
 
-**The edge rule and the stop rule, both methods.** Where the pick is on an edge
-of a dial, the dial is extended one value past it — a `base` grid by its base,
-a `centre` grid by 10, a stated grid that is geometric by its ratio — and every
-new candidate (the new value against every value of the other dials) is run and
-scored. The search stops when the pick is interior on every dial; when an
-extension does not beat the pick before it by more than a tie, which is kept,
-closer to the centre and interior of the extended grid; when the edge is on a
-stated grid that cannot be extended (not geometric, or `extend: false`); or after
-`max_steps` extensions, the pick then reported as on an edge.
+**The edge rule and the stop rule, both methods.** Each dial on whose edge the
+pick lies is extended one value past it — a `base` grid by its base, a `centre`
+grid by 10, a stated grid by its `extend` ratio or, without one, its own ratio if
+it is geometric — unless the new value would leave the dial's `bounds`; and every
+new candidate (the new values against every value of the other dials) is run and
+scored. A dial the pick lies inside is not extended. The search stops when the
+pick is interior on every dial; when an extension does not beat the pick before
+it by more than a tie, which is kept, closer to the centre and interior of the
+extended grid; when no dial on whose edge the pick lies can be extended (code
+`not_extendable` for stated grids that are not geometric, `bounded` otherwise);
+or after `max_steps` extensions, the pick then reported as on an edge.
 
 **What a tune writes**, into its directory: `configs/` and `runs/` (each
 candidate and seed), `evidence.csv` (a row per candidate and seed: its step, the

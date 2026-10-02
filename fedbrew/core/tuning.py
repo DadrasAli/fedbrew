@@ -24,18 +24,27 @@ Two named methods, each a fixed way to score, to tie and to stop:
     search stops when the pick is interior on every dial; or when an extension
     gains no more than ``tie`` over the pick before it, which is then a tie
     and the earlier pick, closer to the grid's centre, is kept; or when a dial
-    at the pick's edge cannot be extended; or after ``max_steps`` extensions.
+    at the pick's edge cannot be extended (not geometric, or at its bounds); or
+    after ``max_steps`` extensions.
 
 ``pilot``
     A short pilot run: ``rounds`` is the pilot horizon, every dial is powers of
     ten around a stated centre (``centre: c, decades: n`` is ``c * 10^k`` for
-    ``k`` in ``-n..n``), and the run turns ``convergence`` on for the metric, so
+    ``k`` in ``-n..n``) or a stated grid (``values``, extended by its ``extend``
+    ratio), and the run turns ``convergence`` on for the metric, so
     its score is the **final exact running mean** of the metric over the
     pilot's iterates (``fedbrew/core/convergence.py``). Candidates within
     ``tie`` (1e-3, relative) of the best are tied and the pick is the tied one
     **closest to the grid's centre** (summed distance in grid steps; the lower
     score breaks a remaining tie). The search is extended past an edge and stops
-    on the same four rules. The resolved config restores the full horizon.
+    on the same rules. The resolved config restores the full horizon.
+
+Bounds. A dial may state ``bounds: [lo, hi]``, a closed interval its grid stays
+in: an extension past it is not made. Each dial on whose edge the pick lies is
+extended past that edge when it can be -- geometric, and the next value within
+its bounds -- and the dials it lies inside are not; the search stops when the
+pick is on no edge it can extend past, which is when it is interior or on the
+edges of dials at their bounds or not extendable.
 
 Every dial is a dotted path into the config as it is written
 (``client.learning_rate``, ``server.beta1``). A tune writes into its output
@@ -105,7 +114,7 @@ SECTION_KEYS = frozenset(
         "max_steps", "floor", "direction", "output_dir",
     }
 )  # fmt: skip
-DIAL_KEYS = frozenset({"base", "exponents", "values", "centre", "decades", "extend"})
+DIAL_KEYS = frozenset({"base", "exponents", "values", "centre", "decades", "extend", "bounds"})
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +213,8 @@ class Axis:
     values: list[float | int]
     ratio: float | None
     first: int = 0
+    #: The closed interval the grid stays in, ``(lo, hi)``; None is unbounded.
+    bounds: tuple[float, float] | None = None
     initial: int = field(init=False)
 
     def __post_init__(self) -> None:
@@ -224,20 +235,39 @@ class Axis:
             return "low"
         return "high" if position == len(self.values) - 1 else None
 
-    def extend(self, side: str) -> float:
-        """Add one value past the ``low`` or ``high`` end and return it."""
+    def next_value(self, side: str) -> float | None:
+        """The value one step past the ``low`` or ``high`` end, or None where there is none."""
 
         if self.ratio is None:
-            raise TuneError(f"{self.key} has a stated grid that is not geometric: not extendable")
+            return None
         ratio = _decimal(self.ratio)
         if side == "high":
             new = float(_decimal(self.values[-1]) * ratio)
-            self.values.append(new)
         else:
             new = float(_decimal(self.values[0]) / ratio)
+        if self.bounds is not None and not _inside(new, self.bounds):
+            return None
+        return new
+
+    def extend(self, side: str) -> float:
+        """Add one value past the ``low`` or ``high`` end and return it."""
+
+        new = self.next_value(side)
+        if new is None:
+            raise TuneError(f"{self.key} cannot be extended past its {side} edge")
+        if side == "high":
+            self.values.append(new)
+        else:
             self.values.insert(0, new)
             self.first -= 1
         return new
+
+
+def _inside(value: float, bounds: tuple[float, float]) -> bool:
+    """Within ``[lo, hi]``, to a relative 1e-12 for a bound written in decimal."""
+
+    low, high = bounds
+    return low * (1 - 1e-12) <= value <= high * (1 + 1e-12)
 
 
 def parse_axis(key: str, spec: Any, method: Method) -> Axis:
@@ -250,7 +280,24 @@ def parse_axis(key: str, spec: Any, method: Method) -> Axis:
         ratio = _extension(where, spec["extend"])
     if len(values) < 3:
         raise RunRefused(f"{where} has {len(values)} values; an interior best needs at least 3")
-    return Axis(key=key, values=values, ratio=ratio)
+    bounds = _bounds(where, spec.get("bounds"), values)
+    return Axis(key=key, values=values, ratio=ratio, bounds=bounds)
+
+
+def _bounds(where: str, given: Any, values: Sequence[float | int]) -> tuple[float, float] | None:
+    """A dial's ``bounds``: two finite numbers, low below high, the initial grid inside."""
+
+    if given is None:
+        return None
+    if not (isinstance(given, list) and len(given) == 2 and all(_number(v) for v in given)):
+        raise RunRefused(f"{where}.bounds must be [low, high], two finite numbers")
+    bounds = (float(given[0]), float(given[1]))
+    if not bounds[0] < bounds[1]:
+        raise RunRefused(f"{where}.bounds must have low below high")
+    outside = [v for v in values if not _inside(float(v), bounds)]
+    if outside:
+        raise RunRefused(f"{where}: {outside} lie outside its bounds {list(bounds)}")
+    return bounds
 
 
 def _form_of(where: str, key: Any, spec: Any, method: Method) -> str:
@@ -267,10 +314,10 @@ def _form_of(where: str, key: Any, spec: Any, method: Method) -> str:
     if len(forms) != 1:
         raise RunRefused(f"{where} must give exactly one of exponents (with base), values, centre")
     form = forms[0]
-    if method.dials == "centre" and form != "centre":
+    if method.dials == "centre" and form == "exponents":
         raise RunRefused(
-            f"{where}: method {method.name} takes powers of 10 around a stated centre; "
-            "write centre (and decades)"
+            f"{where}: method {method.name} takes powers of 10 around a stated centre, or a "
+            "stated grid; write centre (and decades), or values"
         )
     if method.dials == "grid" and form == "centre":
         raise RunRefused(
@@ -775,13 +822,13 @@ class Tuner:
             if not edges:
                 stop = {"code": "interior", "reason": "the pick is interior on every dial"}
                 break
-            fixed = [axis.key for axis in self.axes if axis.key in edges and axis.ratio is None]
-            if fixed:
-                stop = {
-                    "code": "not_extendable",
-                    "reason": f"the pick is on an edge of {', '.join(fixed)}, a stated grid "
-                    "that is not geometric and has no extend ratio",
-                }
+            growing = {
+                axis.key: side
+                for axis in self.axes
+                if (side := edges.get(axis.key)) is not None and axis.next_value(side) is not None
+            }
+            if not growing:
+                stop = _stuck(self.axes, edges)
                 break
             if step >= settings.max_steps:
                 stop = {
@@ -791,9 +838,9 @@ class Tuner:
                 }
                 break
             for axis in self.axes:
-                if axis.key in edges:
-                    added = axis.extend(edges[axis.key])
-                    self.log(f"fedbrew tune: {axis.key}: extended {edges[axis.key]} to {added!r}")
+                if axis.key in growing:
+                    added = axis.extend(growing[axis.key])
+                    self.log(f"fedbrew tune: {axis.key}: extended {growing[axis.key]} to {added!r}")
             step += 1
         return self.finish(selected, scores, tied, stop)
 
@@ -827,6 +874,24 @@ class Tuner:
 
     def write(self, selection: Selection) -> None:
         write_selection(selection, self.base, self.mapping)
+
+
+def _stuck(axes: Sequence[Axis], edges: Mapping[str, str]) -> dict[str, str]:
+    """Why a pick on these edges stops the search: no dial on whose edge it lies can extend."""
+
+    fixed = [axis.key for axis in axes if axis.key in edges and axis.ratio is None]
+    if fixed and len(fixed) == len(edges):
+        return {
+            "code": "not_extendable",
+            "reason": f"the pick is on an edge of {', '.join(fixed)}, a stated grid "
+            "that is not geometric and has no extend ratio",
+        }
+    held = [f"{key} ({side})" for key, side in edges.items()]
+    return {
+        "code": "bounded",
+        "reason": f"the pick is on an edge of {', '.join(held)}, and no extension past "
+        "it stays within the dial's bounds or is geometric",
+    }
 
 
 def write_selection(selection: Selection, base: Path, mapping: dict[str, Any]) -> None:

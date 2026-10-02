@@ -193,6 +193,58 @@ class TheSearchTest(unittest.TestCase):
         self.assertEqual(len(search.ran[1]), 7)
         self.assertTrue(selection.interior)
 
+    def test_a_pilot_on_a_stated_grid_is_extended_by_ten_within_its_bounds(self) -> None:
+        # The best is at 1e-6, below the grid; the bound lets the grid reach 1e-5 and no lower.
+        search = Landscape(
+            "pilot",
+            {"c": {"values": [1e-4, 1e-3, 1e-2, 1e-1], "extend": 10, "bounds": [1e-5, 10]}},
+            lambda x, seed=0: abs(math.log10(x) + 6),
+        )
+        selection = search.tune()
+        self.assertEqual(search.ran[1], [(1e-5,)])
+        self.assertEqual(len(search.ran), 2)
+        self.assertEqual(selection.selected.point, (1e-5,))
+        self.assertEqual(selection.stop["code"], "bounded")
+        self.assertFalse(selection.interior)
+
+    def test_a_stated_grid_of_ratio_four_extended_by_ten(self) -> None:
+        # 1/128 .. 2 (ratio 4), the best at 20: one extension up by 10 reaches it.
+        values = [1 / 128, 1 / 32, 1 / 8, 1 / 2, 2]
+        search = Landscape(
+            "pilot",
+            {"c": {"values": values, "extend": 10, "bounds": [1 / 128000, 20]}},
+            lambda x, seed=0: abs(math.log10(x) - math.log10(20)),
+        )
+        selection = search.tune()
+        self.assertEqual(search.ran[1], [(20.0,)])
+        self.assertEqual(selection.selected.point, (20.0,))
+        self.assertEqual(selection.stop["code"], "bounded")
+
+    def test_each_dial_is_extended_alone_when_the_other_is_at_its_bound(self) -> None:
+        # The pick is on c's high edge (bounded at 10) and on eta_g's low edge (free below).
+        search = Landscape(
+            "pilot",
+            {
+                "c": {"values": [1e-1, 1, 10], "extend": 10, "bounds": [1e-5, 10]},
+                "eta_g": {"values": [0.1, 1, 10], "extend": 10, "bounds": [1e-2, 10]},
+            },
+            lambda c, g, seed=0: -math.log10(c) + abs(math.log10(g) + 2),
+        )
+        selection = search.tune()
+        # Only eta_g grows: one new value against c's three values.
+        self.assertEqual(sorted(search.ran[1]), [(0.1, 0.01), (1.0, 0.01), (10.0, 0.01)])
+        self.assertEqual(selection.selected.point, (10.0, 0.01))
+        self.assertEqual(selection.stop["code"], "bounded")
+
+    def test_bounds_are_checked(self) -> None:
+        for spec, needle in (
+            ({"values": [1, 10, 100], "bounds": [2, 1000]}, "outside its bounds"),
+            ({"values": [1, 10, 100], "bounds": [100, 1]}, "low below high"),
+            ({"values": [1, 10, 100], "bounds": [1]}, r"\[low, high\]"),
+        ):
+            with self.subTest(spec=spec), self.assertRaisesRegex(RunRefused, needle):
+                parse_axis("c", spec, METHODS["pilot"])
+
     def test_a_metric_better_higher(self) -> None:
         search = Landscape(
             "grid_and_edge",
@@ -244,7 +296,9 @@ class ThePiecesTest(unittest.TestCase):
     def test_method_and_dial_refusals(self) -> None:
         grid, pilot = METHODS["grid_and_edge"], METHODS["pilot"]
         with self.assertRaisesRegex(RunRefused, "powers of 10 around a stated centre"):
-            parse_axis("a", {"values": [1, 2, 3]}, pilot)
+            parse_axis("a", {"base": 2, "exponents": [-3, -1]}, pilot)
+        # A stated grid is a pilot's too.
+        self.assertEqual(parse_axis("a", {"values": [1, 2, 3]}, pilot).values, [1, 2, 3])
         with self.assertRaisesRegex(RunRefused, "takes a grid"):
             parse_axis("a", {"centre": 1}, grid)
         with self.assertRaisesRegex(RunRefused, "at least 3"):
