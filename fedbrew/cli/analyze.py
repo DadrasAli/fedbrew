@@ -2,7 +2,8 @@
 
 Per run the last iterate, the best so far, the mean of log10 of a metric and the
 running mean over the iterates; across the seeds of a group of runs the median,
-minimum, maximum and chosen quantiles of each, per round and at the end
+minimum, maximum, the mean with its upward and downward RMS deviations, and
+chosen quantiles of each, per round and at the end
 (``fedbrew/core/analysis.py``). Reads the runs' files and writes four tables
 into ``--out``; it runs no experiment and imports no model.
 """
@@ -32,7 +33,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         description=(
             "Summarize finished runs from their round_metrics.csv: per run the last iterate, "
             "the best so far, the mean of log10 of a metric and the running mean; across the "
-            "seeds of each config the median, min, max and quantiles, per round and final."
+            "seeds of each config the median, min, max, the mean with its upward and downward "
+            "RMS deviations, and quantiles, per round and final."
         ),
     )
     parser.add_argument(
