@@ -794,6 +794,7 @@ output. Neither can be read off a curve evaluated every tenth round.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `convergence.metrics` | `[]` | Round columns to take the mean of: `grad_norm_sq` (a task that declares F's gradient), or a metric the task's central pass reports, as `central_test_optimality_gap` or bare as `optimality_gap`. Resolved to the full column names at load. A name nothing evaluates, and a repeat, are refused. |
+| `convergence.iterates` | `after_update` | Which model row `t` measures: `after_update`, the model after round `t`'s update (below), or `before_update`, the model before it (§9.1.1). |
 
 For each metric the run evaluates it at **every round's global model** and
 writes `<column>_running_mean`, for example `grad_norm_sq_running_mean` and
@@ -823,6 +824,31 @@ whole run.
   (`convergence`), so a resumed run continues them. A checkpoint written
   without the section cannot be continued with it on: the resume is refused,
   with nothing changed.
+
+#### 9.1.1 `iterates: before_update`
+
+Many analyses count the iterates from the starting point: `x_1` is the initial
+model and a run of `T` rounds measures `x_1 .. x_T`, applying `T - 1` updates.
+`convergence.iterates: before_update` writes a run that way. **Row `t` is the
+model before round `t`'s update**: row 1 is the initial model, and on row `t`
+every global-model column (`central_test_*`, `grad_norm_sq`) and every
+`<column>_running_mean` is of the models before rounds `1 .. t`. The last
+round samples no client, so `T` rounds apply `T - 1` updates and the run ends
+on the model its last row measures. The other cells of row `t` (the `fit_*`
+columns, `num_clients`, the per-client records) are round `t`'s, whose clients
+start from the row's model.
+
+- **How.** The loops measure the model after each round as always; the means
+  hold each round's global-model columns back one row, and row 1's come from a
+  measurement of the initial model before the first round. So row `t > 1` is,
+  bit for bit, row `t - 1` of the same run under `after_update`, and a
+  global-model pass that runs at all runs every round, its schedule then
+  deciding which rows show it. `tests/test_convergence_before_update.py`.
+- **Needs** `convergence.metrics` (the means do the shift), and no client split
+  pass (`evaluation.train`, `val`, `test` at `never`), which measures the model
+  after the update at the clients. Either is refused at load.
+- **Resume.** The held columns are in the checkpoint with the partial sums; a
+  checkpoint written under the other value refuses the resume.
 
 ### 9.2 `tuning`
 

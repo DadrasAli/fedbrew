@@ -132,7 +132,16 @@ def plan_roster_round(roster: RosterPlan, round_id: int) -> PlannedRound:
     post-fit loader for one epoch.
     """
 
-    positions = sampled_positions(roster, round_id)
+    return _planned(roster, round_id, sampled_positions(roster, round_id))
+
+
+def without_clients(roster: RosterPlan, round_id: int) -> PlannedRound:
+    """Round ``round_id`` with no client sampled: a round that applies no update."""
+
+    return _planned(roster, round_id, [])
+
+
+def _planned(roster: RosterPlan, round_id: int, positions: list[int]) -> PlannedRound:
     owners = [(roster.client_ids[place], roster.seeds[place]) for place in positions]
     train_orders = [roster.train_orders[place] for place in positions]
     eval_orders = [roster.eval_orders[place] for place in positions]

@@ -75,13 +75,13 @@ from fedbrew.core.batched_executor import (
     trained_state_keys,
     uploaded,
 )
-from fedbrew.core.convergence import observe_round, state_of
+from fedbrew.core.convergence import observe_round, skips_update, state_of
 from fedbrew.core.federated_state import model_state_size
 from fedbrew.core.metrics import filter_metrics
 from fedbrew.core.protocol import FitRequest, RoundInfo
 from fedbrew.core.resident_flush import FlushWriter, HostCopy, RoundClock, WriterStaged
 from fedbrew.core.resident_graphs import RoundGraphs
-from fedbrew.core.round_planner import PlannedRound
+from fedbrew.core.round_planner import PlannedRound, without_clients
 from fedbrew.core.stacked_results import StackedFitResults
 from fedbrew.core.torch_utils import StateStack
 from fedbrew.servers.fedavg import WeightedMetricAccumulator
@@ -642,6 +642,8 @@ class ResidentRounds:
         clock = RoundClock(self.device)
         clock.mark("start")
         planned = self.planner.plan(round_id)
+        if skips_update(self.context.running_means, round_id):
+            planned = without_clients(self.roster, round_id)
         self._refuse_empty(planned)
         program = self.representative.batched_program(
             FitRequest(round_id=round_id, client_id=self.representative.client_id, payload={})

@@ -503,10 +503,22 @@ class ConvergenceConfig:
     iterates (``fedbrew/core/convergence.py``). Written resolved to the full
     column names, as ``evaluation``'s splits are resolved to what the data
     carries. Empty: the section is off, and nothing about the run changes.
+
+    ``iterates`` says which model row ``t`` measures. ``after_update`` (the
+    default) is the above. ``before_update`` is the model before round ``t``'s
+    update, ``x_{t-1}``, the initial model included: every global-model
+    column of the row (``central_test_*``, ``grad_norm_sq``) and the means are
+    over ``x_0 .. x_{t-1}``, and the last round applies no update, so ``T``
+    rounds apply ``T - 1`` updates.
     """
 
     metrics: list[str] = field(default_factory=list)
+    iterates: str = "after_update"
     extra: dict[str, Any] = field(default_factory=dict)
+
+
+#: ``convergence.iterates``'s values: which model row ``t`` measures.
+CONVERGENCE_ITERATES = ("after_update", "before_update")
 
 
 @dataclass
@@ -1893,7 +1905,12 @@ def _build_convergence_config(values: object) -> ConvergenceConfig:
         metrics = [metrics]
     if not isinstance(metrics, list | tuple) or not all(isinstance(m, str) for m in metrics):
         raise RunRefused("convergence.metrics must be a list of metric names")
-    return ConvergenceConfig(metrics=list(metrics), extra=extra)
+    iterates = known.get("iterates", "after_update")
+    if iterates not in CONVERGENCE_ITERATES:
+        raise RunRefused(
+            f"convergence.iterates is {iterates!r}; it is one of {', '.join(CONVERGENCE_ITERATES)}"
+        )
+    return ConvergenceConfig(metrics=list(metrics), iterates=iterates, extra=extra)
 
 
 def _build_tuning_config(values: object) -> TuningConfig:
@@ -2070,6 +2087,7 @@ def _validate_convergence(config: FullConfig) -> None:
     from fedbrew.core.convergence import resolve_convergence_metrics
 
     metrics = config.convergence.metrics
+    _validate_convergence_iterates(config)
     if not metrics:
         return
     reported = task_reported_metrics(config).central
@@ -2079,6 +2097,36 @@ def _validate_convergence(config: FullConfig) -> None:
         grad_norm=task_grad_norm_gloss(config) is not None,
         task=config.task.name,
     )
+
+
+def _validate_convergence_iterates(config: FullConfig) -> None:
+    """``before_update`` moves the global model's columns: it needs the means, no client pass.
+
+    The shift is the running means' (``fedbrew/core/convergence.py``), so a run
+    without ``convergence.metrics`` would measure after the update while
+    claiming before. A client split pass measures the global model after the
+    round's update at the clients, which the shift does not move.
+    """
+
+    if config.convergence.iterates != "before_update":
+        return
+    if not config.convergence.metrics:
+        raise RunRefused(
+            "convergence.iterates is before_update, but convergence.metrics is empty: the rows "
+            "are moved to the model before each update by the running means, so name at least "
+            "one metric"
+        )
+    scheduled = [
+        f"evaluation.{split}"
+        for split in ("train", "val", "test")
+        if parse_evaluation_schedule(getattr(config.evaluation, split).every, split) is not None
+    ]
+    if scheduled:
+        raise RunRefused(
+            "convergence.iterates is before_update, which measures the global model before each "
+            f"round's update, but {', '.join(scheduled)} measure it after the update at the "
+            "clients; set their every to never"
+        )
 
 
 def _validate_tuning(config: FullConfig) -> None:

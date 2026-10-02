@@ -112,6 +112,7 @@ ADDED: dict[str, Any] = {
     "evaluation.grad_norm.every": "never",
     "evaluation.grad_norm.extra": {},
     "convergence.metrics": [],
+    "convergence.iterates": "after_update",
     "convergence.extra": {},
     **{
         f"tuning.{key}": value

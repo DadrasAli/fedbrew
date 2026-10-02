@@ -18,6 +18,18 @@ not an iterate, and a round that is not evaluated does not exist: every round
 is. The column is ``<metric>_running_mean``; on the final round it is the
 expected metric at the randomized output of the whole run.
 
+Before the update. ``convergence.iterates: before_update`` counts the iterates
+as a method's analysis often does: row ``t`` is the model before round ``t``'s
+update, ``x_{t-1}``, so row 1 is the initial model and the mean on round ``t``
+is over ``x_0 .. x_{t-1}``. The loops measure the model after each round as
+always; the means hold each round's global-model columns (``central_test_*``,
+``grad_norm_sq``) back by one row, write the previous round's in their place,
+and take row 1's from a measurement of ``x_0`` before the first round
+(``measure_start``). The last round samples no client (``skips_update``), so
+``T`` rounds apply ``T - 1`` updates and the model the run ends with is
+``x_{T-1}``, the one its last row measures. The column held back on a resumed
+run is in the checkpoint with the partial sums.
+
 Exact. The sum of the values is kept as Shewchuk's exact partials (the
 algorithm behind ``math.fsum``), so the mean is the correctly rounded sum
 divided by ``t``: ``math.fsum(values) / t`` bit for bit, whatever the order or
@@ -144,15 +156,25 @@ class RunningMeans:
         central_schedule: int | None,
         grad_norm_schedule: int | None,
         global_rounds: int,
+        before_update: bool = False,
     ) -> None:
         self.metrics = list(metrics)
         self.global_rounds = global_rounds
+        self.before_update = before_update
         self._asked = {"central": central_schedule, "grad_norm": grad_norm_schedule}
-        self.needs_central = any(m.startswith(CENTRAL_PREFIX) for m in self.metrics)
-        self.needs_grad_norm = GRAD_NORM_COLUMN in self.metrics
+        # Before the update, every global-model pass that runs at all runs every
+        # round, so a row can always be given the round before's.
+        self.needs_central = any(m.startswith(CENTRAL_PREFIX) for m in self.metrics) or (
+            before_update and central_schedule is not None
+        )
+        self.needs_grad_norm = GRAD_NORM_COLUMN in self.metrics or (
+            before_update and grad_norm_schedule is not None
+        )
         self.rounds = 0
         self._sums = {metric: ExactSum() for metric in self.metrics}
         self._not_finite = dict.fromkeys(self.metrics, False)
+        #: Before the update: the last measured model's columns, which the next row is given.
+        self._held: dict[str, float] | None = None
 
     @classmethod
     def from_config(
@@ -172,6 +194,7 @@ class RunningMeans:
             central_schedule=central_schedule,
             grad_norm_schedule=grad_norm_schedule,
             global_rounds=global_rounds,
+            before_update=getattr(convergence, "iterates", "after_update") == "before_update",
         )
 
     def schedules(self) -> tuple[int | None, int | None]:
@@ -180,8 +203,21 @@ class RunningMeans:
         central, grad_norm = self._asked["central"], self._asked["grad_norm"]
         return (1 if self.needs_central else central, 1 if self.needs_grad_norm else grad_norm)
 
+    def start(self, measured: Mapping[str, float]) -> None:
+        """Before the update: the initial model's global-model columns, which row 1 is given."""
+
+        self._held = _global_model_columns(measured)
+
+    def skips_update(self, round_id: int) -> bool:
+        """Whether round ``round_id`` samples no client: before the update, the last round."""
+
+        return self.before_update and round_id == self.global_rounds
+
     def observe(self, round_id: int, metrics: dict[str, float]) -> None:
         """Fold round ``round_id``'s iterate in, and write the means into ``metrics``.
+
+        Before the update, the round's global-model columns are held for the
+        next row and the held ones written in their place first.
 
         A value the round did not produce, or that is not finite, makes the
         mean not finite from then on: written as NaN, which is what the mean
@@ -194,6 +230,8 @@ class RunningMeans:
                 "an iterate was skipped or repeated, and the mean would not be over the run's "
                 "iterates"
             )
+        if self.before_update:
+            self._shift(metrics)
         self.rounds = round_id
         for metric in self.metrics:
             value = metrics.get(metric)
@@ -206,6 +244,20 @@ class RunningMeans:
             )
             metrics[running_mean_column(metric)] = mean
         self._drop_unasked(round_id, metrics)
+
+    def _shift(self, metrics: dict[str, float]) -> None:
+        """Write the held columns into this row, and hold the ones this round measured."""
+
+        if self._held is None:
+            raise RuntimeError(
+                "the running means hold no measurement of the model before this round: "
+                "measure_start was not called before the first round"
+            )
+        measured = _global_model_columns(metrics)
+        for name in measured:
+            del metrics[name]
+        metrics.update(self._held)
+        self._held = measured
 
     def _drop_unasked(self, round_id: int, metrics: dict[str, float]) -> None:
         """Remove what a pass forced for the mean wrote, where its own schedule did not ask."""
@@ -224,7 +276,7 @@ class RunningMeans:
     def state(self) -> dict[str, Any]:
         """The partial sums, for a checkpoint: what ``restore`` continues from."""
 
-        return {
+        state: dict[str, Any] = {
             "rounds": self.rounds,
             "metrics": {
                 metric: {
@@ -234,6 +286,9 @@ class RunningMeans:
                 for metric in self.metrics
             },
         }
+        if self.before_update:
+            state["held"] = dict(self._held or {})
+        return state
 
     def restore(self, checkpoint: Mapping[str, Any], round_id: int, where: str) -> None:
         """Continue from the partial sums a checkpoint of round ``round_id`` holds, or refuse."""
@@ -251,6 +306,12 @@ class RunningMeans:
                 f"holds the running means of {sorted(held.get('metrics', {}))}, and this run "
                 f"asks for {sorted(self.metrics)}"
             )
+        elif ("held" in held) != self.before_update:
+            reason = (
+                "was written measuring the model "
+                f"{'before' if 'held' in held else 'after'} each update, and this run measures "
+                f"it {'before' if self.before_update else 'after'}"
+            )
         if reason is not None:
             raise RunRefused(
                 f"cannot resume from {where}: the checkpoint {reason}, so the running mean over "
@@ -263,6 +324,19 @@ class RunningMeans:
             entry = held["metrics"][metric]
             self._sums[metric] = ExactSum(entry["partials"])
             self._not_finite[metric] = bool(entry["not_finite"])
+        if self.before_update:
+            self._held = {name: float(value) for name, value in held["held"].items()}
+
+
+def _global_model_columns(metrics: Mapping[str, float]) -> dict[str, float]:
+    """The columns a row measures at the global model: the central pass's and ``grad_norm_sq``."""
+
+    return {
+        name: value
+        for name, value in metrics.items()
+        if (name.startswith(CENTRAL_PREFIX) and not name.endswith(RUNNING_MEAN_SUFFIX))
+        or name == GRAD_NORM_COLUMN
+    }
 
 
 # What the round loops call. Each takes the run's ``RunningMeans`` or None, and
@@ -299,6 +373,27 @@ def continue_from(
 
     if means is not None and checkpoint is not None:
         means.restore(checkpoint, start_round - 1, str(resume_from))
+
+
+def measure_start(
+    means: RunningMeans | None, start_round: int, evaluator: Any, server: Any, dataset: Any
+) -> None:
+    """Before the update, a run from round 1 measures the initial model, which row 1 shows."""
+
+    if means is None or not means.before_update or start_round != 1:
+        return
+    measured: dict[str, float] = {}
+    if means.needs_central:
+        measured.update(evaluator.evaluate_central(server, dataset))
+    if means.needs_grad_norm:
+        measured.update(evaluator.evaluate_grad_norm(server, dataset))
+    means.start(measured)
+
+
+def skips_update(means: RunningMeans | None, round_id: int) -> bool:
+    """Whether round ``round_id`` samples no client: only the last, and only before the update."""
+
+    return means is not None and means.skips_update(round_id)
 
 
 def observe_round(means: RunningMeans | None, round_id: int, metrics: dict[str, float]) -> None:

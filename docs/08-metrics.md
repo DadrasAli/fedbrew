@@ -571,6 +571,11 @@ first round the metric is missing or not finite.
 The metric itself is evaluated every round; it is written only on the rounds
 `evaluation.central_test.every` or `evaluation.grad_norm.every` schedule.
 
+With `convergence.iterates: before_update` (chapter 04 §9.1.1) row `t` is the
+model before round `t`'s update: the global-model columns and the means are of
+`x_0 .. x_{t-1}`, the initial model included, and the last round applies no
+update.
+
 ### 6.3 Summarizing runs: `fedbrew analyze`
 
 ```bash
@@ -1043,6 +1048,7 @@ Every key that adds, removes or renames a column.
 | `evaluation.fit.every` | `1` | Which rounds have values in the `fit_*` task columns and FedProx's `fit_total_loss`, which come from the post-fit pass (§1); `never` removes those columns. |
 | `evaluation.grad_norm.every` | `never` | Adds `grad_norm_sq` (§6.1), with values on the rounds it schedules. |
 | `convergence.metrics` | `[]` | Adds `<column>_running_mean` for each metric named (§6.2), valued on every round. |
+| `convergence.iterates` | `after_update` | `before_update`: row `t`'s global-model columns and means are of the model before round `t`'s update (§6.2). |
 | `evaluation.{train,val,test}.clients` | `participating`, `all`, `all` | Which clients enter the aggregate — changes the numbers, not the column set. |
 | `divergence.metric` | `"fit_loss"` | Requires that metric to be present every round. `validate_config` refuses a name a non-empty `reporting.fit_metrics` would filter out (`config.py`, `_validate_divergence_metric_is_reachable`). |
 | `checkpointing.best_metric` | — | Requires that column to exist; validated against `client_metric_names` at config load. |

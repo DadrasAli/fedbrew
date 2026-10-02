@@ -45,8 +45,10 @@ from fedbrew.core.convergence import (
 from fedbrew.core.convergence import (
     RunningMeans,
     continue_from,
+    measure_start,
     observe_round,
     set_up,
+    skips_update,
     state_of,
 )
 from fedbrew.core.divergence import (
@@ -223,6 +225,7 @@ def run_fl_loop(
     # refused with the directory exactly as it was. POST-F25.
     server_payload, start_round, checkpoint = _initialize_or_resume(server, resume_from, output_dir)
     continue_from(running_means, checkpoint, start_round, resume_from)
+    measure_start(running_means, start_round, evaluator, server, dataset)
     # A run that was killed inside an artifact write can leave one temp file
     # behind. Swept here, before anything opens one for this run.
     clear_stale_temp_files(output_dir)
@@ -333,6 +336,8 @@ def run_fl_loop(
                 client_infos,
                 post_fit_evaluation=evaluates_round(fit_schedule, round_id, global_rounds),
             )
+            if skips_update(running_means, round_id):
+                requests = []
             selected_clients = [request.client_id for request in requests]
 
             # Announced before the first client trains: under participation_probability

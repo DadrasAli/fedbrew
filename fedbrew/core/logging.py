@@ -502,6 +502,14 @@ def _metrics_rows(config: FullConfig, *, verbose: bool) -> list[Row]:
     if config.convergence.metrics:
         listed = ", ".join(config.convergence.metrics)
         rows.append(Row("convergence", f"every round, the mean over the iterates of {listed}"))
+        if config.convergence.iterates == "before_update":
+            rows.append(
+                Row(
+                    "convergence.iterates",
+                    "before_update: row t is the model before round t's update; "
+                    "the last round applies none",
+                )
+            )
 
     checkpointing = config.runtime.extra.get("checkpointing")
     if isinstance(checkpointing, Mapping) and checkpointing.get("best_metric"):
