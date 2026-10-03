@@ -341,6 +341,25 @@ PENALTIES: dict[str, tuple[Callable[[Tensor, float], Tensor], Callable[..., Tens
 }
 
 
+def _stacked_nonconvex(x: Tensor, lam: float) -> Tensor:
+    squared = x * x
+    return lam * (squared / (1.0 + squared)).sum(dim=1)
+
+
+#: Each penalty and loss of a stack, ``(clients, d)`` iterates and ``(clients, rows)``
+#: values: the operations vmap runs for ``PENALTIES``' and ``LOSSES``' own, each
+#: client's sum or mean over its own dimension (``stacked_eval``).
+STACKED_PENALTIES: dict[str, Callable[[Tensor, float], Tensor]] = {
+    "l1": lambda x, lam: lam * x.abs().sum(dim=1),
+    "l2sq": lambda x, lam: 0.5 * lam * (x * x).sum(dim=1),
+    "nonconvex": _stacked_nonconvex,
+}
+STACKED_LOSSES: dict[str, Callable[[Tensor, Tensor | None], Tensor]] = {
+    "logistic": lambda signed, mask: stacked_row_mean(torch.nn.functional.softplus(signed), mask),
+    "tanh": lambda signed, mask: 1.0 + stacked_row_mean(torch.tanh(signed), mask),
+}
+
+
 #: The problems this example poses, as (loss, penalty) pairs: each has
 #: generator configs and an arm, and is held by the tests batched against
 #: sequential.
@@ -2067,11 +2086,62 @@ class FedLogisticL1Task(TaskAdapter):
         measured["exact_zeros"] = (iterate == 0.0).sum().to(DTYPE)
         return measured
 
-    def _support_f1(self, found: Tensor) -> Tensor:
-        """F1 of the support at the tolerance against the planted one; 0 if nothing hit."""
+    def stacked_eval(
+        self,
+        model: LogisticModel,
+        params: Mapping[str, Tensor],
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> dict[str, Tensor]:
+        """``functional_eval`` for a stack of clients at once (``BatchableTask``).
 
-        hits = (found & self._support_mask).sum().to(DTYPE)
-        precision = hits / found.sum().to(DTYPE)
+        ``params["x"]`` is ``(clients, d)``, the batch's rows ``(clients, rows,
+        d)`` and labels and ``mask`` ``(clients, rows)``. Each operation is the
+        one ``torch.func.vmap(functional_eval)`` runs for it: the margins one
+        ``matmul`` of the rows and each client's iterate as a column, and every
+        mean, sum and norm over a client's own dimension -- so the same
+        tensors, bit for bit.
+        """
+
+        del buffers
+        features, labels = batch
+        x = params["x"]
+        margins = torch.matmul(features, x.unsqueeze(-1)).squeeze(-1)
+        mean = STACKED_LOSSES[model.loss_form](-labels * margins, mask)
+        loss = mean + STACKED_PENALTIES[model.penalty_form](x, model.penalty_strength)
+        iterate = x.detach()
+        found = iterate.abs() > model.support_tolerance
+        if mask is None:
+            total = torch.full(
+                (len(x),), float(labels.shape[1]), dtype=torch.float64, device=labels.device
+            )
+        else:
+            total = mask.sum(dim=1).to(torch.float64)
+        measured = {"loss": loss.detach(), "total": total}
+        if self._optimum is not None:
+            measured["distance_to_optimum"] = torch.linalg.vector_norm(
+                iterate - self._optimum, dim=1
+            )
+        if self._truth is not None:
+            measured["distance_to_truth"] = torch.linalg.vector_norm(iterate - self._truth, dim=1)
+        measured["support_size"] = found.sum(dim=1).to(DTYPE)
+        if self._truth_support:
+            measured["support_f1"] = self._support_f1(found, dim=1)
+        measured["exact_zeros"] = (iterate == 0.0).sum(dim=1).to(DTYPE)
+        return measured
+
+    def _support_f1(self, found: Tensor, dim: int | None = None) -> Tensor:
+        """F1 of the support at the tolerance against the planted one; 0 if nothing hit.
+
+        Over ``dim`` of a stack, each client's; over the whole vector without one.
+        """
+
+        def counted(values: Tensor) -> Tensor:
+            return (values.sum() if dim is None else values.sum(dim=dim)).to(DTYPE)
+
+        hits = counted(found & self._support_mask)
+        precision = hits / counted(found)
         recall = hits / len(self._truth_support)
         f1 = 2.0 * precision * recall / (precision + recall)
         return torch.where(hits > 0, f1, torch.zeros_like(f1))

@@ -30,6 +30,7 @@ from __future__ import annotations
 import csv
 import dataclasses
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -642,6 +643,93 @@ class TheCentralPassIsMeasuredWhereTheRoundTrainsTest(ExecutorRuns):
                     "central_test_optimality_gap" in rows[0], problem.convex(loss, penalty)
                 )
                 self.assertTrue(all(row["central_test_loss"] for row in rows))
+
+
+class TheStackedEvalIsVmapsTest(unittest.TestCase):
+    """``stacked_eval`` is ``torch.func.vmap(functional_eval)``, bit for bit, key for key.
+
+    For every problem, with and without padding, at iterates with zero, tiny and
+    large coordinates; and its tables name every penalty and loss.
+    """
+
+    def test_every_problem(self) -> None:
+        self.assertEqual(set(problem.STACKED_PENALTIES), set(problem.PENALTIES))
+        self.assertEqual(set(problem.STACKED_LOSSES), set(problem.LOSSES))
+        generator = torch.Generator().manual_seed(11)
+        clients, rows, dim = 6, 16, 8
+        for loss, penalty in problem.PROBLEMS:
+            task = _small_task(loss, penalty)
+            model = problem.LogisticModel(dim, 0.03, loss=loss, penalty=penalty)
+            for masked, scale in ((False, 1.0), (True, 1.0), (False, 1e-4), (True, 30.0)):
+                with self.subTest(problem=f"{loss}+{penalty}", masked=masked, scale=scale):
+                    features = torch.randn(
+                        clients, rows, dim, generator=generator, dtype=torch.float64
+                    )
+                    signs = torch.randint(0, 2, (clients, rows), generator=generator)
+                    labels = signs.to(torch.float64) * 2.0 - 1.0
+                    x = torch.randn(clients, dim, generator=generator, dtype=torch.float64) * scale
+                    x[:, :2] = 0.0
+                    mask = None
+                    if masked:
+                        lengths = torch.randint(1, rows + 1, (clients,), generator=generator)
+                        mask = (torch.arange(rows) < lengths.unsqueeze(1)).to(torch.float64)
+                    params, batch = {"x": x}, (features, labels)
+
+                    def measure(
+                        params: Any, batch: Any, mask: Any, _task: Any = task, _model: Any = model
+                    ) -> Any:
+                        return _task.functional_eval(_model, params, {}, batch, mask)
+
+                    dims = (0, 0, None if mask is None else 0)
+                    with torch.no_grad():
+                        expected = torch.func.vmap(measure, in_dims=dims)(params, batch, mask)
+                        stacked = task.stacked_eval(model, params, {}, batch, mask)
+                    self.assertEqual(list(stacked), list(expected))
+                    for key, value in expected.items():
+                        self.assertTrue(torch.equal(stacked[key], value), key)
+
+
+class ThePostFitPassTakesTheStackedEvalTest(ExecutorRuns):
+    """A resident run's post-fit pass calls no vmap, and writes what the vmapped pass writes."""
+
+    def test_each_problem(self) -> None:
+        for loss, penalty in problem.PROBLEMS:
+            with self.subTest(problem=f"{loss}+{penalty}"):
+                config = small_config(loss, penalty)
+                config["schedule"]["rounds"] = 3
+                # The post-fit pass alone: a client split's, at the shared model, is vmapped.
+                config["evaluation"]["fit"] = {"every": 1}
+                config["evaluation"]["test"] = {"every": "never"}
+                refuse = mock.Mock(side_effect=AssertionError("a vmapped post-fit pass"))
+                # The closed form trains, as the task's runs do by default: no vmap there.
+                with mock.patch("torch.func.vmap", refuse):
+                    stacked = self.run_config(config, "batched", gradient_form="closed_form")
+                counted = mock.Mock(wraps=torch.func.vmap)
+                with (
+                    mock.patch.object(_run_task_class(), "stacked_eval", None),
+                    mock.patch("torch.func.vmap", counted),
+                ):
+                    vmapped = self.run_config(config, "batched", gradient_form="closed_form")
+                refuse.assert_not_called()
+                self.assertGreater(counted.call_count, 0)
+                record = json.loads((stacked / "run.json").read_text())["reproducibility"]
+                self.assertEqual(record["executor"]["rounds"], {"used": "resident"})
+                for name in CSVS:
+                    self.assertEqual(_untimed(stacked / name), _untimed(vmapped / name), name)
+                with (stacked / "round_metrics.csv").open(encoding="utf-8") as handle:
+                    self.assertTrue(all(row["fit_loss"] for row in csv.DictReader(handle)))
+
+
+def _run_task_class() -> Any:
+    """The task class a run builds: the extension as ``load_extensions`` imports it.
+
+    ``extensions._import_file`` runs the file afresh, so ``problem`` above is
+    another module; what a run must see is patched on this one.
+    """
+
+    extensions.load_extensions([str(EXTENSION)])
+    name = f"{extensions._FILE_MODULE_PREFIX}.{extensions._sha256(EXTENSION)[:16]}"
+    return sys.modules[name].FedLogisticL1Task
 
 
 def _untimed(path: Path) -> list[dict[str, str]] | None:

@@ -119,6 +119,14 @@ class BatchableTask(Protocol):
     ``split_rows``' tensors, moved to the model's device -- step the optimizer,
     and return ``functional_loss``'s outputs as floats.
 
+    And ``stacked_eval(model, params, buffers, batch, mask)``, optional
+    too: ``functional_eval`` for a whole stack at once -- ``params``, ``batch``
+    and ``mask`` each with a leading client dimension -- every output stacked
+    over the clients, the tensors ``torch.func.vmap(functional_eval)`` gives,
+    bit for bit. A stack measured with each client's own parameters (the
+    post-fit pass) takes it in place of vmap, whose cost a call -- and the
+    torch._dynamo import of its first -- it saves.
+
     Two more are optional. ``loader_order(data, config)`` declares what the
     loader yields (:class:`LoaderOrder`), so a round's orders are planned
     together rather than replayed per client. ``stacked_metrics(outputs,

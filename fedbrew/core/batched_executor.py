@@ -1026,12 +1026,16 @@ def measure_splits(
     ``position`` of every split is measured in one vmapped call, a split with
     fewer batches padded with an empty one whose outputs are never read; with
     one split nothing is vmapped, and the call is ``eval_step``'s arithmetic.
-    Returns the outputs per position, each a tensor per key over the splits.
+    Where every split has its own and the task gives ``stacked_eval``
+    (``BatchableTask``), that is the call: the vmapped outputs, without
+    vmap's cost a call. Returns the outputs per position, each a tensor per
+    key over the splits.
     """
 
     def measure(params: Any, batch: Any, mask: Any) -> Any:
         return task.functional_eval(model, params, buffers, batch, mask)
 
+    stacked = getattr(task, "stacked_eval", None) if params_dim == 0 else None
     outputs: list[dict[str, Tensor]] = []
     model.eval()
     with torch.no_grad():
@@ -1039,6 +1043,9 @@ def measure_splits(
             batch, mask = steps.batch(position)
             if not steps.rows.stacked:
                 outputs.append(measure(params, batch, mask))
+                continue
+            if callable(stacked):
+                outputs.append(stacked(model, params, buffers, batch, mask))
                 continue
             dims = (params_dim, 0, None if mask is None else 0)
             outputs.append(torch.func.vmap(measure, in_dims=dims)(params, batch, mask))
