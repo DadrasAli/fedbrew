@@ -189,21 +189,32 @@ class SequentialGradNorm:
         return {GRAD_NORM_COLUMN: float(value)}
 
     def _global_model(self, server: Any) -> nn.Module:
-        from fedbrew.core.federated_state import validate_federated_state_metadata
-
-        task = server.task
-        if server._model_state is None:
-            server.initialize()
-        if self._model is None:
-            self._model = copy.deepcopy(task.build_model(server.model_config))
-        validate_federated_state_metadata(
-            task.federated_model_state_metadata(self._model),
-            server._model_state_metadata,
-            received_scope=server._model_state_scope or "full",
-            context="server grad-norm state",
-        )
-        task.load_federated_model_state(self._model, server._model_state)
+        self._model = server_model(server, self._model)
         return self._model
+
+
+def server_model(server: Any, model: nn.Module | None) -> nn.Module:
+    """``model`` holding the server's state, checked as the server checks it; made the first time.
+
+    A copy of the task's model of its own: a task that caches its models
+    hands every caller the same instance.
+    """
+
+    from fedbrew.core.federated_state import validate_federated_state_metadata
+
+    task = server.task
+    if server._model_state is None:
+        server.initialize()
+    if model is None:
+        model = copy.deepcopy(task.build_model(server.model_config))
+    validate_federated_state_metadata(
+        task.federated_model_state_metadata(model),
+        server._model_state_metadata,
+        received_scope=server._model_state_scope or "full",
+        context="server grad-norm state",
+    )
+    task.load_federated_model_state(model, server._model_state)
+    return model
 
 
 def chunk_pieces(lengths: Sequence[int], cap: int) -> list[list[tuple[int, int, int]]]:
@@ -280,3 +291,211 @@ def flat_chunk_gradient(
             loss, _ = task.functional_loss(template, leaves, held, rows, None)
             gradient.add(loss, float(len(rows[0])))
         return grad_norm_sq(gradient, wanted, task.objective_l1(template)).detach()
+
+
+class FusedPass:
+    """F and its gradient in one pass: the central pass, its loss differentiated.
+
+    Where the central pass is measured in parts -- ``functional_eval`` over the
+    global rows in the batches its loader cuts, then the task's metrics of
+    those steps (``CentralPassInParts``, or the classification task's
+    ``compute_metrics``) -- on rows that are every client's train rows, its
+    loss is F itself: each batch's mean, pooled by rows. Taking that loss's
+    gradient as the pass runs gives ``grad_norm_sq`` with the central metrics,
+    from one forward and one backward, where the gradient's own pass would
+    run a second forward over the same rows. The central metrics are the
+    pass's own, bit for bit; the gradient is F's, summed over the central
+    batches -- weighted by their rows, as ``flat_chunk_gradient`` weighs its
+    chunks -- rather than the gradient pass's chunks.
+
+    Made by :func:`fused_pass`, which says where it cannot be.
+    """
+
+    def __init__(
+        self, task: Any, rows: tuple[Tensor, ...], batch_size: int, in_parts: bool
+    ) -> None:
+        self.task = task
+        self.in_parts = in_parts
+        size = max(1, int(batch_size))
+        self.batches = [
+            tuple(tensor[first : first + size] for tensor in rows)
+            for first in range(0, len(rows[0]), size)
+        ]
+        self._model: nn.Module | None = None
+
+    def measure(
+        self, template: nn.Module, params: Mapping[str, Tensor], buffers: Mapping[str, Tensor]
+    ) -> tuple[list[dict[str, Tensor]], dict[str, Tensor], Tensor]:
+        """The central pass's steps and terms at ``params``, and ``grad_norm_sq`` there.
+
+        As ``flat_chunk_gradient`` takes its leaves: every parameter of
+        ``template``, the gradient in the ones it trains; ``params`` may
+        carry the model state's buffers. Every value stays on the device.
+        """
+
+        parameters = dict(template.named_parameters())
+        leaves = {
+            name: value.detach().requires_grad_(parameters[name].requires_grad)
+            for name, value in params.items()
+            if name in parameters
+        }
+        held = {
+            **buffers,
+            **{name: value for name, value in params.items() if name not in parameters},
+        }
+        wanted = {name: value for name, value in leaves.items() if value.requires_grad}
+        device = next(iter(leaves.values())).device
+        outputs: list[dict[str, Tensor]] = []
+        with measuring(template, device):
+            gradient = WeightedGradient(wanted)
+            for batch in self.batches:
+                measured = self.task.functional_eval(template, leaves, held, batch, None)
+                gradient.add(measured["loss"], float(len(batch[0])))
+                outputs.append({key: value.detach() for key, value in measured.items()})
+            value = grad_norm_sq(gradient, wanted, self.task.objective_l1(template)).detach()
+        terms: dict[str, Tensor] = {}
+        if self.in_parts:
+            fixed = {name: leaf.detach() for name, leaf in leaves.items()}
+            with torch.no_grad():
+                terms = dict(self.task.central_terms(template, {**fixed, **held}))
+        return outputs, terms, value
+
+    def measure_round(self, server: Any) -> dict[str, float]:
+        """The server's model's ``central_test_*`` metrics and ``grad_norm_sq``, as floats.
+
+        The central pass ``evaluate_global`` runs -- the task's own metrics of
+        its steps, read as floats, and its terms -- in this pass, on a model of
+        this pass's own that the server's state is copied into.
+        """
+
+        from fedbrew.core.loop import _central_test_metrics
+
+        model = self._model = server_model(server, self._model)
+        state = dict(model.state_dict())
+        buffers = dict(model.named_buffers())
+        outputs, terms, value = self.measure(model, state, buffers)
+        floats = [{key: float(item) for key, item in output.items()} for output in outputs]
+        if self.in_parts:
+            metrics = self.task.central_metrics(
+                floats, {name: float(item) for name, item in terms.items()}
+            )
+        else:
+            metrics = self.task.compute_metrics(floats)
+        central = _central_test_metrics({f"global_{name}": item for name, item in metrics.items()})
+        return {**central, GRAD_NORM_COLUMN: float(value)}
+
+
+def fused_pass(
+    evaluation: Any, server: Any, dataset: Any
+) -> tuple[FusedPass | None, dict[str, Any]]:
+    """The run's fused pass and the record of it, or None and why each round takes two.
+
+    The record is None where the run measures no ``grad_norm_sq``. A pass is
+    made where the config asks for it (``evaluation.grad_norm.fused``), the
+    central pass is measured too, the server's ``evaluate_global`` is the
+    task's ``evaluate_model`` of the global rows (``central_pass_is_the_tasks``),
+    and that is a pass in parts (``CentralPassInParts``, whose loader neither
+    shuffles nor draws nor drops a batch, or the classification task's), the
+    global rows are every client's train rows (the same rows, in any order),
+    and the task's ``functional_eval`` gives its loss with its graph.
+    """
+
+    from fedbrew.core.config import parse_evaluation_schedule
+
+    if parse_evaluation_schedule(evaluation.grad_norm.every, "evaluation.grad_norm") is None:
+        return None, {}
+    asked = "fused" if evaluation.grad_norm.fused else "separate"
+    reason = _unfused(evaluation, server, dataset) if asked == "fused" else "asked for"
+    if isinstance(reason, FusedPass):
+        return reason, {"pass": "fused", "asked": asked}
+    return None, {"pass": "separate", "asked": asked, "reason": reason}
+
+
+def _unfused(evaluation: Any, server: Any, dataset: Any) -> FusedPass | str:
+    """The fused pass, or why there is none."""
+
+    from fedbrew.core.config import parse_evaluation_schedule
+    from fedbrew.servers.fedavg import central_pass_is_the_tasks
+    from fedbrew.tasks.base import BatchableTask, CentralPassInParts
+    from fedbrew.tasks.classification.torch_classification import TorchClassificationTask
+
+    if parse_evaluation_schedule(evaluation.central_test.every, "evaluation.central_test") is None:
+        return "the central pass is not measured"
+    task = getattr(server, "task", None)
+    if not isinstance(task, BatchableTask):
+        return "the task measures no batch of its own (BatchableTask)"
+    if not central_pass_is_the_tasks(server):
+        return "the server's central pass is its own"
+    classification = type(task).evaluate_model is TorchClassificationTask.evaluate_model
+    in_parts = isinstance(task, CentralPassInParts)
+    if not (classification or in_parts):
+        return "the task's central pass is not measured in parts (CentralPassInParts)"
+    try:
+        data = dataset.get_global_data()
+    except (FileNotFoundError, KeyError):
+        data = None
+    if data is None:
+        return "the dataset has no global rows"
+    rows = tuple(task.split_rows(data))
+    batch_size = _central_batch_size(task, data, classification)
+    if isinstance(batch_size, str):
+        return batch_size
+    train = [
+        task.split_rows(_train_split(dataset.get_client_data(client)))
+        for client in dataset.list_clients()
+    ]
+    if not _same_rows(rows, train):
+        return "the central pass's rows are not every client's train rows"
+    fused = FusedPass(task, rows, batch_size, in_parts)
+    if not _loss_keeps_its_graph(fused, server):
+        return "the task's functional_eval gives its loss without its graph"
+    return fused
+
+
+def _central_batch_size(task: Any, data: Any, classification: bool) -> int | str:
+    """The rows each batch of the central pass holds, or why its loader cannot be cut so."""
+
+    if classification:
+        return int(task.eval_batch_size)
+    order = task.loader_order(data, task.central_loader_config())
+    if order.shuffle or order.replacement or order.drop_last:
+        return "the central pass's loader shuffles, draws or drops a batch"
+    return int(order.batch_size)
+
+
+def _same_rows(rows: tuple[Tensor, ...], parts: Sequence[tuple[Tensor, ...]]) -> bool:
+    """Whether ``rows`` are the rows of ``parts`` together: the same rows, in any order."""
+
+    if not parts or any(len(part) != len(rows) for part in parts):
+        return False
+    pooled = tuple(torch.cat([part[index] for part in parts]) for index in range(len(rows)))
+    if any(a.shape != b.shape or a.device != b.device for a, b in zip(pooled, rows, strict=True)):
+        return False
+    if all(torch.equal(a, b) for a, b in zip(pooled, rows, strict=True)):
+        return True
+
+    def keyed(tensors: tuple[Tensor, ...]) -> Tensor:
+        return torch.cat([t.reshape(len(t), -1).to(torch.float64) for t in tensors], dim=1)
+
+    ours, theirs = (
+        torch.unique(keyed(tensors), dim=0, return_counts=True) for tensors in (rows, pooled)
+    )
+    return all(torch.equal(a, b) for a, b in zip(ours, theirs, strict=True))
+
+
+def _loss_keeps_its_graph(fused: FusedPass, server: Any) -> bool:
+    """Whether the task's ``functional_eval`` loss carries the graph a gradient is taken through."""
+
+    task = fused.task
+    model = task.build_model(server.model_config)
+    parameters = dict(model.named_parameters())
+    leaves = {
+        name: value.detach().clone().requires_grad_(value.requires_grad)
+        for name, value in parameters.items()
+    }
+    if not any(leaf.requires_grad for leaf in leaves.values()):
+        return False
+    batch = tuple(tensor[:1] for tensor in fused.batches[0])
+    with measuring(model, next(iter(leaves.values())).device):
+        loss = task.functional_eval(model, leaves, dict(model.named_buffers()), batch, None)["loss"]
+    return bool(loss.requires_grad)

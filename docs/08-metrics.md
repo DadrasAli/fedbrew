@@ -555,6 +555,22 @@ with its round's others. The three agree to the executor tolerance. The pass
 restores every random generator and the model's mode, so the other columns and
 the checkpoints are those of a run with it off.
 
+**With the central pass, in one** (`evaluation.grad_norm.fused`, on by
+default; FINDINGS.md `POST-F37`). On a round that measures both, where the
+central pass is F -- measured in parts (`CentralPassInParts`, or the
+classification task's) on rows that are every client's train rows, its loss
+differentiable through `functional_eval` -- the gradient is taken through that
+pass (`FusedPass`): one forward and one backward give the `central_test_*`
+columns and `grad_norm_sq` together, in every path (sequential, batched per
+round, resident). The central columns are the pass's own, bit for bit;
+`grad_norm_sq` is F's gradient summed over the central pass's batches, each
+weighted by its rows, rather than the gradient pass's chunks -- the same
+within `1e-12` relative, and bit for bit where those are the same rows in the
+same order (fed-logistic-l1 and heterogeneous-quadratic's shipped configs). A
+round that measures only one runs it alone, and `fused: false` keeps the two
+passes. run.json's `reproducibility.grad_norm` records which pass the run took
+-- `{"pass": "fused", "asked": "fused"}`, or `"separate"` with the reason.
+
 ### 6.2 The running mean over the run's iterates
 
 `convergence.metrics` (chapter 04 §9.1; off by default) adds
@@ -1072,6 +1088,7 @@ Every key that adds, removes or renames a column.
 | `evaluation.central_test.every` | `10` | Same, for every `central_test_*` column. |
 | `evaluation.fit.every` | `1` | Which rounds have values in the `fit_*` task columns and FedProx's `fit_total_loss`, which come from the post-fit pass (§1); `never` removes those columns. |
 | `evaluation.grad_norm.every` | `never` | Adds `grad_norm_sq` (§6.1), with values on the rounds it schedules. |
+| `evaluation.grad_norm.fused` | `true` | On a round with the central pass, measures `grad_norm_sq` through it where it is F (§6.1); `false` keeps its own pass. Changes `grad_norm_sq`'s last bits at most. |
 | `convergence.metrics` | `[]` | Adds `<column>_running_mean` for each metric named (§6.2), valued on every round. |
 | `convergence.iterates` | `after_update` | `before_update`: row `t`'s global-model columns and means are of the model before round `t`'s update (§6.2). |
 | `evaluation.{train,val,test}.clients` | `participating`, `all`, `all` | Which clients enter the aggregate — changes the numbers, not the column set. |
@@ -1182,7 +1199,7 @@ head -1 <output_dir>/round_metrics.csv | tr ',' '\n'
 | `tests/test_client_history_summary.py` | The running totals `client_update_metrics.csv` column names come from. |
 | `tests/test_convergence_running_mean.py` | §6.2: the exact sum is `math.fsum` after every addition; the column is the mean of the metric's values on rounds 1 to t bit for bit; the section changes nothing but the columns it adds; resident, per-round and sequential agree; a resume continues the means and a checkpoint without them refuses it; the names resolve and a bad one is refused. |
 | `tests/test_analyze.py` | §6.3: `fedbrew analyze`'s per-run and across-seed statistics against hand-worked values on hand-made CSVs, the grouping by config without the seed, blank cells as not evaluated, the reconstruction and its warning, the written tables and the command's exits. |
-| `tests/test_grad_norm.py` | §6.1: `grad_norm_sq` is autograd's gradient of the pooled objective at random points on every linear example (fed-lasso's l1 case against its analytic subgradient), the three paths agree, a run with it on writes every other column and checkpoint as one with it off, off runs no pass, and the planned columns are the written ones for every task. |
+| `tests/test_grad_norm.py` | §6.1: `grad_norm_sq` is autograd's gradient of the pooled objective at random points on every linear example (fed-lasso's l1 case against its analytic subgradient), the three paths agree, a run with it on writes every other column and checkpoint as one with it off, off runs no pass, and the planned columns are the written ones for every task; `fused` is on by default and a bool, and `fused_pass` makes the pass exactly where the central pass is F and names why not elsewhere. `tests/test_fed_logistic_l1.py` and `tests/test_heterogeneous_quadratic.py` hold a fused run's central columns to the two passes' bit for bit and its `grad_norm_sq` within `1e-12`, in every path. |
 | `tests/test_metric_filter_scope.py` | §4.3, §7.2 and §7.3: both servers add diagnostics before the one filter, so the list keeps or drops them, the loop never filters, and §4.3 states the choice as one. Fails if a third server starts emitting diagnostics. |
 
 ### Known failure modes

@@ -658,7 +658,10 @@ computes, bit for bit on the same device:
   task's, or is a `CentralPassInParts` task's (`fedbrew/tasks/base.py`) -- its
   steps, and its terms of the model alone measured beside them, as
   fed-logistic-l1's pooled objective is; heterogeneous-quadratic's has steps
-  alone. Both are staged with the round's other values and read back
+  alone. On a round that measures `grad_norm_sq` too, where that pass is F --
+  its rows every client's train rows -- the gradient is taken through it, one
+  pass for both (`FusedPass`, `evaluation.grad_norm.fused`, chapter 08 §6.1).
+  Both are staged with the round's other values and read back
   in its one copy; the flush builds each client's `EvalResult` with its
   rule's `batched_evaluation_result`, and the central metrics with the task's
   `compute_metrics` -- or its `central_metrics` of the steps and the terms --

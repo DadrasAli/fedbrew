@@ -815,6 +815,8 @@ def save_run_json(
         "executor",
         # A setting of a group run in one process: which group, and where in it.
         "group",
+        # Whether F and its gradient were measured in one pass, and why not.
+        "grad_norm",
     ):
         value = metadata.get(key)
         if isinstance(value, Mapping) and value:

@@ -2082,14 +2082,19 @@ class FedLogisticL1Task(TaskAdapter):
         batch: tuple[Tensor, ...],
         mask: Tensor | None = None,
     ) -> dict[str, Tensor]:
-        """The batch's objective, and the properties of the iterate, as tensors."""
+        """The batch's objective, and the properties of the iterate, as tensors.
+
+        The objective as ``functional_loss`` gives it -- with its graph under
+        autograd, so a pass can take F's gradient through it (``FusedPass``);
+        every caller that only reads it measures under ``torch.no_grad``.
+        """
 
         loss, _ = self.functional_loss(model, params, buffers, batch, mask)
         iterate = (model.x if params is None else params["x"]).detach()
         found = iterate.abs() > model.support_tolerance
         # Carried per batch because compute_metrics is handed the outputs and
         # nothing else, and all but the loss are functions of the iterate.
-        measured = {"loss": loss.detach(), "total": row_count(batch[1], mask)}
+        measured = {"loss": loss, "total": row_count(batch[1], mask)}
         if self._optimum is not None:
             measured["distance_to_optimum"] = torch.linalg.vector_norm(iterate - self._optimum)
         if self._truth is not None:

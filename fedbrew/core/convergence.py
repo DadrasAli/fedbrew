@@ -376,17 +376,28 @@ def continue_from(
 
 
 def measure_start(
-    means: RunningMeans | None, start_round: int, evaluator: Any, server: Any, dataset: Any
+    means: RunningMeans | None,
+    start_round: int,
+    evaluator: Any,
+    server: Any,
+    dataset: Any,
+    fused_pass: Any = None,
 ) -> None:
-    """Before the update, a run from round 1 measures the initial model, which row 1 shows."""
+    """Before the update, a run from round 1 measures the initial model, which row 1 shows.
+
+    Both passes in one where the run's rounds take them so (``FusedPass``).
+    """
 
     if means is None or not means.before_update or start_round != 1:
         return
     measured: dict[str, float] = {}
-    if means.needs_central:
-        measured.update(evaluator.evaluate_central(server, dataset))
-    if means.needs_grad_norm:
-        measured.update(evaluator.evaluate_grad_norm(server, dataset))
+    if means.needs_central and means.needs_grad_norm and fused_pass is not None:
+        measured.update(fused_pass.measure_round(server))
+    else:
+        if means.needs_central:
+            measured.update(evaluator.evaluate_central(server, dataset))
+        if means.needs_grad_norm:
+            measured.update(evaluator.evaluate_grad_norm(server, dataset))
     means.start(measured)
 
 

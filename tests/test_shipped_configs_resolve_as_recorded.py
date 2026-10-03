@@ -32,20 +32,28 @@ Two differences are allowed, both declared here rather than taken on trust:
   shipped config's columns -- which the planned column list, compared as
   recorded, confirms. ``client.metrics`` is ``MERGED`` into it and not
   compared on its own;
-- a key added since, under ``ADDED``, at the value that leaves a run as it
-  was: ``evaluation.grad_norm``, ``convergence`` and ``tuning`` are off unless a
-  config asks for them.
+- a key added since, under ``ADDED``, at the value a config that leaves it out
+  resolves to: ``evaluation.grad_norm``, ``convergence`` and ``tuning`` are off
+  unless a config asks for them, which leaves a run as it was;
+  ``evaluation.grad_norm.fused`` is on, which changes what a run that measures
+  both F and its gradient computes, and is declared below with the other
+  changed defaults.
 
 The ``schedule`` block, which ``defaults`` was renamed to, is read at load and
 never stored, so its rename moved nothing in the resolved config.
 
-Two defaults changed on purpose, and change what a config that leaves the key
+Three defaults changed on purpose, and change what a config that leaves the key
 out runs, not how it resolves: ``DEFAULTS_CHANGED``. A key left out stays out
 of the resolved config -- a run records what it used, and whether that was the
-default, in run.json -- so the comparison above cannot see them; they are
-declared here instead, with the default each config that leaves the key out
-asked for when the record was made and asks for now, and the test holds the
-code's defaults and which shipped configs they reach to the declaration.
+default, in run.json -- or resolves to its default (``ADDED``), so the
+comparison above cannot see them; they are declared here instead, with the
+default each config that leaves the key out asked for when the record was made
+and asks for now, and the test holds the code's defaults and which shipped
+configs they reach to the declaration. The executor and the gradient form are
+two (FINDINGS.md, POST-F34 and POST-F35); the third is
+``evaluation.grad_norm.fused``: F and its gradient in one pass wherever the
+central pass is F (FINDINGS.md, POST-F37), which the 18 shipped configs that
+measure both take and the record, made before the key, cannot hold.
 
 examples/fed-logistic-l1's 34 arms were recorded as they resolved before they
 moved to this schema, in the record's own, with
@@ -110,6 +118,8 @@ MOVED_FROM_ABSENT: dict[str, Any] = {
 #: computes or writes.
 ADDED: dict[str, Any] = {
     "evaluation.grad_norm.every": "never",
+    # Changes results where both F and its gradient are measured: DEFAULTS_CHANGED.
+    "evaluation.grad_norm.fused": True,
     "evaluation.grad_norm.extra": {},
     "convergence.metrics": [],
     "convergence.iterates": "after_update",
@@ -139,22 +149,29 @@ INFERRED_AND_CHANGED = frozenset({"experiment.name"})
 
 #: Defaults changed since the record: a key a config may leave out -> what a
 #: config that leaves it out asked for then, and asks for now. Each changes
-#: results in the last digits, within the batched executor's tolerance
-#: (FINDINGS.md, POST-F34 and POST-F35).
+#: results in the last digits: the first two within the batched executor's
+#: tolerance (FINDINGS.md, POST-F34 and POST-F35), the third grad_norm_sq within
+#: 1e-12 relative and nothing else (POST-F37).
 DEFAULTS_CHANGED: dict[str, tuple[str, str]] = {
     "runtime.extra.performance.executor": ("sequential", "batched"),
     "runtime.extra.performance.gradient_form": (
         "autograd",
         "closed_form wherever the task gives closed_form_gradient, autograd otherwise",
     ),
+    "evaluation.grad_norm.fused": (
+        "false: grad_norm_sq in its own pass over every client's train rows",
+        "true: with the central pass wherever that pass is F (FusedPass), its own elsewhere",
+    ),
 }
 
 #: How many shipped configs leave each changed default's key out, and so run
 #: the new default: every config but the eight heterogeneous-quadratic arms,
-#: which state executor: batched, and every config for the gradient form.
+#: which state executor: batched, and every config for the gradient form and
+#: for the fused pass.
 LEFT_OUT: dict[str, int] = {
     "runtime.extra.performance.executor": 133,
     "runtime.extra.performance.gradient_form": 141,
+    "evaluation.grad_norm.fused": 141,
 }
 
 
@@ -204,12 +221,19 @@ class EveryShippedConfigResolvesAsRecordedTest(unittest.TestCase):
 
     @pytest.mark.fast
     def test_the_changed_defaults_are_the_declared_ones(self) -> None:
-        from fedbrew.core.config import DEFAULT_EXECUTOR, asked_executor
+        from fedbrew.core.config import (
+            DEFAULT_EXECUTOR,
+            GradNormEvaluationConfig,
+            asked_executor,
+        )
 
         self.assertEqual(
             DEFAULT_EXECUTOR, DEFAULTS_CHANGED["runtime.extra.performance.executor"][1]
         )
         self.assertEqual(asked_executor({}), DEFAULT_EXECUTOR)
+        self.assertIs(GradNormEvaluationConfig().fused, True)
+        self.assertEqual(ADDED["evaluation.grad_norm.fused"], True)
+        self.assertTrue(DEFAULTS_CHANGED["evaluation.grad_norm.fused"][1].startswith("true"))
         for key, count in LEFT_OUT.items():
             with self.subTest(key=key):
                 left_out = [

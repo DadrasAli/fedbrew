@@ -170,7 +170,15 @@ class BatchableTask(Protocol):
         batch: tuple[Tensor, ...],
         mask: Tensor | None = None,
     ) -> dict[str, Tensor]:
-        """What ``eval_step`` returns for the batch, key for key, as tensors."""
+        """What ``eval_step`` returns for the batch, key for key, as tensors.
+
+        A ``loss`` given with its graph under autograd -- as ``functional_loss``
+        gives it, every caller that only reads it measuring under
+        ``torch.no_grad`` -- lets a central pass in parts on every client's
+        train rows take F's gradient through it (``FusedPass``,
+        ``evaluation.grad_norm.fused``); a detached one leaves the gradient
+        its own pass.
+        """
 
 
 @runtime_checkable

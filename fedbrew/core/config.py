@@ -266,6 +266,15 @@ class GradNormEvaluationConfig:
     #: the pass reads every client's data, and no run asked for it before it
     #: existed.
     every: int | str = "never"
+    #: On a round that measures both, F and its gradient in one pass: the
+    #: central pass, its loss differentiated (``FusedPass``), where that pass
+    #: is measured in parts on every client's train rows -- F itself; anywhere
+    #: else, and with false, the gradient's own pass over the train rows. The
+    #: central metrics are the same either way, bit for bit; grad_norm_sq is the
+    #: same gradient summed over the rows in the central pass's batches rather
+    #: than its own chunks, so its last bits may differ (FINDINGS.md, POST-F37).
+    #: run.json's ``reproducibility.grad_norm`` records which pass a run took.
+    fused: bool = True
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -1848,8 +1857,11 @@ def _build_evaluation_config(values: object) -> EvaluationConfig:
     if not isinstance(grad_values, Mapping):
         raise RunRefused("evaluation.grad_norm must be a mapping")
     grad_known, grad_extra = _split_extra(grad_values, GradNormEvaluationConfig)
+    fused = grad_known.get("fused", defaults.grad_norm.fused)
+    if not isinstance(fused, bool):
+        raise RunRefused(f"evaluation.grad_norm.fused must be true or false, got {fused!r}")
     grad_norm = GradNormEvaluationConfig(
-        every=grad_known.get("every", defaults.grad_norm.every), extra=grad_extra
+        every=grad_known.get("every", defaults.grad_norm.every), fused=fused, extra=grad_extra
     )
     extra = {
         key: value

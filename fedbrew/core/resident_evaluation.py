@@ -368,6 +368,22 @@ class ResidentEvaluation:
         staged, layout = staged_values(parts, [])
         return CentralStage(layout, staged)
 
+    def enqueue_fused(self, fused: Any, params: dict[str, Tensor]) -> tuple[CentralStage, Tensor]:
+        """The central pass and ``grad_norm_sq`` at ``params`` in one pass (``FusedPass``).
+
+        Staged as ``enqueue_central`` and ``enqueue_grad_norm`` stage theirs, so
+        the flush reads them as it reads those.
+        """
+
+        # In eval mode afterwards, as the central pass leaves the template.
+        self.template.eval()
+        outputs, terms, value = fused.measure(self.template, params, self.buffers)
+        parts = [(outputs, [len(outputs)])]
+        if fused.in_parts:
+            parts.append(([terms], [1]))
+        staged, layout = staged_values(parts, [])
+        return CentralStage(layout, staged), value
+
     # -- the gradient of the global objective ----------------------------------
 
     def enqueue_grad_norm(self, params: dict[str, Tensor]) -> Tensor:

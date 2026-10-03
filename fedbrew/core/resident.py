@@ -708,13 +708,25 @@ class ResidentRounds:
         device_round.central_due = evaluates_round(
             context.central_schedule, round_id, context.global_rounds
         )
-        if device_round.central_due:
-            device_round.central_stage = self.evaluation.enqueue_central(self.model)
-        if context.grad_norm_schedule is not None and evaluates_round(
+        device_round.grad_norm_due = context.grad_norm_schedule is not None and evaluates_round(
             context.grad_norm_schedule, round_id, context.global_rounds
+        )
+        fused = context.fused_pass
+        if (
+            device_round.central_due
+            and device_round.grad_norm_due
+            and fused is not None
+            and self.evaluation.central is not None
         ):
-            device_round.grad_norm_due = True
-            device_round.grad_norm_stage = self.evaluation.enqueue_grad_norm(self.model)
+            # F and its gradient in one pass, staged as the two passes stage theirs.
+            device_round.central_stage, device_round.grad_norm_stage = (
+                self.evaluation.enqueue_fused(fused, self.model)
+            )
+        else:
+            if device_round.central_due:
+                device_round.central_stage = self.evaluation.enqueue_central(self.model)
+            if device_round.grad_norm_due:
+                device_round.grad_norm_stage = self.evaluation.enqueue_grad_norm(self.model)
         device_round.clock.mark("evaluated")
 
     def _refuse_empty(self, planned: PlannedRound) -> None:

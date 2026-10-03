@@ -348,5 +348,49 @@ class TheCentralPassIsMeasuredWhereTheRoundTrainsTest(_Runs):
         self.assertIsInstance(task, CentralPassInParts)
 
 
+class FAndItsGradientInOnePassTest(_Runs):
+    """``evaluation.grad_norm.fused``: the central pass, every 10 rounds, takes F's gradient too.
+
+    FedAvg and SCAFFOLD, resident and sequential: every central column is the
+    two passes' bit for bit, and grad_norm_sq theirs within 1e-12 relative.
+    """
+
+    def test_fedavg_and_scaffold(self) -> None:
+        import json
+
+        manifest = self.data(20.0)
+        for arm in ("fedavg_k10", "scaffold_k10"):
+            for executor in ("batched", "sequential"):
+                with self.subTest(arm=arm, executor=executor):
+                    rows = {}
+                    for fused in (True, False):
+                        before = set(self.root.iterdir())
+                        rows[fused] = self.run_arm(
+                            arm,
+                            manifest,
+                            executor,
+                            schedule__rounds=21,
+                            evaluation__grad_norm={"every": 10, "fused": fused},
+                        )
+                        (output,) = (
+                            path for path in set(self.root.iterdir()) - before if path.is_dir()
+                        )
+                        record = json.loads((output / "run.json").read_text())["reproducibility"]
+                        taken = record["grad_norm"]["pass"]
+                        self.assertEqual(taken, "fused" if fused else "separate")
+                    measured = 0
+                    for row_fused, row_separate in zip(rows[True], rows[False], strict=True):
+                        for key, value in row_separate.items():
+                            if key.endswith("_sec"):
+                                continue
+                            if not key.startswith("grad_norm_sq") or not value:
+                                self.assertEqual(row_fused[key], value, key)
+                                continue
+                            measured += 1
+                            a, b = float(row_fused[key]), float(value)
+                            self.assertLessEqual(abs(a - b), 1e-12 * max(abs(a), abs(b)), key)
+                    self.assertGreater(measured, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

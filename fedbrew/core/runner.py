@@ -46,6 +46,7 @@ from fedbrew.core.divergence import (
     DivergenceVerdict,
 )
 from fedbrew.core.factory import ExperimentComponents, build_components
+from fedbrew.core.grad_norm import fused_pass
 from fedbrew.core.logging import (
     RoundProgress,
     client_progress_reporter,
@@ -148,6 +149,10 @@ def run(
     else:
         executor, run_metadata["executor"] = setting.select_executor(components)
         run_metadata["group"] = setting.record
+    # Whether F and its gradient are measured in one pass, decided before round 1.
+    fused, run_metadata["grad_norm"] = fused_pass(
+        config.evaluation, components.server, components.dataset
+    )
     print_plan_header(
         config,
         deterministic=deterministic,
@@ -166,7 +171,7 @@ def run(
     run_started = time.perf_counter()
     try:
         state = _run_loop(
-            config, components, executor, output_dir, run_metadata, progress, run_started
+            config, components, executor, output_dir, run_metadata, progress, run_started, fused
         )
     finally:
         close = getattr(executor, "close", None)
@@ -236,6 +241,7 @@ def _run_loop(
     run_metadata: dict[str, Any],
     progress: RoundProgress,
     run_started: float,
+    fused: Any = None,
 ) -> ExperimentState:
     """The round loop, with this run's components, executor and reporters."""
 
@@ -263,6 +269,7 @@ def _run_loop(
         on_termination=_termination_reporter(config),
         executor=executor,
         evaluator=evaluator_for(executor),
+        fused_pass=fused,
     )
 
 

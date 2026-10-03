@@ -27,6 +27,7 @@ import copy
 import csv
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -379,6 +380,18 @@ class TheKeyTest(unittest.TestCase):
     def test_it_is_off_by_default(self) -> None:
         self.assertEqual(load_config(SMOKE).evaluation.grad_norm.every, "never")
 
+    def test_one_pass_is_the_default_and_a_bool(self) -> None:
+        self.assertIs(load_config(SMOKE).evaluation.grad_norm.fused, True)
+
+        def stated(value: Any) -> Any:
+            return lambda raw: raw.setdefault("evaluation", {}).update(
+                grad_norm={"every": 1, "fused": value}
+            )
+
+        self.assertIs(self._load(stated(False)).evaluation.grad_norm.fused, False)
+        with self.assertRaisesRegex(RunRefused, "evaluation.grad_norm.fused must be true or false"):
+            self._load(stated("yes"))
+
     def test_a_task_that_declares_no_gradient_refuses_it(self) -> None:
         from fedbrew.core.registry import tasks
 
@@ -414,6 +427,126 @@ class TheKeyTest(unittest.TestCase):
                 self.assertIn("GRAD_NORM_GLOSS = (", text)
                 self.assertIn("grad_norm=", text)
                 self.assertIn("def objective_loss(", text)
+
+
+class WhereOnePassCannotBeTest(unittest.TestCase):
+    """``fused_pass``: the pass where F is the central pass's, and otherwise why there is none.
+
+    Where the central pass is measured in parts on every client's train rows
+    and its loss keeps its graph (fed-logistic-l1), one pass; each condition
+    taken away, the reason it names; with no gradient measured, no record.
+    """
+
+    def setUp(self) -> None:
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.root = Path(self._directory.name)
+
+    def _plan(self, config: dict[str, Any]) -> tuple[Any, dict[str, Any], Any]:
+        from fedbrew.core.grad_norm import fused_pass
+
+        path = self.root / f"config{len(list(self.root.iterdir()))}.yaml"
+        config["experiment"]["output_dir"] = str(self.root / "out")
+        path.write_text(yaml.safe_dump(config), encoding="utf-8")
+        loaded = load_config(path)
+        components = build_components(loaded)
+        fused, record = fused_pass(loaded.evaluation, components.server, components.dataset)
+        return fused, record, components
+
+    @staticmethod
+    def _logistic(**evaluation: Any) -> dict[str, Any]:
+        from tests.test_fed_logistic_l1 import small_config
+
+        config = small_config("logistic", "nonconvex")
+        config["evaluation"]["central_test"] = {"every": 1}
+        config["evaluation"]["grad_norm"] = {"every": 1}
+        config["evaluation"].update(evaluation)
+        return config
+
+    def test_where_it_is_and_is_not(self) -> None:
+        from fedbrew.core.grad_norm import FusedPass
+
+        fused, record, components = self._plan(self._logistic())
+        self.assertIsInstance(fused, FusedPass)
+        self.assertEqual(record, {"pass": "fused", "asked": "fused"})
+        self.assertEqual(self._plan(self._logistic(grad_norm={"every": "never"}))[:2], (None, {}))
+        for label, config, reason in (
+            ("asked for", self._logistic(grad_norm={"every": 1, "fused": False}), "asked for"),
+            (
+                "no central pass",
+                self._logistic(central_test={"every": "never"}),
+                "the central pass is not measured",
+            ),
+            (
+                "fed-lasso",
+                {**example_config("fed-lasso"), "evaluation": {"grad_norm": {"every": 1}}},
+                "not measured in parts",
+            ),
+        ):
+            with self.subTest(case=label):
+                if label == "fed-lasso":
+                    config["evaluation"]["central_test"] = {"every": 1}
+                fused, record, _ = self._plan(config)
+                self.assertIsNone(fused)
+                self.assertEqual(record["pass"], "separate")
+                self.assertIn(reason, record["reason"])
+        self._each_condition_taken_away(components)
+
+    def _each_condition_taken_away(self, components: Any) -> None:
+        from fedbrew.core.grad_norm import fused_pass
+
+        evaluation = load_config(next(self.root.glob("config0.yaml"))).evaluation
+        server, dataset = components.server, components.dataset
+
+        class Own(type(server)):  # type: ignore[misc]
+            def evaluate_global(self, global_data: Any, model: Any = None) -> dict[str, float]:
+                return {}
+
+        own = copy.copy(server)
+        own.__class__ = Own
+        fewer = copy.copy(dataset)
+        rows = dataset.get_global_data()
+        fewer.get_global_data = lambda: {key: value[:-1] for key, value in rows.items()}
+        task_class = type(server.task)
+        detached = mock.patch.object(
+            task_class, "functional_eval", _detached(task_class.functional_eval)
+        )
+        for label, arguments, patch, reason in (
+            ("a server's own pass", (own, dataset), nullcontext(), "central pass is its own"),
+            ("other rows", (server, fewer), nullcontext(), "not every client's train rows"),
+            ("a detached loss", (server, dataset), detached, "without its graph"),
+        ):
+            with self.subTest(case=label), patch:
+                fused, record = fused_pass(evaluation, *arguments)
+                self.assertIsNone(fused)
+                self.assertEqual(record["pass"], "separate")
+                self.assertIn(reason, record["reason"])
+
+    def test_other_rows_are_not_f(self) -> None:
+        from fedbrew.core.grad_norm import _same_rows
+
+        generator = torch.Generator().manual_seed(3)
+        parts = [
+            (torch.randn(n, 4, generator=generator), torch.randn(n, generator=generator))
+            for n in (3, 5, 2)
+        ]
+        pooled = tuple(torch.cat([part[k] for part in parts]) for k in range(2))
+        order = torch.randperm(10, generator=generator)
+        self.assertTrue(_same_rows(pooled, parts))
+        self.assertTrue(_same_rows(tuple(t[order] for t in pooled), parts))
+        self.assertFalse(_same_rows(tuple(t[:-1] for t in pooled), parts))
+        changed = (pooled[0].clone(), pooled[1])
+        changed[0][4, 2] += 1.0
+        self.assertFalse(_same_rows(changed, parts))
+        self.assertFalse(_same_rows(pooled[:1], parts))
+
+
+def _detached(functional_eval: Any) -> Any:
+    def detached(self: Any, *args: Any, **kwargs: Any) -> Any:
+        measured = functional_eval(self, *args, **kwargs)
+        return {key: value.detach() for key, value in measured.items()}
+
+    return detached
 
 
 def _rows(output: Path) -> list[dict[str, str]]:

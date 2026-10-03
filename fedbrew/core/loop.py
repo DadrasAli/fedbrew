@@ -188,6 +188,9 @@ def run_fl_loop(
     # (fedbrew/core/convergence.py). None, which every config without the
     # section is, changes nothing about the loop.
     convergence: ConvergenceConfig | None = None,
+    # F and its gradient in one pass on a round that measures both
+    # (fedbrew/core/grad_norm.py, FusedPass); None measures them apart.
+    fused_pass: Any = None,
 ) -> ExperimentState:
     """Run a minimal task-agnostic federated loop."""
 
@@ -225,7 +228,7 @@ def run_fl_loop(
     # refused with the directory exactly as it was. POST-F25.
     server_payload, start_round, checkpoint = _initialize_or_resume(server, resume_from, output_dir)
     continue_from(running_means, checkpoint, start_round, resume_from)
-    measure_start(running_means, start_round, evaluator, server, dataset)
+    measure_start(running_means, start_round, evaluator, server, dataset, fused_pass)
     # A run that was killed inside an artifact write can leave one temp file
     # behind. Swept here, before anything opens one for this run.
     clear_stale_temp_files(output_dir)
@@ -315,6 +318,7 @@ def run_fl_loop(
         on_round_flush=on_round_flush,
         on_client_progress=on_client_progress,
         on_termination=on_termination,
+        fused_pass=fused_pass,
     )
     resident = resident_rounds_for(context)
     if resident is not None:
@@ -436,12 +440,17 @@ def run_fl_loop(
                         _aggregate_client_split_metrics(subset, metric_split, statistics)
                     )
             global_eval_started = time.perf_counter()
-            if evaluates_round(central_schedule, round_id, global_rounds):
-                round_info.metrics.update(evaluator.evaluate_central(server, dataset))
-            if grad_norm_schedule is not None and evaluates_round(
-                grad_norm_schedule, round_id, global_rounds
-            ):
-                round_info.metrics.update(evaluator.evaluate_grad_norm(server, dataset))
+            round_info.metrics.update(
+                _global_evaluation(
+                    evaluator,
+                    fused_pass,
+                    server,
+                    dataset,
+                    evaluates_round(central_schedule, round_id, global_rounds),
+                    grad_norm_schedule is not None
+                    and evaluates_round(grad_norm_schedule, round_id, global_rounds),
+                )
+            )
             global_eval_seconds = time.perf_counter() - global_eval_started
 
             num_examples = fit_totals.num_examples
@@ -577,6 +586,26 @@ def run_fl_loop(
         long_lived.release()
 
 
+def _global_evaluation(
+    evaluator: Evaluator,
+    fused_pass: Any,
+    server: ServerStrategy,
+    dataset: FederatedDataset,
+    central_due: bool,
+    grad_norm_due: bool,
+) -> dict[str, float]:
+    """The round's central metrics and ``grad_norm_sq`` as due: one pass where the run has one."""
+
+    if central_due and grad_norm_due and fused_pass is not None:
+        return fused_pass.measure_round(server)
+    measured: dict[str, float] = {}
+    if central_due:
+        measured.update(evaluator.evaluate_central(server, dataset))
+    if grad_norm_due:
+        measured.update(evaluator.evaluate_grad_norm(server, dataset))
+    return measured
+
+
 @dataclass(slots=True)
 class LoopContext:
     """What ``run_fl_loop`` has set up before its first round, for a loop that runs them its way.
@@ -616,6 +645,8 @@ class LoopContext:
     on_round_flush: Callable[[ExperimentState], None] | None
     on_client_progress: Callable[[int, int, int, str], None] | None
     on_termination: Callable[[DivergenceVerdict], None] | None
+    #: F and its gradient in one pass, where the run has one (``FusedPass``).
+    fused_pass: Any = None
 
 
 #: Objects already in the permanent generation when this module was imported:

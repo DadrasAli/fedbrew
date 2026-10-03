@@ -33,6 +33,7 @@ import json
 import sys
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -799,6 +800,74 @@ class ThePostFitMetricsAreFoldedTest(ExecutorRuns):
                 self.assertTrue(any(max(call.args[2]) == 4 for call in folds.call_args_list))
                 for name in CSVS:
                     self.assertEqual(_untimed(stacked / name), _untimed(per_client / name), name)
+
+
+class FAndItsGradientInOnePassTest(ExecutorRuns):
+    """``evaluation.grad_norm.fused``, on by default: F's central pass and its gradient in one.
+
+    For every problem, resident, batched per round and sequential: the fused
+    run's central columns are the two passes' bit for bit and its grad_norm_sq
+    theirs within 1e-12 relative, and run.json says which pass each run took.
+    With the central pass every other round, the rounds between measure
+    grad_norm_sq alone, in its own pass, and the run is the same again.
+    """
+
+    def test_each_problem_and_path(self) -> None:
+        from fedbrew.core.config import evaluates_round
+        from fedbrew.core.resident_evaluation import ResidentEvaluation
+        from tests.test_resident_round import per_round
+
+        for loss, penalty in problem.PROBLEMS:
+            for path in ("resident", "per round", "sequential"):
+                for central in (1, 2):
+                    with self.subTest(problem=f"{loss}+{penalty}", path=path, central=central):
+                        config = small_config(loss, penalty)
+                        config["schedule"]["rounds"] = 4
+                        config["evaluation"]["central_test"] = {"every": central}
+                        runs = {}
+                        for fused in (True, False):
+                            config["evaluation"]["grad_norm"] = {"every": 1, "fused": fused}
+                            spy = mock.patch.object(
+                                ResidentEvaluation,
+                                "enqueue_fused",
+                                autospec=True,
+                                side_effect=ResidentEvaluation.enqueue_fused,
+                            )
+                            executor = "sequential" if path == "sequential" else "batched"
+                            context = per_round() if path == "per round" else nullcontext()
+                            with context, spy as fused_rounds:
+                                runs[fused] = self.run_config(config, executor)
+                            # The rounds the central pass measures: every
+                            # other one, pinned at the first and the last.
+                            both = sum(evaluates_round(central, r, 4) for r in range(1, 5))
+                            self.assertEqual(
+                                fused_rounds.call_count,
+                                both if fused and path == "resident" else 0,
+                            )
+                        self._same_but_the_gradient(runs[True], runs[False])
+
+    def _same_but_the_gradient(self, fused: Path, separate: Path) -> None:
+        records = [
+            json.loads((path / "run.json").read_text())["reproducibility"]["grad_norm"]
+            for path in (fused, separate)
+        ]
+        self.assertEqual(records[0], {"pass": "fused", "asked": "fused"})
+        apart = {"pass": "separate", "asked": "separate", "reason": "asked for"}
+        self.assertEqual(records[1], apart)
+        rows = [_untimed(path / "round_metrics.csv") for path in (fused, separate)]
+        assert rows[0] is not None and rows[1] is not None
+        self.assertEqual(len(rows[0]), len(rows[1]))
+        for row_fused, row_separate in zip(rows[0], rows[1], strict=True):
+            self.assertEqual(list(row_fused), list(row_separate))
+            for key, value in row_separate.items():
+                if not key.startswith("grad_norm_sq"):
+                    self.assertEqual(row_fused[key], value, key)
+                    continue
+                a, b = float(row_fused[key]), float(value)
+                self.assertLessEqual(abs(a - b), 1e-12 * max(abs(a), abs(b)), key)
+        for name in CSVS:
+            if name != "round_metrics.csv":
+                self.assertEqual(_untimed(fused / name), _untimed(separate / name), name)
 
 
 def _run_task_class() -> Any:

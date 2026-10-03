@@ -624,6 +624,7 @@ run at `highest` while `run.json` recorded the typo as though it applied.
 | `central_test.every` | int \| `final` \| `never` | `10` | |
 | `fit.every` | int \| `final` \| `never` | `1` | The pass each training client makes over its own train split after its update: the `fit_` metrics. See below. |
 | `grad_norm.every` | int \| `final` \| `never` | `never` | `grad_norm_sq`, the squared norm of the gradient of the global objective at the global model. See below. |
+| `grad_norm.fused` | bool | `true` | On a round with the central pass, `grad_norm_sq` through that pass where it is F, in one pass. See below. |
 | `model_scope` | `global` \| `personal` \| `both` | `"global"` | |
 
 **Schedule grammar** — `parse_evaluation_schedule` (`fedbrew/core/config.py`):
@@ -694,6 +695,18 @@ it skips, and at the default `never`, it runs nothing. A task that declares no
 gradient of its objective (chapter 12, `GRAD_NORM_GLOSS`) refuses the key, and
 `never` is refused while `divergence.metric` or `checkpointing.best_metric`
 names `grad_norm_sq`, which is better lower. `tests/test_grad_norm.py`.
+
+**`grad_norm.fused` measures F and its gradient in one pass.** On a round
+that runs the central pass too, where that pass is F -- measured in parts on
+rows that are every client's train rows (fed-logistic-l1's and
+heterogeneous-quadratic's, chapter 12) -- the gradient is taken through it:
+one forward and one backward give the `central_test_*` columns and
+`grad_norm_sq`, which is F's gradient summed over the central pass's batches,
+the same within `1e-12` relative and bit for bit where the rows and their
+order are the gradient pass's. The central columns never change. Elsewhere,
+on a round that measures one of them, and with `false`, the gradient takes
+its own pass. run.json's `reproducibility.grad_norm` says which a run took
+(chapter 08 §6.1); the default changed with `POST-F37`.
 
 **Client scope grammar** — `parse_evaluation_client_scope` (`fedbrew/core/config.py`):
 

@@ -1149,10 +1149,12 @@ class HeterogeneousQuadraticTask(TaskAdapter):
         batch: tuple[Tensor, ...],
         mask: Tensor | None = None,
     ) -> dict[str, Tensor]:
+        """The rows' objective, with its graph under autograd (``FusedPass``), and the iterate's."""
+
         loss, _ = self.functional_loss(model, params, buffers, batch, mask)
         x = (model.x if params is None else params["x"]).detach()
         return {
-            "loss": loss.detach(),
+            "loss": loss,
             "total": row_count(batch[1], mask),
             "optimality_gap": self._gap(x),
             "distance_to_optimum": self._distance(x),
