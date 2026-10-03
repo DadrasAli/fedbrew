@@ -124,6 +124,42 @@ class SummaryValueTest(unittest.TestCase):
 
 
 @pytest.mark.fast
+class AStackIsSummarisedAsItsRecordsAreTest(unittest.TestCase):
+    """``extend_stacked``: a stack's records, and the summary ``extend`` would keep of them."""
+
+    def test_the_same_list_and_summary(self) -> None:
+        def stack(round_id: int) -> list[ClientMetricRecord]:
+            return [
+                ClientMetricRecord(
+                    round_id=round_id,
+                    client_id=f"c{index}",
+                    phase="fit",
+                    num_examples=7 + index,
+                    metrics={"fit_loss": 1.0, **({"fit_accuracy": 0.5} if index == 2 else {})},
+                )
+                for index in range(4)
+            ]
+
+        one, other = ClientUpdateHistory(), ClientUpdateHistory()
+        other.append(_update(0, "c9", phase="eval"))
+        one.append(_update(0, "c9", phase="eval"))
+        for round_id in (1, 2):
+            records = stack(round_id)
+            one.extend(records)
+            other.extend_stacked(
+                list(records),
+                "fit",
+                [record.client_id for record in records],
+                [record.num_examples for record in records],
+                ["fit_loss", "fit_accuracy"],
+            )
+        other.extend_stacked([], "fit", [], [], [])
+        self.assertEqual(list(other), list(one))
+        self.assertEqual(other.summary, one.summary)
+        self.assertEqual(list(other.summary.phase_counts), list(one.summary.phase_counts))
+
+
+@pytest.mark.fast
 class NoFullScanTest(unittest.TestCase):
     """The point of the change: the helpers stop reading the history."""
 

@@ -724,15 +724,14 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
         if first.row_size is None:
             first.row_size = model_state_size(first.row(0))
         communicated_parameters, communicated_bytes = first.row_size
-        everyone = range(size)
-        columns.put("optimizer_steps", everyone, [float(len(plan.structure)) for plan in plans])
-        columns.put("active_target_tokens", everyone, [float(total) for total in totals])
+        columns.put_all("optimizer_steps", [float(len(plan.structure)) for plan in plans])
+        columns.put_all("active_target_tokens", [float(total) for total in totals])
         for name, value in (
             ("trainable_parameters", float(chunk.trainable_parameters)),
             ("communicated_parameters", float(communicated_parameters)),
             ("communicated_bytes", float(communicated_bytes)),
         ):
-            columns.put(name, everyone, [value] * size)
+            columns.put_all(name, [value] * size)
         for position, (member, plan) in enumerate(zip(members, plans, strict=True)):
             for name, value in member._batched_extra_metrics(plan).items():
                 columns.put(name, [position], [value])
@@ -749,6 +748,8 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
                 "model_state_scope": str(metadata["model_state_scope"]),
                 "model_state_metadata": metadata,
             },
+            columns=columns.lists(),
+            num_counts=num_examples,
         )
 
     def _batched_post_fit(
@@ -1399,6 +1400,9 @@ def _stacked_post_fit(
     """
 
     evaluated = [0] * len(plans)
+    unevaluated = _counted_without_the_pass(chunk, plans, members)
+    if unevaluated is not None:
+        return unevaluated
     for bucket in chunk.buckets:
         positions = bucket.positions
         if bucket.eval_metrics is None:
@@ -1428,6 +1432,29 @@ def _stacked_post_fit(
             for name, values in filter_metrics(computed, list(requested)).items():
                 columns.put(name, [positions[row] for row in rows], [values[row] for row in rows])
     return evaluated
+
+
+def _counted_without_the_pass(
+    chunk: Any, plans: Sequence[ClientBatchPlan], members: Sequence[TorchSGDClient[Any]]
+) -> list[int] | None:
+    """Each client's count where the chunk ran no post-fit pass, read a column at once; else None.
+
+    What ``_batched_post_fit`` returns for each client then -- no metrics, and
+    the rows its pass would have counted, ``eval_rows``, or its split's count
+    where the plan has none -- where every client's rule computes it so
+    (``TorchSGDClient._batched_post_fit``); a rule with its own, and a chunk
+    whose pass ran, are read client by client.
+    """
+
+    own = TorchSGDClient._batched_post_fit
+    if any(plan.evaluate for plan in plans) or any(
+        bucket.eval_metrics is not None or bucket.eval_outputs is not None
+        for bucket in chunk.buckets
+    ):
+        return None
+    if any(type(member)._batched_post_fit is not own for member in members):
+        return None
+    return [plan.eval_rows or _infer_split_num_examples(plan.train_data) for plan in plans]
 
 
 def _step_totals(chunk: Any, size: int) -> list[float]:

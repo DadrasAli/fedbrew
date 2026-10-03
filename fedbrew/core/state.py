@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import heapq
 import math
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, fields, replace
 from typing import Any
 
@@ -306,6 +307,31 @@ class ClientUpdateHistory(_AppendOnlyHistory):
             examples += record.num_examples
             names.update(record.metrics)
         summary.num_examples = examples
+
+    def extend_stacked(
+        self,
+        records: list[ClientMetricRecord],
+        phase: str,
+        client_ids: Sequence[str],
+        counts: Sequence[int],
+        names: Iterable[str],
+    ) -> None:
+        """``extend`` with one stack's records, its summary taken a column at a time.
+
+        ``records`` are the stack's clients' of ``phase``, client ``p`` of
+        ``client_ids`` with ``counts[p]`` examples; ``names`` every metric name
+        some record holds. The totals ``_accumulate_all`` keeps -- a set of
+        ids, a count per phase, a sum of whole numbers, a set of names -- are
+        the same taken this way.
+        """
+
+        if records:
+            summary = self.summary
+            summary.client_ids.update(client_ids)
+            summary.phase_counts[phase] = summary.phase_counts.get(phase, 0) + len(records)
+            summary.num_examples += sum(counts)
+            summary.metric_names.update(names)
+        list.extend(self, records)
 
 
 @dataclass(slots=True)

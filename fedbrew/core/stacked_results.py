@@ -36,7 +36,10 @@ class StackedFitResults:
     names are first reported; where some client does not report a name,
     ``reported`` holds which do, and that client's value is never read.
     ``payload`` is what every client's result payload holds beside its model
-    state -- the scope and metadata, each client's its own copy.
+    state -- the scope and metadata, each client's its own copy. ``columns``,
+    where given, is ``metrics`` and ``reported`` as the lists they were made
+    from, and ``num_counts`` ``num_examples`` so: what the readers below read,
+    which then crosses no tensor back to a list.
     """
 
     round_id: int
@@ -47,6 +50,8 @@ class StackedFitResults:
     payload: dict[str, Any]
     reported: dict[str, Tensor] = field(default_factory=dict)
     _rows: list[dict[str, float]] | None = None
+    columns: tuple[dict[str, list[float]], dict[str, list[bool]]] | None = None
+    num_counts: list[int] | None = None
 
     def __len__(self) -> int:
         return len(self.client_ids)
@@ -54,15 +59,28 @@ class StackedFitResults:
     def counts(self) -> list[int]:
         """Each client's example count, as its FitResult's ``num_examples``."""
 
+        if self.num_counts is not None:
+            return list(self.num_counts)
         return [int(count) for count in self.num_examples.tolist()]
 
     def metric_columns(self) -> tuple[dict[str, list[float]], dict[str, list[bool]]]:
         """Each name's values over the clients, and, for a name not all report, which do."""
 
+        if self.columns is not None:
+            values, reported = self.columns
+            return (
+                {name: list(column) for name, column in values.items()},
+                {name: list(mask) for name, mask in reported.items()},
+            )
         return (
             {name: values.tolist() for name, values in self.metrics.items()},
             {name: mask.tolist() for name, mask in self.reported.items()},
         )
+
+    def metric_names(self) -> list[str]:
+        """Every name some client reports, in the order the names are first reported."""
+
+        return list(self.metrics)
 
     def metric_rows(self) -> list[dict[str, float]]:
         """Each client's metrics, as its FitResult holds them; built once."""
@@ -148,6 +166,17 @@ class MetricColumns:
             column[position] = value
             mask[position] = True
 
+    def put_all(self, name: str, values: Sequence[float]) -> None:
+        """Every client reports ``values`` under ``name``, client ``p`` the ``p``-th."""
+
+        if name not in self.values:
+            if len(values) != self.size:
+                raise ValueError(f"{name}: {len(values)} values for {self.size} clients")
+            self.values[name] = list(values)
+            self.reported[name] = [True] * self.size
+            return
+        self.put(name, range(self.size), values)
+
     def tensors(self) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
         """The columns as float64 tensors, and the masks of the names not every client reports."""
 
@@ -160,6 +189,14 @@ class MetricColumns:
             if not all(mask)
         }
         return metrics, reported
+
+    def lists(self) -> tuple[dict[str, list[float]], dict[str, list[bool]]]:
+        """``tensors``' columns and masks as the lists they are made from: the same floats."""
+
+        return (
+            {name: [float(value) for value in values] for name, values in self.values.items()},
+            {name: list(mask) for name, mask in self.reported.items() if not all(mask)},
+        )
 
 
 class StackedResults:

@@ -592,6 +592,7 @@ class ResidentRounds:
         #: orders they are counted from; and the training orders last found to
         #: give every client a batch, with its clients.
         self._held_plans: dict[bool, RoundPlan] = {}
+        self._stand_ins: dict[int, StateStack] = {}
         self._held_eval_rows: tuple[Any, list[int]] | None = None
         self._checked: tuple[Any, list[int]] | None = None
         self.graphs = RoundGraphs(self.device, executor.cuda_graphs, executor.record)
@@ -1402,10 +1403,14 @@ class ResidentRounds:
 
         The records never read a trained state: the model is the round's mean,
         already folded. A row here is the template's parameters, seen ``size``
-        times, for an observer that is handed each client's result.
+        times, for an observer that is handed each client's result; nothing
+        writes into it, so one is made per size.
         """
 
-        stack = StateStack(
+        held = self._stand_ins.get(size)
+        if held is not None:
+            return held
+        stack = self._stand_ins[size] = StateStack(
             {
                 key: self.parameters[key].detach()[None].expand(size, *self.parameters[key].shape)
                 for key in self.state_keys

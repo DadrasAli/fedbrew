@@ -329,12 +329,91 @@ class TheStackedPathIsThePerClientPathTest(ExecutorRuns):
                 )
                 self.assertAgree(stacked, per_client)
 
+    def test_a_round_without_the_pass_counts_its_clients_at_once(self) -> None:
+        """No post-fit pass: each client's count as ``_batched_post_fit`` gives it.
+
+        A pass every other round, on ragged clients: the rounds that run it are
+        read client by client, the others a column at once, and the run is the
+        one that reads every round client by client.
+        """
+
+        from fedbrew.clients import torch_sgd_client
+
+        config = with_client(example_config("fed-lasso"), update_mode="sequential_epoch")
+        config.setdefault("evaluation", {})["fit"] = {"every": 2}
+        config["divergence"] = None
+        real = torch_sgd_client._counted_without_the_pass
+        taken: list[Any] = []
+
+        def counted(*args: Any) -> Any:
+            taken.append(real(*args))
+            return taken[-1]
+
+        with (
+            ragged_clients(),
+            mock.patch.object(torch_sgd_client, "_counted_without_the_pass", side_effect=counted),
+        ):
+            at_once = self.run_config(config, "batched")
+        with (
+            ragged_clients(),
+            mock.patch.object(torch_sgd_client, "_counted_without_the_pass", return_value=None),
+        ):
+            each = self.run_config(config, "batched")
+        self.assertIn(None, taken)
+        self.assertTrue(any(counts is not None for counts in taken))
+        self.assertAgree(at_once, each, exact=True)
+
     def test_an_observer_of_one_result_at_a_time_is_handed_each(self) -> None:
         config = example_config("fed-lasso")
         stacked = self.run_config(config, "batched")
         with mock.patch.object(loop._RoundFitObserver, "fitted_stack", None):
             each = self.run_config(config, "batched")
         self.assertAgree(stacked, each, exact=True)
+
+
+class AStackReadsItsListsAsItsTensorsTest(unittest.TestCase):
+    """Built with the lists its tensors were made from, a stack reads the same numbers."""
+
+    def test_columns_counts_rows_and_results(self) -> None:
+        columns = MetricColumns(5)
+        columns.put_all("fit_loss", [0.1, float("nan"), -0.0, 1e300, 3])
+        columns.put("fit_accuracy", [0, 3, 4], [0.5, 0.25, 1.0])
+        columns.put_all("optimizer_steps", [3.0, 3.0, 2.0, 1.0, 3.0])
+        columns.put("fit_accuracy", [1], [0.75])
+        columns.put_all("fit_accuracy", [0.1, 0.2, 0.3, 0.4, 0.5])
+        with self.assertRaises(ValueError):
+            columns.put_all("other", [1.0])
+        metrics, reported = columns.tensors()
+        counts = [7, 3, 11, 5, 2]
+        stacked = _stacked(torch.Generator().manual_seed(1))
+
+        def built(**kept: Any) -> StackedFitResults:
+            return StackedFitResults(
+                round_id=1,
+                client_ids=stacked.client_ids,
+                num_examples=torch.tensor(counts),
+                states=stacked.states,
+                metrics=metrics,
+                reported=reported,
+                payload=dict(stacked.payload),
+                **kept,
+            )
+
+        plain, kept = built(), built(columns=columns.lists(), num_counts=list(counts))
+        # repr tells -0.0 from 0.0 and reads nan: equal reprs are the same floats.
+        self.assertEqual(repr(kept.metric_columns()), repr(plain.metric_columns()))
+        self.assertEqual(kept.counts(), plain.counts())
+        self.assertEqual(kept.metric_names(), plain.metric_names())
+        self.assertEqual(repr(kept.metric_rows()), repr(plain.metric_rows()))
+        self.assertEqual(
+            [(r.client_id, r.num_examples, repr(r.metrics)) for r in kept.results()],
+            [(r.client_id, r.num_examples, repr(r.metrics)) for r in plain.results()],
+        )
+        # What a reader is handed is its own: changing it changes nothing kept.
+        kept.metric_columns()[0]["fit_loss"][0] = 9.0
+        kept.counts()[0] = 0
+        self.assertEqual(repr(kept.metric_columns()), repr(plain.metric_columns()))
+        self.assertEqual(kept.counts(), counts)
 
 
 if __name__ == "__main__":

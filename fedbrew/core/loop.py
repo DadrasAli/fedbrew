@@ -985,7 +985,7 @@ class _RoundFitObserver:
 
         self._totals.fit_seconds += seconds
         counts = stacked.counts()
-        self._state.client_update_metrics_history.extend(
+        records = [
             ClientMetricRecord(
                 round_id=stacked.round_id,
                 client_id=client_id,
@@ -996,7 +996,16 @@ class _RoundFitObserver:
             for client_id, count, metrics in zip(
                 stacked.client_ids, counts, stacked.metric_rows(), strict=True
             )
-        )
+        ]
+        history = self._state.client_update_metrics_history
+        extend_stacked = getattr(history, "extend_stacked", None)
+        if callable(extend_stacked):
+            # The stack's summary a column at a time: every name some client reports.
+            columns, reported = stacked.metric_columns()
+            names = [name for name in columns if name not in reported or any(reported[name])]
+            extend_stacked(records, "fit", stacked.client_ids, counts, names)
+        else:
+            history.extend(records)
         for count in counts:
             self._totals.num_examples += count
         if self._on_progress is not None:
