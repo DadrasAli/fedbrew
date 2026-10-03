@@ -288,6 +288,8 @@ class RoundPlanner:
         self.record = record if record is not None else {}
         self.record.update(workers=0, waited_sec=0.0)
         self._received: dict[int, PlannedRound] = {}
+        #: The last in-process round's clients and orders, where they drew nothing.
+        self._fixed: tuple[list[int], RoundOrders, RoundOrders] | None = None
         self._next_task: int | None = None
         self._processes: list[Any] = []
         self._tasks: Any = None
@@ -306,7 +308,7 @@ class RoundPlanner:
         """Round ``round_id``'s sampled clients and orders."""
 
         if not self._processes:
-            return plan_roster_round(self.roster, round_id)
+            return self._in_process(round_id)
         if self._next_task is None:
             # No round handed out yet: this one is planned here, whether or
             # not a worker has started, and once one has, the workers take the
@@ -320,6 +322,25 @@ class RoundPlanner:
         planned = self._received.pop(round_id, None)
         if planned is None:
             planned = self._wait(round_id)
+        return planned
+
+    def _in_process(self, round_id: int) -> PlannedRound:
+        """``plan_roster_round`` here; the last round's orders for its clients if nothing was drawn.
+
+        Orders that draw nothing are the same for the same clients round after
+        round (``plan_orders`` hands out one ``RoundOrders``, ``drawn`` False),
+        so a round that samples the clients the last one did takes them as
+        they are, without working out the loaders' seeds no order reads.
+        """
+
+        positions = sampled_positions(self.roster, round_id)
+        held = self._fixed
+        if held is not None and held[0] == positions:
+            return PlannedRound(round_id, positions, held[1], held[2])
+        planned = _planned(self.roster, round_id, positions)
+        self._fixed = None
+        if not planned.train.drawn and not planned.evaluation.drawn:
+            self._fixed = (list(positions), planned.train, planned.evaluation)
         return planned
 
     def workers_ready(self, timeout: float = 0.0) -> bool:

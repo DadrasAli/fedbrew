@@ -48,6 +48,7 @@ import copy
 import inspect
 import sys
 import time
+import weakref
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -1292,6 +1293,27 @@ class _Bucket:
             per_step=self.compiled,
         )
 
+    def next_round(self, rows: _Rows, values: ProgramValues) -> None:
+        """This bucket again, for a round of the same clients, steps and program shape.
+
+        A caller that keeps its buckets from round to round (the resident
+        round) hands each its round's rows and program values, and has set
+        its plans' program and start in place; everything else -- the
+        clients, structures, steps, orders and the program's shape -- is the
+        last round's, so the update weights and what was cast and uploaded
+        from them are this bucket's still. A program whose combination or
+        weighting differs has other weights, which are made again.
+        """
+
+        program = self.plans[0].program
+        if (program.combine, program.weighting) != (self.program.combine, self.program.weighting):
+            self.weights = update_weights(self.steps.lengths, self.structure, program)
+            self._weights_on_device = None
+            self._shaped = {}
+        self.program = program
+        self.rows = rows
+        self.values = values
+
     # -- the tensors every client starts from --------------------------------
 
     def _state(self, states: list[Mapping[str, Any] | None]) -> tuple[Any, int | None]:
@@ -2091,13 +2113,29 @@ def closed_gradients(
     return dict(grads), dict(outputs)
 
 
+#: Whether a closed form takes a ``workspace``, by its function: its signature
+#: is read once (``inspect.signature`` costs more than a small round's step).
+_WORKSPACE_TAKERS: weakref.WeakKeyDictionary[Any, bool] = weakref.WeakKeyDictionary()
+
+
 def _takes_workspace(task: Any) -> bool:
     """Whether the task's closed form takes a ``workspace`` of scratch tensors."""
 
+    method = task.closed_form_gradient
+    function = getattr(method, "__func__", method)
     try:
-        return "workspace" in inspect.signature(task.closed_form_gradient).parameters
+        return _WORKSPACE_TAKERS[function]
+    except (KeyError, TypeError):
+        pass
+    try:
+        takes = "workspace" in inspect.signature(method).parameters
     except (TypeError, ValueError):
-        return False
+        takes = False
+    try:
+        _WORKSPACE_TAKERS[function] = takes
+    except TypeError:
+        pass  # not weakly referable: read again next time
+    return takes
 
 
 def train_rows(rows: _Rows, dtype: torch.dtype, task: Any, model: nn.Module, closed: bool) -> _Rows:

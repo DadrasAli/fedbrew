@@ -75,7 +75,8 @@ class RoundOrders:
     ``t`` is its rows from ``starts[c, t]`` on. All CPU int64 tensors.
 
     Read, never written: where no client's order draws anything, one
-    ``RoundOrders`` is every round's (:func:`plan_orders`).
+    ``RoundOrders`` is every round's (:func:`plan_orders`), and ``drawn`` is
+    False; it is True for orders a call drew, or that were made otherwise.
     """
 
     indices: Tensor
@@ -84,6 +85,7 @@ class RoundOrders:
     steps: Tensor
     structure: list[tuple[int, ...]]
     contiguous: Tensor
+    drawn: bool = True
 
     @classmethod
     def from_updates(cls, clients: Sequence[Sequence[Sequence[Tensor]]]) -> RoundOrders:
@@ -307,6 +309,7 @@ def _plan_shape(orders: tuple[LoaderOrder, ...], loops: tuple[LocalLoop, ...]) -
             steps=steps,
             structure=list(structure),
             contiguous=~shuffled,
+            drawn=False,
         )
     return _PlanShape(
         rows=rows,

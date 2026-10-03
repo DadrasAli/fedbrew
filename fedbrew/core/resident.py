@@ -401,6 +401,12 @@ class _BucketPlan:
     inputs: dict[Any, int] = field(default_factory=dict)
     #: The clients' roster places, in the order of the bucket's rows.
     places: list[int] = field(default_factory=list)
+    #: Kept with the plan (``ResidentRounds._prepare``): the plans its rule
+    #: reads, a client per row, and the bucket the device half steps, made by
+    #: the first round that runs it and handed each later round's rows,
+    #: program and start.
+    member_plans: list[_MemberPlan] | None = None
+    runner: Any = None
 
 
 @dataclass(slots=True)
@@ -420,6 +426,11 @@ class RoundPlan:
     #: one: per run of consecutive clients in one bucket, the bucket's index
     #: and the rows, in order (``_Fold.add_runs``); None for a fold by bucket.
     runs: list[tuple[int, list[int]]] | None = None
+    #: What else the plan was made from: whether the round ran the post-fit
+    #: pass, the program's shape and the executor's chunk budget.
+    evaluate: bool = True
+    shape: Any = None
+    chunk_bytes: int = 0
 
     def add(self, tensor: Tensor) -> int:
         """Another tensor for the device half to read; its place among the inputs."""
@@ -575,6 +586,14 @@ class ResidentRounds:
         #: Per bucket, its last steps: the orders they were made from, the
         #: steps, and the flat indices and lengths its device half reads.
         self._held_steps: dict[tuple[Any, ...], tuple[Any, _Steps, Any, Any]] = {}
+        #: The last round's host half, kept for a round that repeats it
+        #: (``_prepare``), one for rounds that run the post-fit pass and one
+        #: for rounds that do not; each client's post-fit rows, kept with the
+        #: orders they are counted from; and the training orders last found to
+        #: give every client a batch, with its clients.
+        self._held_plans: dict[bool, RoundPlan] = {}
+        self._held_eval_rows: tuple[Any, list[int]] | None = None
+        self._checked: tuple[Any, list[int]] | None = None
         self.graphs = RoundGraphs(self.device, executor.cuda_graphs, executor.record)
         #: The dtypes the fold sums the model's tensors in, in order of first use.
         self.accumulation_dtypes = list(
@@ -651,7 +670,7 @@ class ResidentRounds:
         program = self.representative.batched_program(
             FitRequest(round_id=round_id, client_id=self.representative.client_id, payload={})
         )
-        eval_rows = planned.evaluation.lengths.sum(dim=1).tolist()
+        eval_rows = self._eval_rows(planned.evaluation)
         device_round = DeviceRound(
             round_id,
             planned.positions,
@@ -698,8 +717,15 @@ class ResidentRounds:
         device_round.clock.mark("evaluated")
 
     def _refuse_empty(self, planned: PlannedRound) -> None:
-        """Refuse the first client, in request order, whose loader yields no batch."""
+        """Refuse the first client, in request order, whose loader yields no batch.
 
+        Orders that draw nothing are every round's (``plan_orders``): the same
+        orders over the same clients are found the same again, and not read.
+        """
+
+        checked = self._checked
+        if checked is not None and checked[0] is planned.train and checked[1] == planned.positions:
+            return
         steps = planned.train.steps.tolist()
         for slot, place in enumerate(planned.positions):
             if not steps[slot]:
@@ -709,6 +735,17 @@ class ResidentRounds:
                     self.template,
                     start=self.model,
                 ).refuse()
+        self._checked = (planned.train, list(planned.positions))
+
+    def _eval_rows(self, orders: Any) -> list[int]:
+        """Each client's post-fit rows, its fold weight's count: again only for other orders."""
+
+        held = self._held_eval_rows
+        if held is not None and held[0] is orders:
+            return held[1]
+        rows = orders.lengths.sum(dim=1).tolist()
+        self._held_eval_rows = (orders, rows)
+        return rows
 
     def _train(self, planned: PlannedRound, device_round: DeviceRound) -> None:
         """Every chunk's buckets trained and folded, in order; the round's staged records.
@@ -760,14 +797,36 @@ class ResidentRounds:
         self.model = mean
 
     def _prepare(self, planned: PlannedRound, device_round: DeviceRound) -> RoundPlan:
-        """The round's host half: its chunks and buckets, and every tensor its device half reads."""
+        """The round's host half: its chunks and buckets, and every tensor its device half reads.
+
+        Kept for a later round that repeats this one -- the same orders
+        (orders that draw nothing are every round's, ``plan_orders``) over the
+        same clients, a program of the same shape, the same fold weights and
+        chunk budget -- since all of it is then the same, buckets and their
+        steps included; that round hands each bucket its own rows, program and
+        start (``_execute``). One plan is kept for rounds that run the post-fit
+        pass and one for rounds that do not, so a pass every few rounds keeps both.
+        """
 
         program = device_round.program
+        server = self.context.server
+        weights = server.fold_weights(device_round.eval_rows)
+        held = self._held_plans.get(device_round.evaluate)
+        if (
+            held is not None
+            and held.planned.train is planned.train
+            and held.planned.evaluation is planned.evaluation
+            and held.planned.positions == planned.positions
+            and held.shape == program.shape
+            and held.weights == weights
+            and held.chunk_bytes == self.executor.chunk_bytes
+        ):
+            held.planned = planned
+            held.key = self._key(held, device_round)
+            return held
         chunks = list(
             cut_chunks(self._costs(planned, device_round, program), self.executor.chunk_bytes)
         )
-        server = self.context.server
-        weights = server.fold_weights(device_round.eval_rows)
         total_weight = 0.0
         for weight in weights:
             total_weight += float(weight)
@@ -782,6 +841,9 @@ class ResidentRounds:
             ),
             weights=weights,
             total_weight=total_weight,
+            evaluate=device_round.evaluate,
+            shape=program.shape,
+            chunk_bytes=self.executor.chunk_bytes,
         )
         for index, (start, stop) in enumerate(chunks):
             groups: dict[tuple[int, ...], list[int]] = {}
@@ -797,6 +859,7 @@ class ResidentRounds:
             for dtype in self.accumulation_dtypes:
                 plan.inputs[("divisor", dtype)] = plan.add(torch.tensor(total_weight, dtype=dtype))
         plan.key = self._key(plan, device_round)
+        self._held_plans[device_round.evaluate] = plan
         return plan
 
     def _bucket_plan(
@@ -965,36 +1028,15 @@ class ResidentRounds:
                         inputs[bucket.inputs[f"{name}_flat"]],
                         inputs[bucket.inputs[f"{name}_lengths"]],
                     )
-            members = [
-                _MemberPlan(
-                    program=device_round.program,
-                    structure=bucket.structure,
-                    slot=slot,
-                    start=model,
-                    evaluate=device_round.evaluate,
-                    eval_rows=device_round.eval_rows[slot],
-                    train_data=None,
-                )
-                for slot in bucket.slots
-            ]
+            members = self._member_plans(bucket, device_round, model)
             if self.scaffold:
                 places = inputs[bucket.inputs["places"]]
                 old = {name: table.index_select(0, places) for name, table in self.controls.items()}
                 for row, member in enumerate(members):
                     member.client_control = {name: value[row] for name, value in old.items()}
                     member.server_control = self.server_control
-            stack, training, evaluated = _Bucket(
-                self.task,
-                self.template,
-                self.buffers,
-                members,  # type: ignore[arg-type]
-                rows,
-                (plan.planned.train, plan.planned.evaluation),
-                context=self.executor.context,
-                values=self._program_values(
-                    device_round.program, len(bucket.slots), len(bucket.structure)
-                ),
-                steps=(bucket.train, bucket.evaluation),
+            stack, training, evaluated = self._runner(
+                plan, bucket, members, rows, device_round
             ).run()
             if self.scaffold:
                 deltas = self._new_controls(bucket, old, stack, model, device_round.program)
@@ -1009,6 +1051,61 @@ class ResidentRounds:
         if self.scaffold:
             finite = torch.stack([finite, self._fold_controls(trained)]).all()
         return results, mean, finite
+
+    def _member_plans(
+        self, bucket: _BucketPlan, device_round: DeviceRound, model: dict[str, Tensor]
+    ) -> list[_MemberPlan]:
+        """The plans a bucket's rule reads, a client per row: a kept plan's, given this round's."""
+
+        members = bucket.member_plans
+        if members is None:
+            members = bucket.member_plans = [
+                _MemberPlan(
+                    program=device_round.program,
+                    structure=bucket.structure,
+                    slot=slot,
+                    start=model,
+                    evaluate=device_round.evaluate,
+                    eval_rows=device_round.eval_rows[slot],
+                    train_data=None,
+                )
+                for slot in bucket.slots
+            ]
+        else:
+            # A kept plan's: the same clients, structures, rows and pass.
+            for member in members:
+                member.program, member.start = device_round.program, model
+        return members
+
+    def _runner(
+        self,
+        plan: RoundPlan,
+        bucket: _BucketPlan,
+        members: list[_MemberPlan],
+        rows: _Rows,
+        device_round: DeviceRound,
+    ) -> _Bucket:
+        """The bucket the device half steps: made by its first round, handed each later round's."""
+
+        values = self._program_values(
+            device_round.program, len(bucket.slots), len(bucket.structure)
+        )
+        runner = bucket.runner
+        if runner is None:
+            runner = bucket.runner = _Bucket(
+                self.task,
+                self.template,
+                self.buffers,
+                members,  # type: ignore[arg-type]
+                rows,
+                (plan.planned.train, plan.planned.evaluation),
+                context=self.executor.context,
+                values=values,
+                steps=(bucket.train, bucket.evaluation),
+            )
+        else:
+            runner.next_round(rows, values)
+        return runner
 
     # -- SCAFFOLD's controls ----------------------------------------------------
 

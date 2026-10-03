@@ -297,6 +297,56 @@ class ABucketsStepsAreKeptWhileItsOrdersAreTest(ResidentRuns):
                 self.assertSameRun(held, reference)
 
 
+class ARepeatedRoundKeepsItsHostHalfTest(ResidentRuns):
+    """A round that repeats the last keeps its plan, and its buckets are stepped again.
+
+    Unshuffled, every round's orders are the first's: one plan for the run,
+    its buckets made once. Shuffled training orders are another round's each
+    time: a plan and buckets a round. A post-fit pass every other round keeps
+    one plan for the rounds that run it and one for those that do not. Either
+    way the run is the per-round path's.
+    """
+
+    def test_kept_and_made_again(self) -> None:
+        real_bucket, real_chunks = resident._Bucket, resident.cut_chunks
+        per_plan: list[int] = []
+        for shuffle, fit_every, plans in ((False, 1, 1), (True, 1, 4), (False, 2, 2)):
+            with self.subTest(shuffle=shuffle, fit_every=fit_every):
+                config = classification_rule_config(
+                    {
+                        **FEDAVG,
+                        "update_mode": "full_gradient",
+                        "train_shuffle": shuffle,
+                        "eval_shuffle": False,
+                    }
+                )
+                config.setdefault("evaluation", {})["fit"] = {"every": fit_every}
+                made: list[Any] = []
+                planned: list[Any] = []
+
+                def bucket(*args: Any, _made: list[Any] = made, **kwargs: Any) -> Any:
+                    _made.append(args[3])
+                    return real_bucket(*args, **kwargs)
+
+                def chunks(*args: Any, _planned: list[Any] = planned, **kwargs: Any) -> Any:
+                    _planned.append(args)
+                    return real_chunks(*args, **kwargs)
+
+                with (
+                    mock.patch.object(resident, "_Bucket", side_effect=bucket),
+                    mock.patch.object(resident, "cut_chunks", side_effect=chunks),
+                ):
+                    held, reference = self.pair(config)
+                self.assertEqual(len(_rows(held / "round_metrics.csv")), 4)
+                self.assertEqual(len(planned), plans)
+                # Each plan's buckets, made by the first round that runs it: as
+                # many as the one plan of the unshuffled run has.
+                per_plan = per_plan or [len(made)]
+                self.assertGreater(per_plan[0], 0)
+                self.assertEqual(len(made), plans * per_plan[0])
+                self.assertSameRun(held, reference)
+
+
 class _fold_sites:  # noqa: N801 -- used as a context manager, named for what it records
     """Records where each resident round folded: on the CPU (True) or the device (False)."""
 

@@ -162,6 +162,55 @@ class ThePlannedOrdersAreTheRoundsTest(unittest.TestCase):
         self.assertGreaterEqual(len(sampled), 1)
 
 
+@pytest.mark.fast
+class TheLoopKeepsOrdersThatDrawNothingTest(unittest.TestCase):
+    """Planned in process, a round is ``plan_roster_round``'s, and kept where nothing is drawn.
+
+    A round that samples the clients the last one did, whose orders drew
+    nothing, is handed those orders themselves; any other round is planned,
+    and every round's orders are the round's own, tensor for tensor.
+    """
+
+    def test_every_arm_every_round(self) -> None:
+        arms = [*planner_arms(), ("unshuffled, everyone", {"train_shuffle": False}, {})]
+        for label, client, server in arms:
+            with self.subTest(arm=label), ragged(), tempfile.TemporaryDirectory() as directory:
+                components = _components(_config(client, server), Path(directory))
+                roster, reason = roster_plan(components)
+                self.assertIsNone(reason)
+                assert roster is not None
+                planner = RoundPlanner(roster, ROUNDS)
+                last, held = None, 0
+                for round_id in range(1, ROUNDS + 1):
+                    planned = planner.plan(round_id)
+                    expected = plan_roster_round(roster, round_id)
+                    self.assertEqual(planned.round_id, round_id)
+                    self.assertEqual(planned.positions, expected.positions)
+                    for got, want in zip(
+                        (planned.train, planned.evaluation),
+                        (expected.train, expected.evaluation),
+                        strict=True,
+                    ):
+                        for name in FIELDS:
+                            self.assertTrue(torch.equal(getattr(got, name), getattr(want, name)))
+                        self.assertEqual(got.structure, want.structure)
+                    drew = planned.train.drawn or planned.evaluation.drawn
+                    kept = (
+                        last is not None
+                        and not drew
+                        and last.positions == planned.positions
+                        and planned.train is last.train
+                        and planned.evaluation is last.evaluation
+                    )
+                    repeats = last is not None and last.positions == planned.positions and not drew
+                    self.assertEqual(kept, repeats)
+                    held += kept
+                    last = planned
+                if label == "unshuffled, everyone":
+                    # Every client, every round, nothing drawn: rounds 2 on are kept.
+                    self.assertEqual(held, ROUNDS - 1)
+
+
 class WorkersPlanWhatThisProcessPlansTest(unittest.TestCase):
     def _roster(self, directory: Path) -> Any:
         client = {

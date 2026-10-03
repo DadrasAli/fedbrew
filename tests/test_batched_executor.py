@@ -457,3 +457,73 @@ class StackedMetricsTest(unittest.TestCase):
                     float(folded[name][split]), value, places=12, msg=(split, name)
                 )
             self.assertEqual(int(examples[split]), int(sum(r["total"] for r in records)))
+
+
+@pytest.mark.fast
+class AClosedFormsSignatureIsReadOnceTest(unittest.TestCase):
+    """Whether a closed form takes a workspace is read from its signature once a function."""
+
+    def test_read_once_and_the_same(self) -> None:
+        import inspect
+
+        class Takes:
+            def closed_form_gradient(  # noqa: ANN201
+                self,
+                model,
+                params,
+                buffers,
+                batch,
+                mask=None,
+                workspace=None,  # noqa: ANN001
+            ):
+                del model, params, buffers, batch, mask, workspace
+
+        class Not:
+            def closed_form_gradient(self, model, params, buffers, batch, mask=None):  # noqa: ANN001, ANN201
+                del model, params, buffers, batch, mask
+
+        real = inspect.signature
+        with mock.patch.object(batched_executor.inspect, "signature", side_effect=real) as read:
+            for _ in range(3):
+                self.assertTrue(batched_executor._takes_workspace(Takes()))
+                self.assertFalse(batched_executor._takes_workspace(Not()))
+        self.assertEqual(read.call_count, 2)
+
+
+@pytest.mark.fast
+class AKeptBucketTakesItsNextRoundTest(unittest.TestCase):
+    """``_Bucket.next_round``: the round's rows, values and program, and its weights.
+
+    A program that combines its batches as the last one did keeps the weights
+    and what was cast of them; one that combines otherwise gets its own.
+    """
+
+    def test_the_weights_follow_the_program(self) -> None:
+        from fedbrew.clients.batched_update import LocalProgram, OptimizerSpec, update_weights
+
+        lengths = torch.tensor([[3, 3, 2], [3, 1, 0]])
+        structure = (3,)
+        batch = LocalProgram(optimizer=OptimizerSpec("sgd", lr=0.1), combine="batch")
+        full = LocalProgram(optimizer=OptimizerSpec("sgd", lr=0.2), combine="full")
+        plan = mock.Mock(program=batch)
+        bucket = batched_executor._Bucket.__new__(batched_executor._Bucket)
+        bucket.plans, bucket.program, bucket.structure = [plan], batch, structure
+        bucket.steps = mock.Mock(lengths=lengths)
+        bucket.weights = update_weights(lengths, structure, batch)
+        held = bucket._weights_on_device = torch.zeros(1)
+        bucket._shaped = {"held": [held]}
+        rows, values = object(), object()
+        # The same combination at another rate: the weights and what was cast of them are kept.
+        plan.program = LocalProgram(optimizer=OptimizerSpec("sgd", lr=0.3), combine="batch")
+        bucket.next_round(rows, values)  # type: ignore[arg-type]
+        self.assertIs(bucket.program, plan.program)
+        self.assertIs(bucket.rows, rows)
+        self.assertIs(bucket.values, values)
+        self.assertIs(bucket._weights_on_device, held)
+        self.assertEqual(bucket._shaped, {"held": [held]})
+        # Another combination: its weights, and nothing cast of the old ones.
+        plan.program = full
+        bucket.next_round(rows, values)  # type: ignore[arg-type]
+        self.assertTrue(torch.equal(bucket.weights, update_weights(lengths, structure, full)))
+        self.assertIsNone(bucket._weights_on_device)
+        self.assertEqual(bucket._shaped, {})
