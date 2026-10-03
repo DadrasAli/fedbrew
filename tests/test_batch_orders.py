@@ -243,6 +243,53 @@ class AnIidOracleIsPlannedAsItDrawsTest(unittest.TestCase):
                 self.assertEqual([update[0] for update in planned(result, client)], expected)
 
 
+class OrdersThatDrawNothingAreEveryRoundsTest(unittest.TestCase):
+    """Nothing drawn: every call hands out one ``RoundOrders``; anything drawn: each its own."""
+
+    LOOPS = [LocalLoop(epochs=3), LocalLoop(epochs=2, per_update="epoch"), LocalLoop(epochs=1)]
+
+    def orders(self, shuffle: bool = False, replacement: bool = False) -> list[LoaderOrder]:
+        return [
+            LoaderOrder(rows, 4, shuffle, False, 7 + rows, per_epoch=True, replacement=replacement)
+            for rows in (9, 4, 13)
+        ]
+
+    def test_the_same_orders_every_call(self) -> None:
+        first = plan_orders(self.orders(), self.LOOPS)
+        second = plan_orders(self.orders(), self.LOOPS, seeds=[1, 2, 3])
+        self.assertIs(second, first)
+        for client, rows in enumerate((9, 4, 13)):
+            whole = list(range(rows))
+            batches = [whole[start : start + 4] for start in range(0, rows, 4)]
+            loop = self.LOOPS[client]
+            expected = (
+                [[batch] for batch in batches] * 3
+                if loop.per_update == "batch" and loop.epochs == 3
+                else [batches] * 2
+                if loop.per_update == "epoch"
+                else [[batch] for batch in batches]
+            )
+            self.assertEqual(planned(second, client), expected)
+
+    def test_orders_that_draw_are_planned_each_call(self) -> None:
+        for label, orders in (
+            ("shuffled", self.orders(shuffle=True)),
+            ("iid oracle", self.orders(shuffle=True, replacement=True)),
+            ("one shuffled", [*self.orders()[:2], self.orders(shuffle=True)[2]]),
+        ):
+            with self.subTest(orders=label):
+                first = plan_orders(orders, self.LOOPS, seeds=[1, 2, 3])
+                second = plan_orders(orders, self.LOOPS, seeds=[1, 2, 3])
+                self.assertIsNot(second, first)
+                for name in ("indices", "lengths", "starts", "steps"):
+                    self.assertNotEqual(
+                        getattr(second, name).data_ptr(), getattr(first, name).data_ptr(), name
+                    )
+                    self.assertTrue(torch.equal(getattr(second, name), getattr(first, name)), name)
+                third = plan_orders(orders, self.LOOPS, seeds=[4, 5, 6])
+                self.assertFalse(torch.equal(third.indices, first.indices))
+
+
 class DataloaderSeedsTest(unittest.TestCase):
     def test_the_seeds_are_dataloader_seeds(self) -> None:
         clients = ["client_0", "client_17", "a b", "ü"]

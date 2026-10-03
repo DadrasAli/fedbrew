@@ -259,6 +259,44 @@ class TheResidentRoundIsThePerRoundPathTest(ResidentRuns):
                 self.assertSameRun(held, reference)
 
 
+class ABucketsStepsAreKeptWhileItsOrdersAreTest(ResidentRuns):
+    """Orders that draw nothing are every round's, so a bucket's steps are made once for the run.
+
+    Shuffled training orders are drawn each round, so its training steps are
+    made each round, and its post-fit steps, over an unshuffled loader, once.
+    Either way the run is the per-round path's.
+    """
+
+    def test_unshuffled_and_shuffled(self) -> None:
+        real = resident._Steps
+        for shuffle, made_for_training in ((False, 1), (True, 4)):
+            with self.subTest(shuffle=shuffle):
+                config = classification_rule_config(
+                    {
+                        **FEDAVG,
+                        "update_mode": "full_gradient",
+                        "train_shuffle": shuffle,
+                        "eval_shuffle": False,
+                    }
+                )
+                made: list[Any] = []
+
+                def counted(*args: Any, _made: list[Any] = made, **kwargs: Any) -> Any:
+                    _made.append(args[1])
+                    return real(*args, **kwargs)
+
+                with mock.patch.object(resident, "_Steps", side_effect=counted):
+                    held, reference = self.pair(config)
+                rounds = len(_rows(held / "round_metrics.csv"))
+                self.assertEqual(rounds, 4)
+                # Training's one full-gradient update takes a client's 7 batches of 3
+                # rows; the post-fit pass's epoch, 7 updates of one.
+                training = [orders for orders in made if orders.structure[0] == (7,)]
+                self.assertEqual(len(training), made_for_training)
+                self.assertEqual(len(made) - len(training), 1)
+                self.assertSameRun(held, reference)
+
+
 class _fold_sites:  # noqa: N801 -- used as a context manager, named for what it records
     """Records where each resident round folded: on the CPU (True) or the device (False)."""
 

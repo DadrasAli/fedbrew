@@ -73,6 +73,9 @@ class RoundOrders:
     are none. ``structure[c]`` is how many batches each of its applied updates
     consumes. ``contiguous[c]`` says its order is unshuffled, so its batch
     ``t`` is its rows from ``starts[c, t]`` on. All CPU int64 tensors.
+
+    Read, never written: where no client's order draws anything, one
+    ``RoundOrders`` is every round's (:func:`plan_orders`).
     """
 
     indices: Tensor
@@ -162,10 +165,14 @@ def plan_orders(
     update consumes. A client whose loader yields no batch gets no steps, and
     the caller refuses it in its rule's words. Everything but the draws the
     seeds make is the same for the same orders and loops, round after round,
-    and is worked out once (``_plan_shape``).
+    and is worked out once (``_plan_shape``); where nothing is drawn -- no
+    order shuffled, no iid oracle -- that is the whole of the orders, and
+    every call gets the same ``RoundOrders``, which nothing writes into.
     """
 
     shape = _plan_shape(tuple(orders), tuple(loops))
+    if shape.fixed is not None:
+        return shape.fixed
     positions = shape.positions
     if shape.shuffle is not None or shape.oracle is not None:
         if seeds is None:
@@ -211,6 +218,8 @@ class _PlanShape:
     #: The permuted clients' draws and where each position reads them; None
     #: where no client is permuted.
     shuffle: _Shuffle | None
+    #: The orders themselves where no client's order draws: every round's.
+    fixed: RoundOrders | None
 
 
 @dataclass(frozen=True)
@@ -233,7 +242,8 @@ def _plan_shape(orders: tuple[LoaderOrder, ...], loops: tuple[LocalLoop, ...]) -
     """The seed-independent part of ``plan_orders``: kept for the same orders and loops.
 
     Its tensors are shared by every call that finds them here, so
-    ``plan_orders`` hands out copies, and writes into none of them.
+    ``plan_orders`` writes into none of them: it draws into copies, and hands
+    out the orders it keeps here (``fixed``) only where nothing is drawn.
     """
 
     clients = len(orders)
@@ -288,6 +298,16 @@ def _plan_shape(orders: tuple[LoaderOrder, ...], loops: tuple[LocalLoop, ...]) -
     shuffle = None
     if bool(permuted.any()):
         shuffle = _shuffle_shape(orders, permuted, epoch, epochs_used, positions, everyone)
+    fixed = None
+    if shuffle is None and oracle is None:
+        fixed = RoundOrders(
+            indices=positions,
+            lengths=lengths,
+            starts=starts,
+            steps=steps,
+            structure=list(structure),
+            contiguous=~shuffled,
+        )
     return _PlanShape(
         rows=rows,
         per_epoch=per_epoch,
@@ -303,6 +323,7 @@ def _plan_shape(orders: tuple[LoaderOrder, ...], loops: tuple[LocalLoop, ...]) -
         permuted=permuted,
         everyone=everyone,
         shuffle=shuffle,
+        fixed=fixed,
     )
 
 

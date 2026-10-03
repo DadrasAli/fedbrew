@@ -572,6 +572,9 @@ class ResidentRounds:
         self._host_start: dict[str, Tensor] = {}
         #: Per chunk of clients, their rules and record plans (``_record_plans``).
         self._records: dict[tuple[int, ...], tuple[list[Any], list[_MemberPlan]]] = {}
+        #: Per bucket, its last steps: the orders they were made from, the
+        #: steps, and the flat indices and lengths its device half reads.
+        self._held_steps: dict[tuple[Any, ...], tuple[Any, _Steps, Any, Any]] = {}
         self.graphs = RoundGraphs(self.device, executor.cuda_graphs, executor.record)
         #: The dtypes the fold sums the model's tensors in, in order of first use.
         self.accumulation_dtypes = list(
@@ -835,31 +838,60 @@ class ResidentRounds:
             structure=structure,
             kind=kind,
             longest=longest,
-            train=_Steps(shape, plan.planned.train, slots, dtype),  # type: ignore[arg-type]
-            evaluation=(
-                _Steps(shape, plan.planned.evaluation, slots, self.template_dtype)  # type: ignore[arg-type]
-                if evaluate
-                else None
-            ),
+            train=None,
+            evaluation=None,
             places=places,
         )
         if self.scaffold:
             bucket.inputs["places"] = plan.add(torch.tensor(places, dtype=torch.long))
         if kind == "gathered":
             bucket.inputs["index"] = plan.add(torch.tensor(index, dtype=torch.long))
-        if size > 1:
-            offsets = torch.arange(size, dtype=torch.long).view(-1, 1, 1) * longest
-            for name, steps in (("train", bucket.train), ("eval", bucket.evaluation)):
-                if steps is None:
-                    continue
-                # What ``_Steps._device`` computes and uploads, computed here.
-                bucket.inputs[f"{name}_flat"] = plan.add(steps._indices + offsets)
-                bucket.inputs[f"{name}_lengths"] = plan.add(steps._lengths)
+        for name, orders, steps_dtype in (
+            ("train", plan.planned.train, dtype),
+            ("eval", plan.planned.evaluation if evaluate else None, self.template_dtype),
+        ):
+            if orders is None:
+                continue
+            steps, flat, lengths = self._steps(name, orders, slots, shape, steps_dtype)
+            setattr(bucket, "train" if name == "train" else "evaluation", steps)
+            if flat is not None:
+                bucket.inputs[f"{name}_flat"] = plan.add(flat)
+                bucket.inputs[f"{name}_lengths"] = plan.add(lengths)
             if not plan.host_fold:
                 for dtype_ in self.accumulation_dtypes:
                     scale = torch.tensor([plan.weights[slot] for slot in slots], dtype=dtype_)
                     bucket.inputs[("scale", dtype_)] = plan.add(scale)
         return bucket
+
+    def _steps(
+        self,
+        name: str,
+        orders: Any,
+        slots: list[int],
+        shape: _RowsShape,
+        dtype: torch.dtype,
+    ) -> tuple[_Steps, Tensor | None, Tensor | None]:
+        """A bucket's steps over ``orders``, and for a stack the flat indices and lengths.
+
+        The flat indices are what ``_Steps._device`` computes and uploads,
+        computed here. All of it is kept while the round's orders are the
+        same object -- orders that draw nothing are every round's
+        (``plan_orders``) -- and worked out again only when they are not:
+        steps hold nothing of a round's rows past the round, as ``_execute``
+        binds each round's and drops what the last one gathered.
+        """
+
+        key = (name, tuple(slots), shape.longest, shape.stacked, dtype)
+        held = self._held_steps.get(key)
+        if held is not None and held[0] is orders:
+            return held[1], held[2], held[3]
+        steps = _Steps(shape, orders, slots, dtype)  # type: ignore[arg-type]
+        flat = lengths = None
+        if len(slots) > 1:
+            offsets = torch.arange(len(slots), dtype=torch.long).view(-1, 1, 1) * shape.longest
+            flat, lengths = steps._indices + offsets, steps._lengths
+        self._held_steps[key] = (orders, steps, flat, lengths)
+        return steps, flat, lengths
 
     def _key(self, plan: RoundPlan, device_round: DeviceRound) -> Any:
         """What makes two rounds the same graph: None for a round only eager runs.
