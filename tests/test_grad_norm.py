@@ -269,6 +269,42 @@ class ThePathsOfARunTest(ExecutorRuns):
                 self.assertEqual(carried, [1, 3, ROUNDS])
 
 
+class TheResidentPassGathersItsRowsOnceTest(ExecutorRuns):
+    """The resident pass gathers its chunks of rows once and reads them every round after.
+
+    Where a copy of every train row would not fit in a quarter of the free
+    memory, it gathers them each round instead, and the run is the same.
+    """
+
+    def test_kept_and_gathered_each_round(self) -> None:
+        from fedbrew.core.resident_evaluation import ResidentEvaluation
+
+        config = _clean(example_config("fed-lasso"))
+        config.setdefault("evaluation", {})["grad_norm"] = {"every": 1}
+        seen: list[Any] = []
+        real = ResidentEvaluation._grad_chunks
+
+        def recorded(evaluation: Any) -> Any:
+            seen.append(real(evaluation))
+            return seen[-1]
+
+        with mock.patch.object(ResidentEvaluation, "_grad_chunks", recorded):
+            kept = self.run_config(config, "batched")
+        self.assertEqual(_executor(kept)["rounds"], {"used": "resident"})
+        self.assertEqual(len(seen), ROUNDS)
+        self.assertIsInstance(seen[0], list)
+        self.assertTrue(all(chunks is seen[0] for chunks in seen))
+        seen.clear()
+        with (
+            mock.patch.object(ResidentEvaluation, "_grad_chunks", recorded),
+            mock.patch("fedbrew.core.resident_evaluation.free_memory", return_value=0),
+        ):
+            gathered = self.run_config(config, "batched")
+        self.assertEqual(len(seen), ROUNDS)
+        self.assertFalse(any(isinstance(chunks, list) for chunks in seen))
+        self.assertEqual(_without_timing(_rows(kept)), _without_timing(_rows(gathered)))
+
+
 class OffCostsNothingTest(ExecutorRuns):
     """Left at never, no gradient pass runs in any path and no column is written."""
 

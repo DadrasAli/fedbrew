@@ -27,7 +27,7 @@ backward per chunk at the round's mean (``fedbrew/core/grad_norm.py``).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -41,6 +41,7 @@ from fedbrew.core.batched_executor import (
     _Steps,
     finished_values,
     folded_part,
+    free_memory,
     measure_splits,
     staged_values,
     unfolded,
@@ -99,6 +100,11 @@ class ResidentEvaluation:
         #: The gradient pass's chunks, as positions into the flattened train
         #: stacks: made on its first scheduled round and kept for the run.
         self._grad_index: list[Tensor] | None = None
+        #: The gradient pass's chunks of rows, gathered on its first scheduled
+        #: round and kept for the run where a second copy of the rows fits
+        #: (decided then: ``_grad_kept``).
+        self._grad_rows: list[tuple[Tensor, ...]] | None = None
+        self._grad_kept: bool | None = None
 
     # -- the client splits ---------------------------------------------------
 
@@ -351,13 +357,38 @@ class ResidentEvaluation:
 
         from fedbrew.core.grad_norm import flat_chunk_gradient
 
+        return flat_chunk_gradient(
+            self.task, self.template, params, self.buffers, self._grad_chunks()
+        )
+
+    def _grad_chunks(self) -> Iterable[tuple[Tensor, ...]]:
+        """Each chunk's rows, gathered from the train stacks.
+
+        The stacks and the chunks are the run's, so their rows are the same
+        every round: gathered on the first round and kept, where a copy of
+        every train row fits in a quarter of the device's free memory, as the
+        rows themselves must; otherwise gathered again each round, a chunk at
+        a time.
+        """
+
+        if self._grad_rows is not None:
+            return self._grad_rows
         rows = self.rounds.rows
         stacks = [tensor.reshape(-1, *tensor.shape[2:]) for tensor in rows.tensors]
+        index = self._grad_norm_index()
         chunks = (
-            tuple(stack.index_select(0, index) for stack in stacks)
-            for index in self._grad_norm_index()
+            tuple(stack.index_select(0, positions) for stack in stacks) for positions in index
         )
-        return flat_chunk_gradient(self.task, self.template, params, self.buffers, chunks)
+        if self._grad_kept is None:
+            from fedbrew.core.resident import ROWS_FRACTION
+
+            gathered = sum(int(positions.numel()) for positions in index) * rows.row_bytes
+            free = free_memory(rows.tensors[0].device)
+            self._grad_kept = free is None or gathered <= ROWS_FRACTION * free
+        if not self._grad_kept:
+            return chunks
+        self._grad_rows = list(chunks)
+        return self._grad_rows
 
     def _grad_norm_index(self) -> list[Tensor]:
         """Each chunk's rows, as positions into the train stacks flattened to one row axis."""
