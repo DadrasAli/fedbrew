@@ -170,6 +170,28 @@ def restore_rng_state(state: Mapping[str, Any]) -> list[str]:
     return restored
 
 
+#: The environment variables MKL reads its own thread count from; torch's count
+#: (``torch.get_num_threads``) is OpenMP's, which MKL otherwise follows.
+_MKL_THREAD_VARIABLES = ("MKL_NUM_THREADS", "MKL_DOMAIN_NUM_THREADS")
+
+
+def _set_num_threads(torch: Any, count: int) -> None:
+    """``torch.set_num_threads(count)``, unless the process already runs ``count`` threads.
+
+    Under a CPU affinity narrower than the machine (``taskset``, a batch
+    scheduler's cgroup) the call starts the OpenMP and MKL pools afresh, about
+    0.8 s, even when the count it sets is the one they already have (measured
+    2026-10-03). It is skipped only where it can change nothing: torch's count
+    is already ``count`` and no variable sets MKL's own to another.
+    """
+
+    if torch.get_num_threads() == count and all(
+        os.environ.get(name, str(count)).strip() == str(count) for name in _MKL_THREAD_VARIABLES
+    ):
+        return
+    torch.set_num_threads(count)
+
+
 def configure_runtime(config: FullConfig, deterministic: bool) -> dict[str, object]:
     """Apply optional runtime performance settings and return runtime info.
 
@@ -237,7 +259,7 @@ def configure_runtime(config: FullConfig, deterministic: bool) -> dict[str, obje
     # not continue as though it had.
     torch_num_threads = performance.get("torch_num_threads")
     if torch_num_threads is not None:
-        torch.set_num_threads(int(torch_num_threads))
+        _set_num_threads(torch, int(torch_num_threads))
 
     cudnn_benchmark = config.numerics.cudnn_benchmark
     if cudnn_benchmark is not None and not bool(deterministic) and hasattr(torch.backends, "cudnn"):

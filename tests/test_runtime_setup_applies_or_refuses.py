@@ -21,6 +21,7 @@ use.
 from __future__ import annotations
 
 import builtins
+import os
 import unittest
 import warnings
 from typing import Any
@@ -148,6 +149,43 @@ class EverySettingIsAppliedTest(unittest.TestCase):
             record = configure_runtime(config, deterministic=False)
         self.assertEqual(record["cuda_probe_error"], "driver")
         self.assertEqual(record["matmul_precision"], "high")
+
+
+class TheThreadCountIsSetOnlyWhereItChangesTest(unittest.TestCase):
+    """``torch.set_num_threads`` is called unless torch's count and MKL's are already the one.
+
+    Under a narrow CPU affinity a call that changes nothing still costs ~0.8 s.
+    """
+
+    def test_called_only_where_it_can_change_something(self) -> None:
+        from fedbrew.core import runtime_setup
+
+        cases = [
+            (1, 1, {}, False),
+            (4, 1, {}, True),
+            (1, 2, {}, True),
+            (1, 1, {"MKL_NUM_THREADS": "1"}, False),
+            (1, 1, {"MKL_NUM_THREADS": " 1 "}, False),
+            (1, 1, {"MKL_NUM_THREADS": "4"}, True),
+            (1, 1, {"MKL_DOMAIN_NUM_THREADS": "MKL_DOMAIN_ALL=1"}, True),
+        ]
+        others = {
+            name: value
+            for name, value in os.environ.items()
+            if name not in ("MKL_NUM_THREADS", "MKL_DOMAIN_NUM_THREADS")
+        }
+        for current, requested, environment, called in cases:
+            with (
+                self.subTest(current=current, requested=requested, environment=environment),
+                mock.patch.dict(os.environ, {**others, **environment}, clear=True),
+                mock.patch.object(torch, "get_num_threads", return_value=current),
+                mock.patch.object(torch, "set_num_threads") as setter,
+            ):
+                runtime_setup._set_num_threads(torch, requested)
+                if called:
+                    setter.assert_called_once_with(requested)
+                else:
+                    setter.assert_not_called()
 
 
 class TheAutoFallbackSaysWhyTest(unittest.TestCase):
