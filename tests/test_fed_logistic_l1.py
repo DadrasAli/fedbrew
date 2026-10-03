@@ -720,6 +720,87 @@ class ThePostFitPassTakesTheStackedEvalTest(ExecutorRuns):
                     self.assertTrue(all(row["fit_loss"] for row in csv.DictReader(handle)))
 
 
+class TheStackedMetricsAreComputeMetricsTest(unittest.TestCase):
+    """``stacked_metrics`` folds each split as ``compute_metrics`` does, bit for bit, on the device.
+
+    Splits of no, one and several positions; a split whose totals are all 0
+    (the plain mean); NaN and huge values in padding positions, which must not
+    reach a split; and values whose sum rounds differently in another order.
+    """
+
+    def test_ragged_splits(self) -> None:
+        generator = torch.Generator().manual_seed(3)
+        for loss, penalty in problem.PROBLEMS:
+            task = _small_task(loss, penalty)
+            names = list(task._names)
+            counts = [0, 1, 4, 2, 3, 4]
+            positions = max(counts)
+            outputs = []
+            for position in range(positions):
+                output = {
+                    name: torch.randn(len(counts), generator=generator, dtype=torch.float64)
+                    * 10.0 ** float(position)
+                    for name in names
+                }
+                output["total"] = torch.tensor([7.0, 3.0, 5.0, 0.0, 1.0, 2.0], dtype=torch.float64)
+                for split, count in enumerate(counts):
+                    if position >= count:
+                        for name in names:
+                            output[name][split] = float("nan")
+                        output["total"][split] = 1e300
+                outputs.append(output)
+            with self.subTest(problem=f"{loss}+{penalty}"):
+                metrics, examples = task.stacked_metrics(outputs, counts)
+                self.assertEqual(list(metrics), names)
+                for split, count in enumerate(counts):
+                    records = [
+                        {key: float(value[split]) for key, value in outputs[p].items()}
+                        for p in range(count)
+                    ]
+                    expected = task.compute_metrics(records)
+                    for name in names:
+                        self.assertEqual(float(metrics[name][split]), expected[name], (split, name))
+                    total = sum(float(outputs[p]["total"][split]) for p in range(count))
+                    self.assertEqual(float(examples[split]), total)
+
+    def test_the_host_sums_left_to_right(self) -> None:
+        values = [1e16, 1.0, -1e16, 3.0, 0.1, 0.2]
+        expected = 0
+        for value in values:
+            expected = expected + value
+        self.assertEqual(problem._left_to_right(values), expected)
+
+
+class ThePostFitMetricsAreFoldedTest(ExecutorRuns):
+    """A resident run folds its post-fit metrics on the device; the rows are the per-client path's.
+
+    Four post-fit batches a client (16 rows, eval batches of 4), so the sums are
+    taken over several positions.
+    """
+
+    def test_each_problem(self) -> None:
+        for loss, penalty in problem.PROBLEMS:
+            with self.subTest(problem=f"{loss}+{penalty}"):
+                config = small_config(loss, penalty)
+                config["schedule"]["rounds"] = 3
+                config["client"]["eval_batch_size"] = 4
+                config["evaluation"]["fit"] = {"every": 1}
+                folds = mock.Mock(wraps=_run_task_class().stacked_metrics)
+
+                def folded(task: Any, *args: Any, _folds: Any = folds) -> Any:
+                    return _folds(task, *args)
+
+                task_class = _run_task_class()
+                with mock.patch.object(task_class, "stacked_metrics", folded):
+                    stacked = self.run_config(config, "batched", gradient_form="closed_form")
+                with mock.patch.object(task_class, "stacked_metrics", None):
+                    per_client = self.run_config(config, "batched", gradient_form="closed_form")
+                self.assertGreater(folds.call_count, 0)
+                self.assertTrue(any(max(call.args[2]) == 4 for call in folds.call_args_list))
+                for name in CSVS:
+                    self.assertEqual(_untimed(stacked / name), _untimed(per_client / name), name)
+
+
 def _run_task_class() -> Any:
     """The task class a run builds: the extension as ``load_extensions`` imports it.
 

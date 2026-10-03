@@ -113,6 +113,7 @@ from typing import Any
 import torch
 from torch import Tensor, nn, optim
 
+from fedbrew.core.torch_utils import uploaded
 from fedbrew.data.manifest_validation import IDENTICAL_TO_TRAIN
 from fedbrew.data.writers.manifest import save_clients_jsonl, save_manifest
 from fedbrew.data.writers.torch_shards import (
@@ -339,6 +340,19 @@ PENALTIES: dict[str, tuple[Callable[[Tensor, float], Tensor], Callable[..., Tens
     "l2sq": (_l2sq, _l2sq_gradient, True, 1.0),
     "nonconvex": (_nonconvex, _nonconvex_gradient, False, 2.0),
 }
+
+
+def _left_to_right(values: Sequence[float]) -> float:
+    """``values`` added in order from 0, one rounding an addition: ``sum``'s way before 3.12.
+
+    Python 3.12's ``sum`` of floats compensates; the metrics are this sum on
+    every version, as ``stacked_metrics`` folds them on the device.
+    """
+
+    total: float = 0
+    for value in values:
+        total = total + value
+    return total
 
 
 def _stacked_nonconvex(x: Tensor, lam: float) -> Tensor:
@@ -2165,15 +2179,52 @@ class FedLogisticL1Task(TaskAdapter):
             return dict.fromkeys(names, 0.0)
 
         weights = [float(record.get("total", 0.0)) for record in records]
-        total = sum(weights)
+        total = _left_to_right(weights)
 
         def pooled(name: str) -> float:
             values = [float(record.get(name, 0.0)) for record in records]
             if total:
-                return sum(v * w for v, w in zip(values, weights, strict=True)) / total
-            return sum(values) / len(values)
+                return _left_to_right([v * w for v, w in zip(values, weights, strict=True)]) / total
+            return _left_to_right(values) / len(values)
 
         return {name: pooled(name) for name in names}
+
+    def stacked_metrics(
+        self, outputs: Sequence[Mapping[str, Tensor]], counts: Sequence[int]
+    ) -> tuple[dict[str, Tensor], Tensor]:
+        """``compute_metrics`` of many splits' eval outputs at once, and their example counts.
+
+        ``outputs[p][key]`` holds position ``p``'s value for every split, of
+        which split ``k`` has ``counts[k]`` (``BatchableTask``). Each split's
+        sums are ``compute_metrics``' own: taken position by position, in
+        order, from 0, a padding position skipped rather than added -- so the
+        same floats, on the device.
+        """
+
+        device = outputs[0]["total"].device
+        splits = len(counts)
+        held = uploaded(torch.tensor(list(counts)), device)
+        real = [position < held for position in range(len(outputs))]
+        weights = [output["total"].to(torch.float64) for output in outputs]
+        zero = torch.zeros(splits, dtype=torch.float64, device=device)
+        total = zero
+        for position, weight in enumerate(weights):
+            total = torch.where(real[position], total + weight, total)
+        counted = total != 0.0
+        batches = held.to(torch.float64)
+        empty = held == 0
+        metrics = {}
+        for name in self._names:
+            weighted = plain = zero
+            for position, output in enumerate(outputs):
+                value = output[name].to(torch.float64)
+                weighted = torch.where(
+                    real[position], weighted + value * weights[position], weighted
+                )
+                plain = torch.where(real[position], plain + value, plain)
+            pooled = torch.where(counted, weighted / total, plain / batches)
+            metrics[name] = torch.where(empty, 0.0, pooled)
+        return metrics, total
 
     # -- the server's central pass -----------------------------------------
 
