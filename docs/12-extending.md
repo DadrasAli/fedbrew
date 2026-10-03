@@ -628,7 +628,9 @@ config `evaluate_model` cuts the rows with, `central_terms(model, params)`,
 those values as tensors, and `central_metrics(outputs, terms)`, the columns
 made of both; `evaluate_model` is then `evaluate_in_parts(self, model, data)`,
 and a resident round measures the pass on its device as it does the
-classification task's (chapter 11 §9.1).
+classification task's (chapter 11 §9.1). A pass with no such values declares
+it too, its terms empty and its metrics `compute_metrics` of the steps, as
+heterogeneous-quadratic does.
 
 Implement `BatchableTask` (`fedbrew/tasks/base.py`) as well if its runs should
 take the batched executor, every batchable run's default; without it they run

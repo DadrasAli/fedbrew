@@ -304,5 +304,49 @@ class BatchedAgainstSequentialTest(_Runs):
                         self.assertLess(abs(a - b) / scale, 1e-12, f"{arm} {key}")
 
 
+class TheCentralPassIsMeasuredWhereTheRoundTrainsTest(_Runs):
+    """The central pass in parts (``CentralPassInParts``): a resident run measures it on its device.
+
+    The eval steps over every row in one batch and ``compute_metrics`` of
+    them: every column a resident run writes so is the one the host's
+    ``evaluate_model`` writes at the flush, bit for bit.
+    """
+
+    def test_fedavg_and_scaffold(self) -> None:
+        import json
+        from unittest import mock
+
+        from fedbrew.core import resident_evaluation
+        from fedbrew.tasks.base import CentralPassInParts
+
+        manifest = self.data(20.0)
+        real = resident_evaluation._central_rows
+        for arm in ("fedavg_k10", "scaffold_k10"):
+            with self.subTest(arm=arm):
+                taken: list[Any] = []
+
+                def recorded(rounds: Any, _taken: list[Any] = taken) -> Any:
+                    _taken.append(real(rounds))
+                    return _taken[-1]
+
+                with mock.patch.object(resident_evaluation, "_central_rows", recorded):
+                    device = self.run_arm(arm, manifest, "batched", schedule__rounds=12)
+                with mock.patch.object(resident_evaluation, "_central_rows", lambda rounds: None):
+                    host = self.run_arm(arm, manifest, "batched", schedule__rounds=12)
+                self.assertTrue(taken and taken[0] is not None and taken[0].in_parts)
+                self.assertIsInstance(taken[0], resident_evaluation._Central)
+                outputs = sorted(self.root.iterdir())
+                for output in (path for path in outputs if (path / "run.json").exists()):
+                    record = json.loads((output / "run.json").read_text())["reproducibility"]
+                    self.assertEqual(record["executor"]["rounds"], {"used": "resident"})
+                self.assertEqual(
+                    [{k: v for k, v in row.items() if not k.endswith("_sec")} for row in device],
+                    [{k: v for k, v in row.items() if not k.endswith("_sec")} for row in host],
+                )
+                self.assertTrue(any(row["central_test_loss"] for row in device))
+        task = problem.HeterogeneousQuadraticTask.__new__(problem.HeterogeneousQuadraticTask)
+        self.assertIsInstance(task, CentralPassInParts)
+
+
 if __name__ == "__main__":
     unittest.main()

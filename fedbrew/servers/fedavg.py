@@ -653,6 +653,23 @@ def _participation(
     return rate, probability
 
 
+def central_pass_is_the_tasks(server: Any) -> bool:
+    """Whether ``server.evaluate_global`` is the task's ``evaluate_model`` at the server's model.
+
+    FedAvg's and SCAFFOLD's are: the server's state loaded into the model, the
+    task's own pass over the global rows, its names prefixed ``global_``. A
+    pass that reads only that much can be measured from the task's parts
+    where the round's model is (the resident round's central pass, and the
+    fused pass of F and its gradient); a server with its own reads the rows
+    its own way.
+    """
+
+    from fedbrew.servers.scaffold import ScaffoldServer
+
+    method = getattr(type(server), "evaluate_global", None)
+    return method is FedAvgServer.evaluate_global or method is ScaffoldServer.evaluate_global
+
+
 def sampled_client_ids(
     client_ids: Sequence[str],
     seed: int,

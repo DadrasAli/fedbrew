@@ -454,9 +454,10 @@ def _evaluation_split(data: Any, split: str) -> Any:
 def _central_rows(rounds: Any) -> _Central | None:
     """The global test rows on the device, where the central pass can be measured there; else None.
 
-    Where the server evaluates with FedAvg's ``evaluate_global`` and the task's
-    ``evaluate_model`` is either the classification task's -- ``eval_step``
-    over the global rows in order, in batches of the task's
+    Where the server's ``evaluate_global`` is the task's ``evaluate_model``
+    (``central_pass_is_the_tasks``: FedAvg's and SCAFFOLD's), and that is
+    either the classification task's -- ``eval_step`` over the global rows in
+    order, in batches of the task's
     ``eval_batch_size``, and ``compute_metrics`` of the steps -- or a
     ``CentralPassInParts`` task's whose loader neither shuffles nor drops a
     batch: ``eval_step`` over the rows in order, in the batches its
@@ -464,7 +465,7 @@ def _central_rows(rounds: Any) -> _Central | None:
     """
 
     from fedbrew.core.batched_evaluator import BatchedEvaluator
-    from fedbrew.servers.fedavg import FedAvgServer
+    from fedbrew.servers.fedavg import central_pass_is_the_tasks
     from fedbrew.tasks.base import CentralPassInParts
     from fedbrew.tasks.classification.torch_classification import TorchClassificationTask
 
@@ -475,7 +476,7 @@ def _central_rows(rounds: Any) -> _Central | None:
     )
     if not (classification or in_parts):
         return None
-    if type(server).evaluate_global is not FedAvgServer.evaluate_global:
+    if not central_pass_is_the_tasks(server):
         return None
     if type(rounds.context.evaluator).evaluate_central is not BatchedEvaluator.evaluate_central:
         return None

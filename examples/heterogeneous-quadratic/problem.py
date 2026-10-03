@@ -95,6 +95,7 @@ from fedbrew.models.config_keys import reject_unknown_model_keys
 from fedbrew.tasks.base import (
     LoaderOrder,
     TaskAdapter,
+    evaluate_in_parts,
     listed_loader_order,
     row_count,
     row_mean,
@@ -1193,11 +1194,35 @@ class HeterogeneousQuadraticTask(TaskAdapter):
         return {name: pooled(name) for name in names}
 
     def evaluate_model(self, model: IterateModel, data: Any) -> dict[str, float]:
-        """Every client's rows at once: loss is F(x), since each client's noise sums to zero."""
+        """Every client's rows at once: loss is F(x), since each client's noise sums to zero.
 
-        return self.compute_metrics(
-            [self.eval_step(model, batch) for batch in self.build_dataloader(data, None)]
-        )
+        In parts (``CentralPassInParts``): the eval steps over the rows in one
+        batch, no terms of the model alone, and ``compute_metrics`` of the
+        steps -- which a resident round measures on its device.
+        """
+
+        return evaluate_in_parts(self, model, data)
+
+    def central_loader_config(self) -> Mapping[str, Any] | None:
+        """No config: the rows in order, in one batch."""
+
+        return None
+
+    def central_terms(
+        self, model: IterateModel, params: Mapping[str, Tensor] | None
+    ) -> dict[str, Tensor]:
+        """None: every central metric is the steps' (``functional_eval``)."""
+
+        del model, params
+        return {}
+
+    def central_metrics(
+        self, outputs: Sequence[Mapping[str, float]], terms: Mapping[str, float]
+    ) -> dict[str, float]:
+        """``compute_metrics`` of the eval steps' outputs."""
+
+        del terms
+        return self.compute_metrics(outputs)
 
     def count_examples(self, data: Any) -> int:
         return len(_rows_of(data)[1])

@@ -653,10 +653,12 @@ computes, bit for bit on the same device:
   for the run, `measure_splits` and the task's folding as that evaluator runs
   them (`fedbrew/core/resident_evaluation.py`). The central pass runs
   `functional_eval` over the global test rows in `evaluate_model`'s batches,
-  where the task's `evaluate_model` is the classification task's, or is a
-  `CentralPassInParts` task's (`fedbrew/tasks/base.py`) -- its steps, and its
-  terms of the model alone measured beside them, as fed-logistic-l1's pooled
-  objective is. Both are staged with the round's other values and read back
+  where the server's `evaluate_global` is the task's `evaluate_model` (FedAvg's
+  and SCAFFOLD's, `central_pass_is_the_tasks`) and that is the classification
+  task's, or is a `CentralPassInParts` task's (`fedbrew/tasks/base.py`) -- its
+  steps, and its terms of the model alone measured beside them, as
+  fed-logistic-l1's pooled objective is; heterogeneous-quadratic's has steps
+  alone. Both are staged with the round's other values and read back
   in its one copy; the flush builds each client's `EvalResult` with its
   rule's `batched_evaluation_result`, and the central metrics with the task's
   `compute_metrics` -- or its `central_metrics` of the steps and the terms --
