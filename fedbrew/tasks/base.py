@@ -165,6 +165,49 @@ class BatchableTask(Protocol):
         """What ``eval_step`` returns for the batch, key for key, as tensors."""
 
 
+@runtime_checkable
+class CentralPassInParts(Protocol):
+    """A task whose central pass is made of parts a resident round can measure on its device.
+
+    Optional, beside :class:`BatchableTask`, whose ``functional_eval`` and
+    ``loader_order`` it reads. Its ``evaluate_model(model, data)`` is
+    :func:`evaluate_in_parts`: ``eval_step`` over ``data`` as
+    ``build_dataloader(data, central_loader_config())`` yields it, the
+    ``central_terms`` of the model alone, and ``central_metrics`` of the
+    steps' outputs and the terms, every value read as a float. A resident
+    round measures the same parts where it trains -- the steps with
+    ``functional_eval`` on the global rows cut as ``loader_order`` declares,
+    the terms at the round's model -- reads them back with its other values,
+    and calls the same ``central_metrics`` at the flush: the same operations
+    on the same numbers, so the same floats. Only a loader that neither
+    shuffles nor drops a batch is measured there; any other runs as
+    ``evaluate_model``, at the flush.
+    """
+
+    def central_loader_config(self) -> Mapping[str, Any] | None:
+        """The loader config ``evaluate_model`` cuts the global rows with."""
+
+    def central_terms(
+        self, model: nn.Module, params: Mapping[str, Tensor] | None
+    ) -> dict[str, Tensor]:
+        """The pass's values of the model alone, as 0-d tensors: at ``params``, or its own."""
+
+    def central_metrics(
+        self, outputs: Sequence[Mapping[str, float]], terms: Mapping[str, float]
+    ) -> dict[str, float]:
+        """What ``evaluate_model`` returns, from the steps' ``eval_step`` outputs and the terms."""
+
+
+def evaluate_in_parts(task: Any, model: Any, data: Any) -> dict[str, float]:
+    """``evaluate_model`` of a :class:`CentralPassInParts` task, from its parts, on the host."""
+
+    loader = task.build_dataloader(data, task.central_loader_config())
+    outputs = [task.eval_step(model, batch) for batch in loader]
+    with torch.no_grad():
+        terms = {name: float(value) for name, value in task.central_terms(model, None).items()}
+    return task.central_metrics(outputs, terms)
+
+
 @dataclass(frozen=True, slots=True)
 class LoaderOrder:
     """What a task's loader yields for a split, declared so it can be computed without it.

@@ -621,7 +621,14 @@ whole dataset the caller already holds — and it is the optional capability
 so a task that omits it produces **no `central_test_*` column at all** and
 nothing in the run says why. Both shipped tasks implement it in three lines:
 build an eval dataloader, `eval_step` each batch, `compute_metrics` the
-outputs.
+outputs. A batchable task whose central pass adds values of the model alone
+-- fed-logistic-l1's optimality gap, from the pooled objective -- can declare
+it in parts (`CentralPassInParts`): `central_loader_config()`, the loader
+config `evaluate_model` cuts the rows with, `central_terms(model, params)`,
+those values as tensors, and `central_metrics(outputs, terms)`, the columns
+made of both; `evaluate_model` is then `evaluate_in_parts(self, model, data)`,
+and a resident round measures the pass on its device as it does the
+classification task's (chapter 11 §9.1).
 
 Implement `BatchableTask` (`fedbrew/tasks/base.py`) as well if its runs should
 take the batched executor, every batchable run's default; without it they run

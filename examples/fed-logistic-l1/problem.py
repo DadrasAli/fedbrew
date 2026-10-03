@@ -126,6 +126,7 @@ from fedbrew.tasks.base import (
     ReportedMetrics,
     TaskAdapter,
     batch_row_numbers,
+    evaluate_in_parts,
     listed_loader_order,
     row_count,
     row_mean,
@@ -2111,15 +2112,45 @@ class FedLogisticL1Task(TaskAdapter):
 
         Returned keys arrive as ``central_test_<name>``. ``optimality_gap`` is
         measured here and only here: `F(x)` is the same number for every
-        client and batch.
+        client and batch. In parts (``CentralPassInParts``): the eval steps
+        over the rows in one batch, the pooled objective's two terms, and the
+        metrics made of both -- which a resident round measures on its device.
         """
 
-        outputs = [self.eval_step(model, batch) for batch in self.build_dataloader(data, None)]
+        return evaluate_in_parts(self, model, data)
+
+    def central_loader_config(self) -> Mapping[str, Any] | None:
+        """No config: the rows in order, in one batch."""
+
+        return None
+
+    def central_terms(
+        self, model: LogisticModel, params: Mapping[str, Tensor] | None
+    ) -> dict[str, Tensor]:
+        """The pooled objective's loss and penalty at the iterate, where `F*` is known.
+
+        :meth:`pooled_objective`'s two terms, which ``central_metrics`` adds as
+        floats, as it does.
+        """
+
+        if self._optimal_objective is None:
+            return {}
+        x = (model.x if params is None else params["x"]).detach()
+        spec = self.spec
+        return {
+            "objective_loss": mean_loss(self._pooled_features @ x, self._pooled_labels, spec.loss),
+            "objective_penalty": penalty_value(x, spec.penalty_strength, spec.penalty),
+        }
+
+    def central_metrics(
+        self, outputs: Sequence[Mapping[str, float]], terms: Mapping[str, float]
+    ) -> dict[str, float]:
+        """The central columns, from the eval steps' outputs and the pooled objective's terms."""
+
         measured = self.compute_metrics(outputs)
         if self._optimal_objective is not None:
-            measured["optimality_gap"] = (
-                self.pooled_objective(model.iterate) - self._optimal_objective
-            )
+            objective = terms["objective_loss"] + terms["objective_penalty"]
+            measured["optimality_gap"] = objective - self._optimal_objective
         return {name: measured[name] for name in self._central_names}
 
     # -- narrowing a split to given positions --------------------------------

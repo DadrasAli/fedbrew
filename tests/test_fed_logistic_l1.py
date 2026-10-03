@@ -34,6 +34,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import torch
 import yaml
@@ -597,6 +598,60 @@ class OneRoundBatchedAgreesTest(ExecutorRuns):
             expected = problem.gradient(x, features, labels, 0.03, loss, penalty)
         squared = float(expected.square().sum())
         self.assertLessEqual(abs(measured - squared), 1e-12 * squared)
+
+
+class TheCentralPassIsMeasuredWhereTheRoundTrainsTest(ExecutorRuns):
+    """The task's central pass in parts: a resident run measures it on its device.
+
+    ``CentralPassInParts``: the eval steps over every row, the pooled
+    objective's terms where F* is certified, and the columns made of both.
+    Every column a resident run writes so is the one the host's
+    ``evaluate_model`` writes at the flush, bit for bit, for every problem.
+    """
+
+    def test_each_problem(self) -> None:
+        from fedbrew.core import resident_evaluation
+        from fedbrew.tasks.base import CentralPassInParts
+
+        real = resident_evaluation._central_rows
+        for loss, penalty in problem.PROBLEMS:
+            with self.subTest(problem=f"{loss}+{penalty}"):
+                self.assertIsInstance(_small_task(loss, penalty), CentralPassInParts)
+                config = small_config(loss, penalty)
+                config["schedule"]["rounds"] = 4
+                config["evaluation"]["central_test"] = {"every": 1}
+                taken: list[Any] = []
+
+                def recorded(rounds: Any, _taken: list[Any] = taken) -> Any:
+                    _taken.append(real(rounds))
+                    return _taken[-1]
+
+                with mock.patch.object(resident_evaluation, "_central_rows", recorded):
+                    device = self.run_config(config, "batched")
+                with mock.patch.object(resident_evaluation, "_central_rows", lambda rounds: None):
+                    host = self.run_config(config, "batched")
+                self.assertTrue(taken and taken[0] is not None and taken[0].in_parts)
+                for output in (device, host):
+                    record = json.loads((output / "run.json").read_text())["reproducibility"]
+                    self.assertEqual(record["executor"]["rounds"], {"used": "resident"})
+                for name in CSVS:
+                    self.assertEqual(_untimed(device / name), _untimed(host / name), name)
+                with (device / "round_metrics.csv").open(encoding="utf-8") as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertEqual(
+                    "central_test_optimality_gap" in rows[0], problem.convex(loss, penalty)
+                )
+                self.assertTrue(all(row["central_test_loss"] for row in rows))
+
+
+def _untimed(path: Path) -> list[dict[str, str]] | None:
+    if not path.exists():
+        return None
+    with path.open(encoding="utf-8") as handle:
+        return [
+            {key: value for key, value in row.items() if not key.endswith("_sec")}
+            for row in csv.DictReader(handle)
+        ]
 
 
 if __name__ == "__main__":

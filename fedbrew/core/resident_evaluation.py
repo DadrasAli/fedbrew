@@ -79,6 +79,21 @@ class CentralStage:
     staged: Tensor | None
 
 
+@dataclass(slots=True)
+class _Central:
+    """The global rows a central pass measured on the device reads, and how it cuts them.
+
+    ``in_parts``: the task's pass is ``CentralPassInParts``' -- its terms are
+    measured beside the steps and its metrics made by ``central_metrics``; else
+    the classification task's, ``compute_metrics`` of the steps.
+    """
+
+    features: Tensor
+    targets: Tensor
+    batch_size: int
+    in_parts: bool
+
+
 class ResidentEvaluation:
     """Measures a resident round's due splits and central pass at the round's mean."""
 
@@ -335,10 +350,10 @@ class ResidentEvaluation:
     def enqueue_central(self, params: dict[str, Tensor]) -> CentralStage | None:
         """``evaluate_model``'s eval steps over the global rows at ``params``; None if not here."""
 
-        if self.central is None:
+        central = self.central
+        if central is None:
             return None
-        features, targets = self.central
-        size = self.task.eval_batch_size
+        features, targets, size = central.features, central.targets, central.batch_size
         outputs = []
         self.template.eval()
         with torch.no_grad():
@@ -347,7 +362,10 @@ class ResidentEvaluation:
                 outputs.append(
                     self.task.functional_eval(self.template, params, self.buffers, batch, None)
                 )
-        staged, layout = staged_values([(outputs, [len(outputs)])], [])
+            parts = [(outputs, [len(outputs)])]
+            if central.in_parts:
+                parts.append(([self.task.central_terms(self.template, params)], [1]))
+        staged, layout = staged_values(parts, [])
         return CentralStage(layout, staged)
 
     # -- the gradient of the global objective ----------------------------------
@@ -420,7 +438,10 @@ class ResidentEvaluation:
 
         groups, _ = finished_values(values, stage.layout)
         outputs = groups[0][0] if groups and groups[0] else []
-        metrics = self.task.compute_metrics(outputs)
+        if self.central is not None and self.central.in_parts:
+            metrics = self.task.central_metrics(outputs, groups[1][0][0])
+        else:
+            metrics = self.task.compute_metrics(outputs)
         return _central_test_metrics({f"global_{name}": value for name, value in metrics.items()})
 
 
@@ -430,21 +451,29 @@ def _evaluation_split(data: Any, split: str) -> Any:
     return _get_evaluation_split(data, split)
 
 
-def _central_rows(rounds: Any) -> tuple[Tensor, Tensor] | None:
+def _central_rows(rounds: Any) -> _Central | None:
     """The global test rows on the device, where the central pass can be measured there; else None.
 
-    Where the task's ``evaluate_model`` is the classification task's and the
-    server evaluates with FedAvg's ``evaluate_global``: then the pass is
-    ``eval_step`` over the global rows in order, in batches of the task's
-    ``eval_batch_size``, and ``compute_metrics`` of the steps.
+    Where the server evaluates with FedAvg's ``evaluate_global`` and the task's
+    ``evaluate_model`` is either the classification task's -- ``eval_step``
+    over the global rows in order, in batches of the task's
+    ``eval_batch_size``, and ``compute_metrics`` of the steps -- or a
+    ``CentralPassInParts`` task's whose loader neither shuffles nor drops a
+    batch: ``eval_step`` over the rows in order, in the batches its
+    ``loader_order`` declares, and its terms.
     """
 
     from fedbrew.core.batched_evaluator import BatchedEvaluator
     from fedbrew.servers.fedavg import FedAvgServer
+    from fedbrew.tasks.base import CentralPassInParts
     from fedbrew.tasks.classification.torch_classification import TorchClassificationTask
 
     task, server = rounds.task, rounds.context.server
-    if type(task).evaluate_model is not TorchClassificationTask.evaluate_model:
+    classification = type(task).evaluate_model is TorchClassificationTask.evaluate_model
+    in_parts = isinstance(task, CentralPassInParts) and callable(
+        getattr(task, "loader_order", None)
+    )
+    if not (classification or in_parts):
         return None
     if type(server).evaluate_global is not FedAvgServer.evaluate_global:
         return None
@@ -457,4 +486,9 @@ def _central_rows(rounds: Any) -> tuple[Tensor, Tensor] | None:
     if data is None:
         return None
     features, targets = task.split_rows(data)
-    return features, targets
+    if classification:
+        return _Central(features, targets, int(task.eval_batch_size), False)
+    order = task.loader_order(data, task.central_loader_config())
+    if order.shuffle or order.replacement or order.drop_last:
+        return None
+    return _Central(features, targets, int(order.batch_size), True)
