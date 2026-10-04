@@ -666,7 +666,14 @@ computes, bit for bit on the same device:
   task's, or is a `CentralPassInParts` task's (`fedbrew/tasks/base.py`) -- its
   steps, and its terms of the model alone measured beside them, as
   fed-logistic-l1's pooled objective is; heterogeneous-quadratic's has steps
-  alone. On a round that measures `grad_norm_sq` too, where that pass is F --
+  alone. Where the global rows are every client's train rows in order,
+  unpadded, the pass reads the stack the round trains on rather than a copy
+  of its own (`ResidentRounds._share_central`, compared once at set-up): the
+  stacked rows themselves, or, where the steps take the closed form, the
+  prepared stack through the task's `closed_form_central`, steps and terms
+  from one set of rows (Figure 1's convex runs read three copies of the
+  rows a round before, the training stack, the pass's rows and the gap's,
+  where the AdaFed code reads one). On a round that measures `grad_norm_sq` too, where that pass is F --
   its rows every client's train rows -- the gradient is taken through it, one
   pass for both (`FusedPass`, `evaluation.grad_norm.fused`, chapter 08 §6.1),
   in the task's closed form where it gives one (`closed_form_eval`,

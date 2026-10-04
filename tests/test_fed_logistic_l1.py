@@ -956,6 +956,87 @@ class TheFusedPassReadsTheTrainingRowsTest(ExecutorRuns):
                 )
 
 
+class TheCentralPassReadsTheTrainingRowsTest(ExecutorRuns):
+    """A resident run's central pass reads the stack the round trains on, and writes the same.
+
+    In closed form the task's ``closed_form_central`` measures the steps and
+    the gap's terms from the prepared stack (``ResidentRounds._share_central``);
+    through autograd the pass reads the stacked rows themselves. Either way,
+    for every problem, with the central pass every round and no
+    ``grad_norm_sq``, the run writes what it writes reading the pass's own rows.
+    """
+
+    def test_each_problem_and_form(self) -> None:
+        from fedbrew.core.resident import ResidentRounds
+
+        real = ResidentRounds._share_central
+        for loss, penalty in problem.PROBLEMS:
+            for form in ("closed_form", "autograd"):
+                with self.subTest(problem=f"{loss}+{penalty}", form=form):
+                    config = small_config(loss, penalty)
+                    config["schedule"]["rounds"] = 3
+                    config["evaluation"]["central_test"] = {"every": 1}
+                    runs, shared = {}, {}
+                    for sharing in (True, False):
+                        seen: list[bool] = []
+
+                        def recording(rounds: Any, _seen: list[bool] = seen) -> bool:
+                            _seen.append(real(rounds))
+                            return _seen[-1]
+
+                        declined = mock.patch.object(
+                            ResidentRounds, "_share_central", return_value=False
+                        )
+                        recorded = mock.patch.object(ResidentRounds, "_share_central", recording)
+                        with recorded if sharing else declined:
+                            runs[sharing] = self.run_config(config, "batched", gradient_form=form)
+                        shared[sharing] = seen
+                    self.assertEqual(shared[True], [True])
+                    for name in CSVS:
+                        self.assertEqual(
+                            _untimed(runs[True] / name), _untimed(runs[False] / name), name
+                        )
+
+
+class TheCentralPassInClosedFormTest(unittest.TestCase):
+    """``closed_form_central``: ``functional_eval``'s outputs and ``central_terms``' bit for bit.
+
+    For every problem, at iterates with exact zeros, over the task's pooled
+    rows prepared as ``closed_form_batch`` prepares them: one step's outputs,
+    the step over every row, and the gap's two terms where the optimum is
+    certified (none elsewhere), each the same tensor.
+    """
+
+    def test_every_problem(self) -> None:
+        from fedbrew.tasks.base import closed_form_batch
+
+        generator = torch.Generator().manual_seed(19)
+        with_terms = 0
+        for loss, penalty in problem.PROBLEMS:
+            task = _small_task(loss, penalty)
+            model = problem.LogisticModel(8, 0.03, loss=loss, penalty=penalty)
+            rows = (task._pooled_features, task._pooled_labels)
+            batch = closed_form_batch(task, model, rows)
+            for _ in range(3):
+                with self.subTest(problem=f"{loss}+{penalty}"):
+                    x = torch.randn(8, generator=generator, dtype=torch.float64)
+                    x[:2] = 0.0
+                    with torch.no_grad():
+                        outputs, terms = task.closed_form_central(model, {"x": x}, {}, batch)
+                        expected = task.functional_eval(model, {"x": x}, {}, rows, None)
+                        expected_terms = task.central_terms(model, {"x": x})
+                    self.assertEqual(len(outputs), 1)
+                    self.assertEqual(list(outputs[0]), list(expected))
+                    for key, value in expected.items():
+                        self.assertTrue(torch.equal(outputs[0][key], value), key)
+                    with_terms += bool(expected_terms)
+                    self.assertEqual(list(terms), list(expected_terms))
+                    for key, value in expected_terms.items():
+                        self.assertTrue(torch.equal(terms[key], value), key)
+        # The convex problems' optima are certified: their gap's terms are held too.
+        self.assertGreater(with_terms, 0)
+
+
 class FAndItsGradientInClosedFormTest(unittest.TestCase):
     """``closed_form_eval``: ``functional_eval``'s outputs and autograd's gradient, in closed form.
 

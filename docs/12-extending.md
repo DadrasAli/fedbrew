@@ -641,7 +641,16 @@ made of both; `evaluate_model` is then `evaluate_in_parts(self, model, data)`,
 and a resident round measures the pass on its device as it does the
 classification task's (chapter 11 §9.1). A pass with no such values declares
 it too, its terms empty and its metrics `compute_metrics` of the steps, as
-heterogeneous-quadratic does.
+heterogeneous-quadratic does. A task with a closed form may also give
+`closed_form_central(model, params, buffers, batch)`: the steps' outputs and
+the terms from every global row in one batch prepared as `closed_form_batch`
+prepares it, `functional_eval`'s and `central_terms`' bit for bit where those
+rows are the ones `central_terms` reads. A resident round that trains in
+closed form on rows that are the global rows in order then measures its
+central pass from the stack it trains on (chapter 11 §9.1), one copy of the
+rows read where there were three; fed-logistic-l1 takes its margins once there
+and both the step's loss and the gap's loss term from them, and its test holds
+both to the parts bit for bit.
 
 Implement `BatchableTask` (`fedbrew/tasks/base.py`) as well if its runs should
 take the batched executor, every batchable run's default; without it they run

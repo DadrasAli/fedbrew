@@ -209,6 +209,15 @@ class CentralPassInParts(Protocol):
     on the same numbers, so the same floats. Only a loader that neither
     shuffles nor drops a batch is measured there; any other runs as
     ``evaluate_model``, at the flush.
+
+    A task with a closed form may give ``closed_form_central(model, params,
+    buffers, batch)`` too: the steps' outputs and the terms at ``params``
+    from every global row in one batch prepared as ``closed_form_batch``
+    prepares it -- ``functional_eval``'s and ``central_terms``' bit for bit
+    where those rows are the ones ``central_terms`` reads. A resident round
+    that trains in closed form on every client's rows, which are the global
+    rows in order, then measures its central pass from the stack it trains
+    on, one copy of the rows for both.
     """
 
     def central_loader_config(self) -> Mapping[str, Any] | None:

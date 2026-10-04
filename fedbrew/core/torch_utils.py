@@ -313,6 +313,24 @@ _PROMOTED_ACCUMULATION_DTYPES: dict[torch.dtype, torch.dtype] = {
 }
 
 
+def same_tensors(ours: Sequence[Tensor], theirs: Sequence[Tensor]) -> bool:
+    """Whether two tuples of tensors hold the same rows laid out the same way.
+
+    The same count, and each pair the same shape, dtype, device and strides,
+    and equal: a kernel reads either the same way, so whatever it computes
+    from one it computes from the other.
+    """
+
+    if len(ours) != len(theirs):
+        return False
+    for a, b in zip(ours, theirs, strict=True):
+        if (a.shape, a.dtype, a.device) != (b.shape, b.dtype, b.device):
+            return False
+        if a.stride() != b.stride() or not torch.equal(a, b):
+            return False
+    return True
+
+
 def _accumulation_dtype(dtype: torch.dtype) -> torch.dtype:
     """The dtype a running weighted sum over that input should be kept in.
 

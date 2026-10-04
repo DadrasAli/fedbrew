@@ -85,13 +85,17 @@ class _Central:
 
     ``in_parts``: the task's pass is ``CentralPassInParts``' -- its terms are
     measured beside the steps and its metrics made by ``central_metrics``; else
-    the classification task's, ``compute_metrics`` of the steps.
+    the classification task's, ``compute_metrics`` of the steps. ``prepared``:
+    the rows in one batch as the task's closed form reads them, which its
+    ``closed_form_central`` measures the steps and terms from, where the
+    round's training stack holds them (``ResidentRounds._share_central``).
     """
 
     features: Tensor
     targets: Tensor
     batch_size: int
     in_parts: bool
+    prepared: tuple[Tensor, ...] | None = None
 
 
 class ResidentEvaluation:
@@ -356,6 +360,13 @@ class ResidentEvaluation:
         features, targets, size = central.features, central.targets, central.batch_size
         outputs = []
         self.template.eval()
+        if central.prepared is not None:
+            with torch.no_grad():
+                outputs, terms = self.task.closed_form_central(
+                    self.template, params, self.buffers, central.prepared
+                )
+            staged, layout = staged_values([(outputs, [len(outputs)]), ([terms], [1])], [])
+            return CentralStage(layout, staged)
         with torch.no_grad():
             for first in range(0, len(targets), size):
                 batch = (features[first : first + size], targets[first : first + size])

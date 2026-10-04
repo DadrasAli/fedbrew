@@ -85,7 +85,7 @@ from fedbrew.core.resident_flush import FlushWriter, HostCopy, RoundClock, Write
 from fedbrew.core.resident_graphs import RoundGraphs
 from fedbrew.core.round_planner import PlannedRound, without_clients
 from fedbrew.core.stacked_results import StackedFitResults
-from fedbrew.core.torch_utils import StateStack
+from fedbrew.core.torch_utils import StateStack, same_tensors
 from fedbrew.servers.fedavg import WeightedMetricAccumulator
 
 #: The rules whose stacked results the resident round builds: those whose
@@ -612,6 +612,7 @@ class ResidentRounds:
 
         self.evaluation = ResidentEvaluation(self) if self.unsupported is None else None
         self.shares_rows = self._share_rows(getattr(context, "fused_pass", None))
+        self.shares_central = self._share_central()
 
     # -- set-up --------------------------------------------------------------
 
@@ -630,6 +631,46 @@ class ResidentRounds:
         dtype = context.train_dtype(self.template_dtype) if context else self.template_dtype
         prepared = train_rows(rows.everyone(), dtype, self.task, self.template, True)
         return bool(prepared.stacked and fused.share_rows(prepared.tensors))
+
+    def _share_central(self) -> bool:
+        """Whether the central pass reads the rows the round trains on, one copy for both.
+
+        Where it is measured here on the global rows and those are every
+        client's train rows in order, unpadded: in closed form, a task's
+        central pass in parts that gives ``closed_form_central`` reads the
+        prepared stack the steps gather from, seen as one batch (its steps and
+        terms from one set of rows); otherwise the pass reads the stacked rows
+        themselves, cut into its batches as before. Either only where the
+        rows compare equal -- shape, dtype, device, strides and values.
+        """
+
+        from fedbrew.tasks.base import closed_form_batch
+
+        evaluation, rows = self.evaluation, self.rows
+        central = None if evaluation is None else evaluation.central
+        if central is None or rows is None or len(set(rows.lengths)) != 1:
+            return False
+        if not self.closed:
+            views = tuple(tensor.reshape(-1, *tensor.shape[2:]) for tensor in rows.tensors)
+            if not same_tensors(views, (central.features, central.targets)):
+                return False
+            central.features, central.targets = views
+            return True
+        if not central.in_parts or central.batch_size < len(central.targets):
+            return False
+        if not callable(getattr(self.task, "closed_form_central", None)):
+            return False
+        context = self.executor.context
+        dtype = context.train_dtype(self.template_dtype) if context else self.template_dtype
+        prepared = train_rows(rows.everyone(), dtype, self.task, self.template, True)
+        if not prepared.stacked:
+            return False
+        views = tuple(tensor.reshape(1, -1, *tensor.shape[2:]) for tensor in prepared.tensors)
+        own = closed_form_batch(self.task, self.template, (central.features, central.targets))
+        if not same_tensors(views, own):
+            return False
+        central.prepared = views
+        return True
 
     def _memory_unsupported(self) -> str | None:
         """Why every client's rows cannot stay on the device, or None."""

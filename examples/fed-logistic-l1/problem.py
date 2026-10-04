@@ -2091,10 +2091,17 @@ class FedLogisticL1Task(TaskAdapter):
 
         loss, _ = self.functional_loss(model, params, buffers, batch, mask)
         iterate = (model.x if params is None else params["x"]).detach()
+        return self._iterate_outputs(model, iterate, loss, row_count(batch[1], mask))
+
+    def _iterate_outputs(
+        self, model: LogisticModel, iterate: Tensor, loss: Tensor, total: Tensor
+    ) -> dict[str, Tensor]:
+        """One batch's eval outputs: its loss and row count, and the iterate's properties."""
+
         found = iterate.abs() > model.support_tolerance
         # Carried per batch because compute_metrics is handed the outputs and
         # nothing else, and all but the loss are functions of the iterate.
-        measured = {"loss": loss, "total": row_count(batch[1], mask)}
+        measured = {"loss": loss, "total": total}
         if self._optimum is not None:
             measured["distance_to_optimum"] = torch.linalg.vector_norm(iterate - self._optimum)
         if self._truth is not None:
@@ -2155,6 +2162,44 @@ class FedLogisticL1Task(TaskAdapter):
         return gradients, self._stacked_outputs(
             model, params["x"].detach(), outputs["loss"], rows, mask
         )
+
+    def closed_form_central(
+        self,
+        model: LogisticModel,
+        params: Mapping[str, Tensor],
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+    ) -> tuple[list[dict[str, Tensor]], dict[str, Tensor]]:
+        """The central pass in parts from its rows prepared: its one step's outputs, and its terms.
+
+        ``CentralPassInParts``' optional ``closed_form_central``: ``batch`` is
+        every global row in one batch as ``closed_form_batch`` prepares it, the
+        signed rows `-b a` (``closed_form_rows``) as a stack of one, and the
+        margins are taken once, by the product the model's forward takes
+        (`A x`, here on the signed rows): `(-b a).x` is `-b (a.x)` exactly, the
+        `z` ``mean_loss`` makes of the margins. The step's loss and the
+        objective's loss term are both that mean of `z`, and the penalty the
+        iterate's, so the outputs are ``functional_eval``'s and the terms
+        ``central_terms``' bit for bit where the rows are the pooled rows
+        ``central_terms`` reads, in their order.
+        """
+
+        del buffers
+        (signed_rows,) = batch
+        rows = signed_rows[0]
+        x = params["x"]
+        signed = rows @ x
+        mean = LOSSES[model.loss_form][0](signed, None)
+        penalty = penalty_value(x, model.penalty_strength, model.penalty_form)
+        outputs = self._iterate_outputs(model, x.detach(), mean + penalty, row_count(rows))
+        if self._optimal_objective is None:
+            return [outputs], {}
+        spec = self.spec
+        if spec.loss != model.loss_form:
+            mean = LOSSES[spec.loss][0](signed, None)
+        if (spec.penalty_strength, spec.penalty) != (model.penalty_strength, model.penalty_form):
+            penalty = penalty_value(x, spec.penalty_strength, spec.penalty)
+        return [outputs], {"objective_loss": mean, "objective_penalty": penalty}
 
     def _stacked_outputs(
         self,

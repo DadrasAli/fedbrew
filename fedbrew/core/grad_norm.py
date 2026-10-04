@@ -468,17 +468,16 @@ class FusedPass:
         value is the same.
         """
 
+        from fedbrew.core.torch_utils import same_tensors
+
         if not self.closed or len(self.batches) != 1:
             return False
         (batch,) = self.batches
         if len(stack) != len(batch) or not all(tensor.is_contiguous() for tensor in stack):
             return False
         views = tuple(tensor.reshape(1, -1, *tensor.shape[2:]) for tensor in stack)
-        for view, own in zip(views, batch, strict=True):
-            if (view.shape, view.dtype, view.device) != (own.shape, own.dtype, own.device):
-                return False
-            if view.stride() != own.stride() or not torch.equal(view, own):
-                return False
+        if not same_tensors(views, batch):
+            return False
         self.batches = [views]
         return True
 
