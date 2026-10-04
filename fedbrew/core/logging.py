@@ -679,14 +679,15 @@ def _planned_metric_names(config: FullConfig) -> list[str]:
     accuracy for the evaluation aggregates; and one ``central_test_<metric>``
     per declared metric -- of the ones a run of this config reports on its
     clients and centrally, where the task narrows them (``ReportedMetrics``).
-    A column listed here that the run does not write, or written
+    The fit and strategy columns only where some round applies an update
+    (``_a_round_updates``). A column listed here that the run does not write, or written
     and not listed, would make the header worse than no header;
     tests/test_planned_columns_are_written.py runs every task to hold it.
     """
 
     reported = task_reported_metrics(config)
     bases = [name for name in CLIENT_METRIC_BASES if name in reported.client]
-    names = list(_fit_metric_names(config))
+    names = list(_fit_metric_names(config)) if _a_round_updates(config) else []
     for split in ("train", "val", "test"):
         if not _split_is_evaluated(config, split):
             continue
@@ -700,6 +701,18 @@ def _planned_metric_names(config: FullConfig) -> list[str]:
         names.append(GRAD_NORM_COLUMN)
     names.extend(running_mean_column(metric) for metric in config.convergence.metrics)
     return _ordered_metric_names(_deduplicate(names))
+
+
+def _a_round_updates(config: FullConfig) -> bool:
+    """Whether some round of the run samples clients and applies their update.
+
+    Under ``convergence.iterates: before_update`` the last round samples no
+    client (``RunningMeans.skips_update``): a one-round run applies no update,
+    so no round writes a fit or strategy column.
+    """
+
+    rounds = int(config.server.global_rounds or 0)
+    return config.convergence.iterates != "before_update" or rounds > 1
 
 
 def _model_scope_splits(model_scope: str, split: str) -> list[str]:

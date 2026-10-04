@@ -866,7 +866,8 @@ every global-model column (`central_test_*`, `grad_norm_sq`) and every
 round samples no client, so `T` rounds apply `T - 1` updates and the run ends
 on the model its last row measures. The other cells of row `t` (the `fit_*`
 columns, `num_clients`, the per-client records) are round `t`'s, whose clients
-start from the row's model.
+start from the row's model. A one-round run applies no update and so writes no
+`fit_*` or strategy column, and the plan header lists none.
 
 - **How.** The loops measure the model after each round as always; the means
   hold each round's global-model columns back one row, and row 1's come from a

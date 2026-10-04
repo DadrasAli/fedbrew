@@ -20,7 +20,10 @@ tiny corpus with tiny_gpt2 (when the LLM extra is installed). The planned
 columns and the written CSV header must agree in both directions. A task that
 narrows its columns per run (``ReportedMetrics``) plans from its data too, so
 its stand-in may plan fewer columns than the shipped config does without its
-data, never more.
+data, never more. Under ``convergence.iterates: before_update`` the last round
+samples no client, so the stand-in runs two rounds, one of which applies an
+update, and plans what the shipped config plans; a one-round run of it applies
+none, and plans and writes no fit or strategy column.
 """
 
 from __future__ import annotations
@@ -146,8 +149,12 @@ class _Data:
         return self._generate(f"example-{family}", yaml.safe_dump(config))
 
 
-def _runnable(path: Path, data: _Data, output: Path) -> Path:
-    """The shipped config at `path`, on cheap data, for one round."""
+def _runnable(path: Path, data: _Data, output: Path, rounds: int | None = None) -> Path:
+    """The shipped config at `path`, on cheap data, for the fewest rounds that apply an update.
+
+    One round; two under ``convergence.iterates: before_update``, whose last
+    round samples no client. ``rounds`` sets them instead.
+    """
 
     raw = standalone_config_mapping(path)
     config = load_config(path)
@@ -156,7 +163,9 @@ def _runnable(path: Path, data: _Data, output: Path) -> Path:
     raw["experiment"]["extensions"] = [
         str(REPO / extension) for extension in raw["experiment"].get("extensions") or []
     ]
-    raw["schedule"]["rounds"] = 1
+    if rounds is None:
+        rounds = 2 if config.convergence.iterates == "before_update" else 1
+    raw["schedule"]["rounds"] = rounds
     runtime = raw["runtime"]
     runtime["device"] = "cpu"
     runtime.pop("data_staging", None)
@@ -224,6 +233,18 @@ class EveryShippedConfigRoundTripsTest(unittest.TestCase):
                     written = _written(runnable)
                     self.assertEqual(planned - written, set(), "planned, not written")
                     self.assertEqual(written - planned, set(), "written, not planned")
+                    if load_config(path).convergence.iterates == "before_update":
+                        self._one_round_updates_nothing(path, data, root / f"run{index}-one")
+
+    def _one_round_updates_nothing(self, path: Path, data: _Data, output: Path) -> None:
+        """Before the update one round updates nothing: no fit or strategy column at all."""
+
+        from fedbrew.core.logging import _fit_metric_names
+
+        runnable = _runnable(path, data, output, rounds=1)
+        planned = set(_planned_metric_names(load_config(runnable)))
+        self.assertEqual(planned & set(_fit_metric_names(load_config(runnable))), set())
+        self.assertEqual(planned, _written(runnable))
 
 
 def _narrows_by_run(path: Path) -> bool:
