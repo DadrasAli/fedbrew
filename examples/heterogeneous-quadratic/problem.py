@@ -1153,9 +1153,44 @@ class HeterogeneousQuadraticTask(TaskAdapter):
 
         loss, _ = self.functional_loss(model, params, buffers, batch, mask)
         x = (model.x if params is None else params["x"]).detach()
+        return {"loss": loss, "total": row_count(batch[1], mask), **self._iterate_outputs(x)}
+
+    def closed_form_eval(
+        self,
+        model: IterateModel,
+        params: Mapping[str, Tensor],
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+        """``functional_eval``'s outputs and ``functional_loss``'s gradient, in closed form.
+
+        BatchableTask's optional ``closed_form_eval``: the gradient and the
+        loss are ``closed_form_gradient``'s, and every other output is each
+        client's iterate's, as ``functional_eval`` gives it.
+        """
+
+        gradients, outputs = self.closed_form_gradient(
+            model, params, buffers, batch, mask, outputs=True
+        )
+        iterates = params["x"].detach()
+        targets = batch[1]
+        if mask is None:
+            rows = float(targets.shape[1])
+            total = torch.full((len(iterates),), rows, dtype=DTYPE, device=targets.device)
+        else:
+            total = mask.sum(dim=1).to(DTYPE)
+        each = [self._iterate_outputs(x) for x in iterates]
+        return gradients, {
+            "loss": outputs["loss"],
+            "total": total,
+            **{name: torch.stack([own[name] for own in each]) for name in each[0]},
+        }
+
+    def _iterate_outputs(self, x: Tensor) -> dict[str, Tensor]:
+        """The eval outputs that read the iterate alone."""
+
         return {
-            "loss": loss,
-            "total": row_count(batch[1], mask),
             "optimality_gap": self._gap(x),
             "distance_to_optimum": self._distance(x),
             "off_support_small": (

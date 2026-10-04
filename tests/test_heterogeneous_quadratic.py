@@ -204,6 +204,37 @@ class TheTaskLossTest(unittest.TestCase):
                         expected = expected + spec.lam * torch.sign(x.detach())
                     torch.testing.assert_close(autograd, expected, rtol=1e-12, atol=1e-12)
 
+    def test_the_closed_form_eval_is_functional_eval_and_its_gradient(self) -> None:
+        """``closed_form_eval``: autograd's loss and gradient to 1e-12 a client, the rest equal."""
+
+        generator = torch.Generator().manual_seed(5)
+        for member in MEMBERS:
+            spec = _spec(member, sigma=20.0)
+            task = self._task(spec)
+            rows = spec.client_rows()[[0, 33]]
+            targets = torch.zeros(rows.shape[:2], dtype=torch.float64)
+            x = torch.randn(2, spec.dim, generator=generator, dtype=torch.float64)
+            x[0, :3] = 0.0
+            model = torch.nn.Module()
+            with self.subTest(member=member), torch.no_grad():
+                grads, outputs = task.closed_form_eval(model, {"x": x}, None, (rows, targets))
+            for client in range(2):
+                with self.subTest(member=member, client=client):
+                    leaf = x[client].clone().requires_grad_(True)
+                    measured = task.functional_eval(
+                        model, {"x": leaf}, None, (rows[client], targets[client])
+                    )
+                    (gradient,) = torch.autograd.grad(measured["loss"], leaf)
+                    self.assertEqual(list(outputs), list(measured))
+                    for key, value in measured.items():
+                        if key == "loss":
+                            torch.testing.assert_close(
+                                outputs[key][client], value.detach(), rtol=1e-12, atol=0.0
+                            )
+                        else:
+                            self.assertTrue(torch.equal(outputs[key][client], value), key)
+                    torch.testing.assert_close(grads["x"][client], gradient, rtol=1e-12, atol=0.0)
+
     def test_the_minimum_norm_subgradient_vanishes_at_the_optimum(self) -> None:
         for member in MEMBERS:
             spec = _spec(member, sigma=20.0)
@@ -351,45 +382,60 @@ class TheCentralPassIsMeasuredWhereTheRoundTrainsTest(_Runs):
 class FAndItsGradientInOnePassTest(_Runs):
     """``evaluation.grad_norm.fused``: the central pass, every 10 rounds, takes F's gradient too.
 
-    FedAvg and SCAFFOLD, resident and sequential: every central column is the
-    two passes' bit for bit, and grad_norm_sq theirs within 1e-12 relative.
+    FedAvg and SCAFFOLD, resident and sequential: through autograd
+    (``gradient_form: autograd``) every central column is the two passes' bit
+    for bit and grad_norm_sq theirs within 1e-12 relative; in the task's
+    closed form (``closed_form_eval``, the default) every column is
+    autograd's fused run's bit for bit but F's and grad_norm_sq's, within
+    1e-12 relative; and run.json names the pass and the form.
     """
 
     def test_fedavg_and_scaffold(self) -> None:
         import json
 
         manifest = self.data(20.0)
+        settings = {
+            "closed": ({"fused": True}, ("fused", "closed_form")),
+            "autograd": ({"fused": True, "gradient_form": "autograd"}, ("fused", "autograd")),
+            "separate": ({"fused": False}, ("separate", None)),
+        }
         for arm in ("fedavg_k10", "scaffold_k10"):
             for executor in ("batched", "sequential"):
                 with self.subTest(arm=arm, executor=executor):
                     rows = {}
-                    for fused in (True, False):
+                    for name, (setting, taken) in settings.items():
                         before = set(self.root.iterdir())
-                        rows[fused] = self.run_arm(
+                        rows[name] = self.run_arm(
                             arm,
                             manifest,
                             executor,
                             schedule__rounds=21,
-                            evaluation__grad_norm={"every": 10, "fused": fused},
+                            evaluation__grad_norm={"every": 10, **setting},
                         )
                         (output,) = (
                             path for path in set(self.root.iterdir()) - before if path.is_dir()
                         )
                         record = json.loads((output / "run.json").read_text())["reproducibility"]
-                        taken = record["grad_norm"]["pass"]
-                        self.assertEqual(taken, "fused" if fused else "separate")
-                    measured = 0
-                    for row_fused, row_separate in zip(rows[True], rows[False], strict=True):
-                        for key, value in row_separate.items():
-                            if key.endswith("_sec"):
-                                continue
-                            if not key.startswith("grad_norm_sq") or not value:
-                                self.assertEqual(row_fused[key], value, key)
-                                continue
-                            measured += 1
-                            a, b = float(row_fused[key]), float(value)
-                            self.assertLessEqual(abs(a - b), 1e-12 * max(abs(a), abs(b)), key)
-                    self.assertGreater(measured, 0)
+                        grad_norm = record["grad_norm"]
+                        self.assertEqual((grad_norm["pass"], grad_norm.get("gradient")), taken)
+                    self._same_but(rows["autograd"], rows["separate"], ("grad_norm_sq",))
+                    self._same_but(
+                        rows["closed"], rows["autograd"], ("grad_norm_sq", "central_test_loss")
+                    )
+
+    def _same_but(self, rows: Any, others: Any, within: tuple[str, ...]) -> None:
+        measured = 0
+        for row, other in zip(rows, others, strict=True):
+            for key, value in other.items():
+                if key.endswith("_sec"):
+                    continue
+                if not key.startswith(within) or not value:
+                    self.assertEqual(row[key], value, key)
+                    continue
+                measured += 1
+                a, b = float(row[key]), float(value)
+                self.assertLessEqual(abs(a - b), 1e-12 * max(abs(a), abs(b)), key)
+        self.assertGreater(measured, 0)
 
 
 if __name__ == "__main__":

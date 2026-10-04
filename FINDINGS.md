@@ -29,7 +29,7 @@ guard that came with its fix — is carried in the CSV.
 | `summary` | The finding's own heading, verbatim except that markdown backticks are stripped. Not a paraphrase, except for the rows named under *Rows removed with a component* and *Summaries edited before publication*. |
 | `confidence` | The leading token of the finding's confidence note: `certain` (102), `likely` (1), `needs-runtime-check` (1), empty (5). Qualifiers after that token are dropped. |
 | `fix_commit` | Empty on every row. It held the short hashes of the commits that named each finding as fixed; *Why `fix_commit` is empty* below says why it no longer does. |
-| `regression_test` | Space-separated `tests/` paths for the guard that came with the fix. Empty for 38 of the 146 rows. |
+| `regression_test` | Space-separated `tests/` paths for the guard that came with the fix. Empty for 38 of the 147 rows. |
 | `status` | One of three values, counted and defined in *Coverage* below. The file's only record of whether a finding was fixed. |
 
 ## How an id is formed
@@ -96,14 +96,14 @@ census's own 5 open rows carry, and an empty `regression_test` with it.
 
 The census tables in this file — the per-pass split, *Coverage* and its status
 table — describe the **109**, and `tests/test_findings_manifest.py` computes
-them over the census rows alone; the empty-cell counts describe all 146 rows.
+them over the census rows alone; the empty-cell counts describe all 147 rows.
 The two numbers a reader might want:
 
 | | Rows |
 |---|---:|
 | Census (passes 01–13) | 109 |
-| Post-census (`pass: post`) | 37 |
-| **File** | **146** |
+| Post-census (`pass: post`) | 38 |
+| **File** | **147** |
 
 The post-census rows, in full:
 
@@ -146,6 +146,7 @@ The post-census rows, in full:
 | `POST-F35` | `silent-degradation` | `fedbrew/tasks/base.py` | `runtime.performance.gradient_form` defaulted to autograd, and only the batched executor could take a task's `closed_form_gradient`, so every linear example trained by default on the slower autograd gradient of a loss whose gradient it states in closed form. The default is now the task's closed form wherever it gives one, under either executor -- the sequential one steps through `closed_form_train_step` -- and `gradient_form: autograd` asks for autograd. Results move in the last digits: each example's default run is the sequential run on autograd within the executor's `1e-12`. | fixed, guarded by `tests/test_closed_form_gradients.py tests/test_default_executor.py` |
 | `POST-F36` | `wrong-results` | `fedbrew/core/resident_evaluation.py` | The resident round kept each split's evaluation plan -- its clients' places in the round's work, and the chunks read from them -- by whose split it was and not by where those clients stood. A round that evaluated the same sampled clients' split beside other work, as `configs/reference_evaluation.yaml`'s `val` and `train` cadences do, read an earlier round's places: past the end of its work it raised (`IndexError`), and inside it measured other clients' splits in their stead and recorded those numbers with no refusal -- 8 of 12 cadence and participation settings probed differed from the per-round path so, on 2026-09-30. On master too, under `executor: batched`; no shipped config ran resident with client evaluation before the batched default. The plan is now kept by its entries. | fixed, guarded by `tests/test_resident_round.py` |
 | `POST-F37` | `silent-degradation` | `fedbrew/core/grad_norm.py` | `evaluation.grad_norm` measured `grad_norm_sq` in a pass of its own -- a second forward and a backward over every client's train rows -- on every round that also ran the central pass, though where that pass is measured in parts (`CentralPassInParts`, or the classification task's) on those same rows its loss is F itself: such a round computed F twice, the larger share of its evaluation (Figure 1's smooth-nonconvex K = 1 runs, about 0.9 ms of a 4.6 ms round on 2026-10-03). `evaluation.grad_norm.fused`, on by default, now takes F's gradient through the central pass there (`FusedPass`): one forward and one backward, the central metrics the pass's own bit for bit, `grad_norm_sq` F's gradient summed over the central batches rather than the gradient pass's chunks, the same within `1e-12` relative and on the shipped configs whose chunks are those batches bit for bit; run.json's `reproducibility.grad_norm` says which pass a run took and why, and `fused: false` keeps the two passes. A declared default change (`tests/test_shipped_configs_resolve_as_recorded.py`). | fixed, guarded by `tests/test_grad_norm.py tests/test_fed_logistic_l1.py tests/test_heterogeneous_quadratic.py` |
+| `POST-F38` | `silent-degradation` | `fedbrew/core/grad_norm.py` | The fused pass (`POST-F37`) took F's gradient by autograd: `functional_eval` through `torch.func.functional_call` with the parameters as leaves, its loss kept with its graph, then a backward -- for tasks that give their objective's gradient in closed form (`closed_form_gradient`), which their training steps already take, the larger share of a round's evaluation (Figure 1's smooth-nonconvex K = 1 runs, 0.83 ms of a 1.98 ms round on 2026-10-04: 0.47 ms forward, 0.31 ms backward), against the AdaFed code's 0.46 ms closed-form pass of the same two products. `evaluation.grad_norm.gradient_form`, `closed_form` by default, now measures the fused pass with the task's closed form where it gives one of F and its gradient (`closed_form_eval`, `BatchableTask`; fed-logistic-l1's and heterogeneous-quadratic's): each central batch a stack of one over its prepared rows, no graph and no backward, the loss and gradient `closed_form_gradient`'s and every other output the iterate's. F and `grad_norm_sq` are the same within `1e-12` relative and every other column bit for bit; run.json's `reproducibility.grad_norm` names the form (`gradient`) and why not the closed form, and `gradient_form: autograd` keeps autograd's pass. A declared default change (`tests/test_shipped_configs_resolve_as_recorded.py`). | fixed, guarded by `tests/test_grad_norm.py tests/test_fed_logistic_l1.py tests/test_heterogeneous_quadratic.py` |
 
 ### Two corrections that are not rows
 
@@ -215,7 +216,7 @@ have cited a path, a guard or a subject nobody could open or interpret. The ids
 are retired: no later row reuses one. This is the one place the file does not
 keep what the audit filed, and every census count here — the per-pass split,
 *Coverage*, the locations — describes the 109; the empty-cell counts describe
-all 146 rows of the file.
+all 147 rows of the file.
 
 `P07-F05`'s fix did not depend on its row. It turned `save_best` on for the MNIST
 baseline, which is still what `configs/mnist/fedavg.yaml` ships and what
@@ -416,13 +417,13 @@ the counts above:
 
 An empty cell means the value could not be recovered, with one exception:
 `fix_commit` is empty by decision. None has been filled with a plausible
-substitute. These counts are over all 146 rows, census and post-census together,
+substitute. These counts are over all 147 rows, census and post-census together,
 because they describe the CSV's columns; *Coverage* above counts the 109 census
 rows alone.
 
 - `confidence` — 5 rows (`P10-F31` … `P10-F35`). Those findings carry no
   confidence note.
-- `fix_commit` — all 146 rows; see *Why `fix_commit` is empty*.
+- `fix_commit` — all 147 rows; see *Why `fix_commit` is empty*.
 - `regression_test` — 38 rows. Five are the open post-census rows
   (`POST-F03`, `POST-F11`, `POST-F15`, `POST-F18`, `POST-F20`), which have no fix and so no guard. The
   other 33 are census rows, and 26 of them had no fix commit to take a guard

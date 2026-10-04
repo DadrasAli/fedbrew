@@ -103,9 +103,19 @@ class WeightedGradient:
         if count < 0.0 or count != count:
             raise ValueError(f"an objective batch reported the count {count!r}")
         grads = torch.autograd.grad(loss, list(self.params.values()), allow_unused=True)
-        for (name, _), grad in zip(self.params.items(), grads, strict=True):
+        self.add_gradient(dict(zip(self.params, grads, strict=True)), count)
+
+    def add_gradient(self, gradient: Mapping[str, Tensor | None], count: float) -> None:
+        """Add ``count`` times a loss's gradient, already taken; nothing for a count of zero."""
+
+        if count == 0.0:
+            return
+        if count < 0.0 or count != count:
+            raise ValueError(f"an objective batch reported the count {count!r}")
+        for name, total in self.sums.items():
+            grad = gradient.get(name)
             if grad is not None:
-                self.sums[name].add_(grad.to(torch.float64), alpha=count)
+                total.add_(grad.to(torch.float64), alpha=count)
         self.total += count
 
     def mean(self) -> dict[str, Tensor]:
@@ -308,11 +318,26 @@ class FusedPass:
     batches -- weighted by their rows, as ``flat_chunk_gradient`` weighs its
     chunks -- rather than the gradient pass's chunks.
 
+    Where the task gives F and its gradient in closed form
+    (``closed_form_eval``, :class:`~fedbrew.tasks.base.BatchableTask`) and the
+    run asks for it (``evaluation.grad_norm.gradient_form: closed_form``, the
+    default), each batch is measured by it instead, with no graph and no
+    backward: its outputs, loss included, and its gradient, from one
+    computation over the batch's prepared rows (``closed_form_batch``), a stack
+    of one. The loss and the gradient are then the closed form's arithmetic,
+    the same to rounding (FINDINGS.md, POST-F38); every other output is the
+    iterate's, as ``functional_eval`` gives it.
+
     Made by :func:`fused_pass`, which says where it cannot be.
     """
 
     def __init__(
-        self, task: Any, rows: tuple[Tensor, ...], batch_size: int, in_parts: bool
+        self,
+        task: Any,
+        rows: tuple[Tensor, ...],
+        batch_size: int,
+        in_parts: bool,
+        closed: Any = None,
     ) -> None:
         self.task = task
         self.in_parts = in_parts
@@ -321,6 +346,12 @@ class FusedPass:
             tuple(tensor[first : first + size] for tensor in rows)
             for first in range(0, len(rows[0]), size)
         ]
+        #: The model the closed form prepares its rows with, or None for autograd's pass.
+        self.closed = closed is not None
+        if closed is not None:
+            from fedbrew.tasks.base import closed_form_batch
+
+            self.batches = [closed_form_batch(task, closed, batch) for batch in self.batches]
         self._model: nn.Module | None = None
 
     def measure(
@@ -333,6 +364,8 @@ class FusedPass:
         carry the model state's buffers. Every value stays on the device.
         """
 
+        if self.closed:
+            return self._closed_form(template, params, buffers)
         parameters = dict(template.named_parameters())
         leaves = {
             name: value.detach().requires_grad_(parameters[name].requires_grad)
@@ -353,12 +386,43 @@ class FusedPass:
                 gradient.add(measured["loss"], float(len(batch[0])))
                 outputs.append({key: value.detach() for key, value in measured.items()})
             value = grad_norm_sq(gradient, wanted, self.task.objective_l1(template)).detach()
-        terms: dict[str, Tensor] = {}
-        if self.in_parts:
-            fixed = {name: leaf.detach() for name, leaf in leaves.items()}
-            with torch.no_grad():
-                terms = dict(self.task.central_terms(template, {**fixed, **held}))
-        return outputs, terms, value
+        fixed = {name: leaf.detach() for name, leaf in leaves.items()}
+        return outputs, self._terms(template, {**fixed, **held}), value
+
+    def _closed_form(
+        self, template: nn.Module, params: Mapping[str, Tensor], buffers: Mapping[str, Tensor]
+    ) -> tuple[list[dict[str, Tensor]], dict[str, Tensor], Tensor]:
+        """``measure`` from the task's closed form: each batch a stack of one, no graph."""
+
+        parameters = dict(template.named_parameters())
+        fixed = {name: value.detach() for name, value in params.items() if name in parameters}
+        held = {
+            **buffers,
+            **{name: value for name, value in params.items() if name not in parameters},
+        }
+        wanted = {name: fixed[name] for name, value in parameters.items() if value.requires_grad}
+        stacked = {name: value.unsqueeze(0) for name, value in fixed.items()}
+        device = next(iter(fixed.values())).device
+        outputs: list[dict[str, Tensor]] = []
+        with measuring(template, device), torch.no_grad():
+            gradient = WeightedGradient(wanted)
+            for batch in self.batches:
+                grads, measured = self.task.closed_form_eval(template, stacked, held, batch, None)
+                gradient.add_gradient(
+                    {name: grads[name][0] for name in wanted if name in grads},
+                    float(batch[0].shape[1]),
+                )
+                outputs.append({key: value[0] for key, value in measured.items()})
+            value = grad_norm_sq(gradient, wanted, self.task.objective_l1(template))
+        return outputs, self._terms(template, {**fixed, **held}), value
+
+    def _terms(self, template: nn.Module, params: Mapping[str, Tensor]) -> dict[str, Tensor]:
+        """The central pass's terms of the model alone, at ``params``, where it is in parts."""
+
+        if not self.in_parts:
+            return {}
+        with torch.no_grad():
+            return dict(self.task.central_terms(template, params))
 
     def measure_round(self, server: Any) -> dict[str, float]:
         """The server's model's ``central_test_*`` metrics and ``grad_norm_sq``, as floats.
@@ -397,7 +461,9 @@ def fused_pass(
     and that is a pass in parts (``CentralPassInParts``, whose loader neither
     shuffles nor draws nor drops a batch, or the classification task's), the
     global rows are every client's train rows (the same rows, in any order),
-    and the task's ``functional_eval`` gives its loss with its graph.
+    and the task's ``functional_eval`` gives its loss with its graph -- or the
+    pass takes the closed form (``evaluation.grad_norm.gradient_form``), which
+    the record names beside the pass (``gradient``).
     """
 
     from fedbrew.core.config import parse_evaluation_schedule
@@ -407,8 +473,21 @@ def fused_pass(
     asked = "fused" if evaluation.grad_norm.fused else "separate"
     reason = _unfused(evaluation, server, dataset) if asked == "fused" else "asked for"
     if isinstance(reason, FusedPass):
-        return reason, {"pass": "fused", "asked": asked}
+        return reason, {"pass": "fused", "asked": asked, **_gradient_record(evaluation, reason)}
     return None, {"pass": "separate", "asked": asked, "reason": reason}
+
+
+def _gradient_record(evaluation: Any, fused: FusedPass) -> dict[str, str]:
+    """Which form the fused pass takes F and its gradient in, and why not the closed form."""
+
+    if fused.closed:
+        return {"gradient": "closed_form"}
+    if evaluation.grad_norm.gradient_form != "closed_form":
+        return {"gradient": "autograd", "gradient_reason": "asked for"}
+    return {
+        "gradient": "autograd",
+        "gradient_reason": "the task gives no closed form of F and its gradient (closed_form_eval)",
+    }
 
 
 def _unfused(evaluation: Any, server: Any, dataset: Any) -> FusedPass | str:
@@ -446,10 +525,25 @@ def _unfused(evaluation: Any, server: Any, dataset: Any) -> FusedPass | str:
     ]
     if not _same_rows(rows, train):
         return "the central pass's rows are not every client's train rows"
-    fused = FusedPass(task, rows, batch_size, in_parts)
-    if not _loss_keeps_its_graph(fused, server):
+    closed = _closed_form_model(evaluation, task, server)
+    fused = FusedPass(task, rows, batch_size, in_parts, closed=closed)
+    if closed is None and not _loss_keeps_its_graph(fused, server):
         return "the task's functional_eval gives its loss without its graph"
     return fused
+
+
+def _closed_form_model(evaluation: Any, task: Any, server: Any) -> nn.Module | None:
+    """The model a closed-form fused pass prepares its rows with, or None for autograd's.
+
+    Where the config asks for the closed form (``gradient_form: closed_form``,
+    the default) and the task gives one of F and its gradient (``closed_form_eval``).
+    """
+
+    if evaluation.grad_norm.gradient_form != "closed_form":
+        return None
+    if not callable(getattr(task, "closed_form_eval", None)):
+        return None
+    return task.build_model(server.model_config)
 
 
 def _central_batch_size(task: Any, data: Any, classification: bool) -> int | str:

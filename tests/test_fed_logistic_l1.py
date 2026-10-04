@@ -806,8 +806,11 @@ class FAndItsGradientInOnePassTest(ExecutorRuns):
     """``evaluation.grad_norm.fused``, on by default: F's central pass and its gradient in one.
 
     For every problem, resident, batched per round and sequential: the fused
-    run's central columns are the two passes' bit for bit and its grad_norm_sq
-    theirs within 1e-12 relative, and run.json says which pass each run took.
+    run through autograd (``gradient_form: autograd``) has the two passes'
+    central columns bit for bit and their grad_norm_sq within 1e-12 relative;
+    the default, the task's closed form (``closed_form_eval``), has those of
+    autograd's fused run bit for bit but F's and grad_norm_sq's, which are
+    within 1e-12 relative; and run.json says which pass and form each run took.
     With the central pass every other round, the rounds between measure
     grad_norm_sq alone, in its own pass, and the run is the same again.
     """
@@ -817,6 +820,11 @@ class FAndItsGradientInOnePassTest(ExecutorRuns):
         from fedbrew.core.resident_evaluation import ResidentEvaluation
         from tests.test_resident_round import per_round
 
+        settings = {
+            "closed": {"fused": True},
+            "autograd": {"fused": True, "gradient_form": "autograd"},
+            "separate": {"fused": False},
+        }
         for loss, penalty in problem.PROBLEMS:
             for path in ("resident", "per round", "sequential"):
                 for central in (1, 2):
@@ -825,8 +833,8 @@ class FAndItsGradientInOnePassTest(ExecutorRuns):
                         config["schedule"]["rounds"] = 4
                         config["evaluation"]["central_test"] = {"every": central}
                         runs = {}
-                        for fused in (True, False):
-                            config["evaluation"]["grad_norm"] = {"every": 1, "fused": fused}
+                        for name, setting in settings.items():
+                            config["evaluation"]["grad_norm"] = {"every": 1, **setting}
                             spy = mock.patch.object(
                                 ResidentEvaluation,
                                 "enqueue_fused",
@@ -836,38 +844,107 @@ class FAndItsGradientInOnePassTest(ExecutorRuns):
                             executor = "sequential" if path == "sequential" else "batched"
                             context = per_round() if path == "per round" else nullcontext()
                             with context, spy as fused_rounds:
-                                runs[fused] = self.run_config(config, executor)
+                                runs[name] = self.run_config(config, executor)
                             # The rounds the central pass measures: every
                             # other one, pinned at the first and the last.
                             both = sum(evaluates_round(central, r, 4) for r in range(1, 5))
                             self.assertEqual(
                                 fused_rounds.call_count,
-                                both if fused and path == "resident" else 0,
+                                both if name != "separate" and path == "resident" else 0,
                             )
-                        self._same_but_the_gradient(runs[True], runs[False])
+                        self._records(runs)
+                        self._same_but(runs["autograd"], runs["separate"], ("grad_norm_sq",))
+                        self._same_but(
+                            runs["closed"], runs["autograd"], ("grad_norm_sq", "central_test_loss")
+                        )
 
-    def _same_but_the_gradient(self, fused: Path, separate: Path) -> None:
-        records = [
-            json.loads((path / "run.json").read_text())["reproducibility"]["grad_norm"]
-            for path in (fused, separate)
-        ]
-        self.assertEqual(records[0], {"pass": "fused", "asked": "fused"})
+    def _records(self, runs: dict[str, Path]) -> None:
+        records = {
+            name: json.loads((path / "run.json").read_text())["reproducibility"]["grad_norm"]
+            for name, path in runs.items()
+        }
+        self.assertEqual(
+            records["closed"], {"pass": "fused", "asked": "fused", "gradient": "closed_form"}
+        )
+        self.assertEqual(
+            records["autograd"],
+            {
+                "pass": "fused",
+                "asked": "fused",
+                "gradient": "autograd",
+                "gradient_reason": "asked for",
+            },
+        )
         apart = {"pass": "separate", "asked": "separate", "reason": "asked for"}
-        self.assertEqual(records[1], apart)
-        rows = [_untimed(path / "round_metrics.csv") for path in (fused, separate)]
+        self.assertEqual(records["separate"], apart)
+
+    def _same_but(self, run: Path, other: Path, within: tuple[str, ...]) -> None:
+        """``run``'s CSVs are ``other``'s, but the columns ``within`` names, within 1e-12."""
+
+        rows = [_untimed(path / "round_metrics.csv") for path in (run, other)]
         assert rows[0] is not None and rows[1] is not None
         self.assertEqual(len(rows[0]), len(rows[1]))
-        for row_fused, row_separate in zip(rows[0], rows[1], strict=True):
-            self.assertEqual(list(row_fused), list(row_separate))
-            for key, value in row_separate.items():
-                if not key.startswith("grad_norm_sq"):
-                    self.assertEqual(row_fused[key], value, key)
+        for row, row_other in zip(rows[0], rows[1], strict=True):
+            self.assertEqual(list(row), list(row_other))
+            for key, value in row_other.items():
+                if not key.startswith(within) or row[key] == value:
+                    self.assertEqual(row[key], value, key)
                     continue
-                a, b = float(row_fused[key]), float(value)
+                a, b = float(row[key]), float(value)
                 self.assertLessEqual(abs(a - b), 1e-12 * max(abs(a), abs(b)), key)
         for name in CSVS:
             if name != "round_metrics.csv":
-                self.assertEqual(_untimed(fused / name), _untimed(separate / name), name)
+                self.assertEqual(_untimed(run / name), _untimed(other / name), name)
+
+
+class FAndItsGradientInClosedFormTest(unittest.TestCase):
+    """``closed_form_eval``: ``functional_eval``'s outputs and autograd's gradient, in closed form.
+
+    For every problem, at iterates with exact zeros (which the l1 term's
+    subgradient reads), with and without padding: each client's loss and
+    gradient within 1e-12 relative of autograd's through ``functional_eval``,
+    and every other output ``stacked_eval``'s bit for bit.
+    """
+
+    def test_every_problem(self) -> None:
+        generator = torch.Generator().manual_seed(13)
+        clients, rows, dim = 4, 16, 8
+        for loss, penalty in problem.PROBLEMS:
+            task = _small_task(loss, penalty)
+            model = problem.LogisticModel(dim, 0.03, loss=loss, penalty=penalty)
+            for masked in (False, True):
+                with self.subTest(problem=f"{loss}+{penalty}", masked=masked):
+                    features = torch.randn(
+                        clients, rows, dim, generator=generator, dtype=torch.float64
+                    )
+                    signs = torch.randint(0, 2, (clients, rows), generator=generator)
+                    labels = signs.to(torch.float64) * 2.0 - 1.0
+                    x = torch.randn(clients, dim, generator=generator, dtype=torch.float64)
+                    x[:, :2] = 0.0
+                    mask = None
+                    if masked:
+                        lengths = torch.randint(1, rows + 1, (clients,), generator=generator)
+                        mask = (torch.arange(rows) < lengths.unsqueeze(1)).to(torch.float64)
+                    signed = task.closed_form_rows(model, (features, labels))
+                    with torch.no_grad():
+                        grads, outputs = task.closed_form_eval(model, {"x": x}, {}, signed, mask)
+                        stacked = task.stacked_eval(model, {"x": x}, {}, (features, labels), mask)
+                    self.assertEqual(list(outputs), list(stacked))
+                    for key, value in stacked.items():
+                        if key != "loss":
+                            self.assertTrue(torch.equal(outputs[key], value), key)
+                    for client in range(clients):
+                        keep = None if mask is None else mask[client]
+                        leaf = x[client].clone().requires_grad_(True)
+                        measured = task.functional_eval(
+                            model, {"x": leaf}, {}, (features[client], labels[client]), keep
+                        )
+                        (gradient,) = torch.autograd.grad(measured["loss"], [leaf])
+                        ours, theirs = float(outputs["loss"][client]), float(measured["loss"])
+                        self.assertLessEqual(abs(ours - theirs), 1e-12 * abs(theirs))
+                        self.assertTrue(
+                            torch.allclose(grads["x"][client], gradient, rtol=1e-12, atol=0.0)
+                        )
 
 
 def _run_task_class() -> Any:

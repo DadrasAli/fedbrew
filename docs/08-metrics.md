@@ -569,7 +569,20 @@ within `1e-12` relative, and bit for bit where those are the same rows in the
 same order (fed-logistic-l1 and heterogeneous-quadratic's shipped configs). A
 round that measures only one runs it alone, and `fused: false` keeps the two
 passes. run.json's `reproducibility.grad_norm` records which pass the run took
--- `{"pass": "fused", "asked": "fused"}`, or `"separate"` with the reason.
+-- `{"pass": "fused", "asked": "fused", "gradient": ...}`, or `"separate"`
+with the reason.
+
+**In closed form** (`evaluation.grad_norm.gradient_form`, `closed_form` by
+default; FINDINGS.md `POST-F38`). Where the task gives F and its gradient in
+closed form (`closed_form_eval`, `BatchableTask`), the fused pass takes each
+central batch from it -- a stack of one over the batch's prepared rows, with
+no graph and no backward -- rather than through autograd: the loss and the
+gradient are `closed_form_gradient`'s, every other output the iterate's. F
+and `grad_norm_sq` are then the same within `1e-12` relative and every other
+column bit for bit; on Figure 1's and heterogeneous-quadratic's shipped
+configs F is bit for bit too. `gradient: "closed_form"` in the record says so;
+`"autograd"` with `gradient_reason` says why not (`asked for`, or a task with
+no closed form), and `gradient_form: autograd` keeps autograd's pass.
 
 ### 6.2 The running mean over the run's iterates
 
@@ -1089,6 +1102,7 @@ Every key that adds, removes or renames a column.
 | `evaluation.fit.every` | `1` | Which rounds have values in the `fit_*` task columns and FedProx's `fit_total_loss`, which come from the post-fit pass (§1); `never` removes those columns. |
 | `evaluation.grad_norm.every` | `never` | Adds `grad_norm_sq` (§6.1), with values on the rounds it schedules. |
 | `evaluation.grad_norm.fused` | `true` | On a round with the central pass, measures `grad_norm_sq` through it where it is F (§6.1); `false` keeps its own pass. Changes `grad_norm_sq`'s last bits at most. |
+| `evaluation.grad_norm.gradient_form` | `closed_form` | The fused pass from the task's closed form where it gives one (§6.1); `autograd` keeps autograd's. Changes the last bits of F and `grad_norm_sq` at most. |
 | `convergence.metrics` | `[]` | Adds `<column>_running_mean` for each metric named (§6.2), valued on every round. |
 | `convergence.iterates` | `after_update` | `before_update`: row `t`'s global-model columns and means are of the model before round `t`'s update (§6.2). |
 | `evaluation.{train,val,test}.clients` | `participating`, `all`, `all` | Which clients enter the aggregate — changes the numbers, not the column set. |

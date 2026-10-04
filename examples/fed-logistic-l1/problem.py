@@ -2129,15 +2129,51 @@ class FedLogisticL1Task(TaskAdapter):
         margins = torch.matmul(features, x.unsqueeze(-1)).squeeze(-1)
         mean = STACKED_LOSSES[model.loss_form](-labels * margins, mask)
         loss = mean + STACKED_PENALTIES[model.penalty_form](x, model.penalty_strength)
-        iterate = x.detach()
+        return self._stacked_outputs(model, x.detach(), loss.detach(), labels, mask)
+
+    def closed_form_eval(
+        self,
+        model: LogisticModel,
+        params: Mapping[str, Tensor],
+        buffers: Mapping[str, Tensor] | None,
+        batch: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+    ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+        """``functional_eval``'s outputs and ``functional_loss``'s gradient, in closed form.
+
+        BatchableTask's optional ``closed_form_eval``: the gradient and the
+        loss are ``closed_form_gradient``'s, from one set of margins over the
+        signed rows (``closed_form_rows``), and every other output is the
+        iterate's, as ``stacked_eval`` gives it.
+        """
+
+        gradients, outputs = self.closed_form_gradient(
+            model, params, buffers, batch, mask, outputs=True
+        )
+        (signed_rows,) = batch
+        rows = signed_rows[..., 0]
+        return gradients, self._stacked_outputs(
+            model, params["x"].detach(), outputs["loss"], rows, mask
+        )
+
+    def _stacked_outputs(
+        self,
+        model: LogisticModel,
+        iterate: Tensor,
+        loss: Tensor,
+        rows: Tensor,
+        mask: Tensor | None,
+    ) -> dict[str, Tensor]:
+        """A stack's eval outputs: its loss, its rows (``(clients, rows)``) and its iterates'."""
+
         found = iterate.abs() > model.support_tolerance
         if mask is None:
             total = torch.full(
-                (len(x),), float(labels.shape[1]), dtype=torch.float64, device=labels.device
+                (len(iterate),), float(rows.shape[1]), dtype=torch.float64, device=rows.device
             )
         else:
             total = mask.sum(dim=1).to(torch.float64)
-        measured = {"loss": loss.detach(), "total": total}
+        measured = {"loss": loss, "total": total}
         if self._optimum is not None:
             measured["distance_to_optimum"] = torch.linalg.vector_norm(
                 iterate - self._optimum, dim=1

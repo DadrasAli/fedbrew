@@ -600,6 +600,17 @@ its gradient into tensors it keeps there (`scratch`, `fedbrew/tasks/base.py`),
 which the executor reads before the next call. fed-logistic-l1's test holds
 both to the form on the rows as they are, bit for bit.
 
+A task with a closed form whose central pass is in parts (`CentralPassInParts`)
+may give `closed_form_eval(model, params, buffers, batch, mask)` too, read as
+`closed_form_gradient` reads its stack: `(gradients, outputs)`, its closed
+form's gradients and `functional_eval`'s outputs stacked over clients, the
+loss `closed_form_gradient`'s. The fused pass of F and `grad_norm_sq` then
+takes each central batch from it, with no graph and no backward
+(`evaluation.grad_norm.gradient_form`, chapter 08 §6.1). fed-logistic-l1's
+and heterogeneous-quadratic's tests hold it to `functional_eval` and
+autograd's gradient: the loss and gradient within `1e-12`, the rest bit for
+bit.
+
 For `evaluation.grad_norm` (chapter 04 §8), say what the task's `grad_norm_sq`
 measures as `GRAD_NORM_GLOSS` -- the squared norm of the gradient of its global
 objective F, and what F is -- pass it as

@@ -119,6 +119,17 @@ class BatchableTask(Protocol):
     ``split_rows``' tensors, moved to the model's device -- step the optimizer,
     and return ``functional_loss``'s outputs as floats.
 
+    A task with a closed form may give one more:
+    ``closed_form_eval(model, params, buffers, batch, mask)``, ``functional_eval``
+    and ``functional_loss``'s gradient at once for a stack read as
+    ``closed_form_gradient`` reads it (its prepared rows, a leading client
+    dimension), as ``(gradients, outputs)``: the gradients
+    ``closed_form_gradient`` gives, and ``functional_eval``'s outputs stacked
+    over the clients, whose ``loss`` is ``closed_form_gradient``'s and the same
+    to rounding. A fused pass measures F and ``grad_norm_sq`` with it, with no
+    graph and no backward (``FusedPass``,
+    ``evaluation.grad_norm.gradient_form``).
+
     And ``stacked_eval(model, params, buffers, batch, mask)``, optional
     too: ``functional_eval`` for a whole stack at once -- ``params``, ``batch``
     and ``mask`` each with a leading client dimension -- every output stacked

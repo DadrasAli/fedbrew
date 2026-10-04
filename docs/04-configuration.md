@@ -625,6 +625,7 @@ run at `highest` while `run.json` recorded the typo as though it applied.
 | `fit.every` | int \| `final` \| `never` | `1` | The pass each training client makes over its own train split after its update: the `fit_` metrics. See below. |
 | `grad_norm.every` | int \| `final` \| `never` | `never` | `grad_norm_sq`, the squared norm of the gradient of the global objective at the global model. See below. |
 | `grad_norm.fused` | bool | `true` | On a round with the central pass, `grad_norm_sq` through that pass where it is F, in one pass. See below. |
+| `grad_norm.gradient_form` | `closed_form` \| `autograd` | `closed_form` | The fused pass's arithmetic: the task's closed form of F and its gradient where it gives one, autograd's otherwise; `autograd` always autograd's. See below. |
 | `model_scope` | `global` \| `personal` \| `both` | `"global"` | |
 
 **Schedule grammar** — `parse_evaluation_schedule` (`fedbrew/core/config.py`):
@@ -707,6 +708,17 @@ order are the gradient pass's. The central columns never change. Elsewhere,
 on a round that measures one of them, and with `false`, the gradient takes
 its own pass. run.json's `reproducibility.grad_norm` says which a run took
 (chapter 08 §6.1); the default changed with `POST-F37`.
+
+**`grad_norm.gradient_form` is that pass's arithmetic.** `closed_form`, the
+default, measures the fused pass with the task's closed form of F and its
+gradient where the task gives one (`closed_form_eval`, chapter 12;
+fed-logistic-l1's and heterogeneous-quadratic's): no graph and no backward,
+F and `grad_norm_sq` the same within `1e-12` relative and every other column
+bit for bit. Where the task gives none, and with `autograd`, the pass
+differentiates the central pass's loss through autograd. The gradient's own
+pass, where a round has no fused one, is autograd's either way. run.json's
+`reproducibility.grad_norm.gradient` names the form; the default changed with
+`POST-F38`.
 
 **Client scope grammar** — `parse_evaluation_client_scope` (`fedbrew/core/config.py`):
 

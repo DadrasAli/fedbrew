@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import copy
 import csv
+import dataclasses
 import tempfile
 import unittest
 from contextlib import nullcontext
@@ -392,6 +393,23 @@ class TheKeyTest(unittest.TestCase):
         with self.assertRaisesRegex(RunRefused, "evaluation.grad_norm.fused must be true or false"):
             self._load(stated("yes"))
 
+    def test_the_closed_form_is_the_default_form(self) -> None:
+        self.assertEqual(load_config(SMOKE).evaluation.grad_norm.gradient_form, "closed_form")
+
+        def stated(value: Any) -> Any:
+            return lambda raw: raw.setdefault("evaluation", {}).update(
+                grad_norm={"every": 1, "gradient_form": value}
+            )
+
+        loaded = self._load(stated("autograd"))
+        self.assertEqual(loaded.evaluation.grad_norm.gradient_form, "autograd")
+        for value in ("closed", True, ["autograd"]):
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(RunRefused, "evaluation.grad_norm.gradient_form must be"),
+            ):
+                self._load(stated(value))
+
     def test_a_task_that_declares_no_gradient_refuses_it(self) -> None:
         from fedbrew.core.registry import tasks
 
@@ -468,7 +486,21 @@ class WhereOnePassCannotBeTest(unittest.TestCase):
 
         fused, record, components = self._plan(self._logistic())
         self.assertIsInstance(fused, FusedPass)
-        self.assertEqual(record, {"pass": "fused", "asked": "fused"})
+        self.assertTrue(fused.closed)
+        self.assertEqual(record, {"pass": "fused", "asked": "fused", "gradient": "closed_form"})
+        fused, record, _ = self._plan(
+            self._logistic(grad_norm={"every": 1, "gradient_form": "autograd"})
+        )
+        self.assertFalse(fused.closed)
+        self.assertEqual(
+            record,
+            {
+                "pass": "fused",
+                "asked": "fused",
+                "gradient": "autograd",
+                "gradient_reason": "asked for",
+            },
+        )
         self.assertEqual(self._plan(self._logistic(grad_norm={"every": "never"}))[:2], (None, {}))
         for label, config, reason in (
             ("asked for", self._logistic(grad_norm={"every": 1, "fused": False}), "asked for"),
@@ -511,16 +543,34 @@ class WhereOnePassCannotBeTest(unittest.TestCase):
         detached = mock.patch.object(
             task_class, "functional_eval", _detached(task_class.functional_eval)
         )
+        autograd = dataclasses.replace(
+            evaluation,
+            grad_norm=dataclasses.replace(evaluation.grad_norm, gradient_form="autograd"),
+        )
         for label, arguments, patch, reason in (
             ("a server's own pass", (own, dataset), nullcontext(), "central pass is its own"),
             ("other rows", (server, fewer), nullcontext(), "not every client's train rows"),
-            ("a detached loss", (server, dataset), detached, "without its graph"),
         ):
             with self.subTest(case=label), patch:
                 fused, record = fused_pass(evaluation, *arguments)
                 self.assertIsNone(fused)
                 self.assertEqual(record["pass"], "separate")
                 self.assertIn(reason, record["reason"])
+        with self.subTest(case="a detached loss"), detached:
+            # Autograd's pass needs the loss's graph; the closed form reads none.
+            fused, record = fused_pass(autograd, server, dataset)
+            self.assertIsNone(fused)
+            self.assertIn("without its graph", record["reason"])
+            fused, record = fused_pass(evaluation, server, dataset)
+            self.assertEqual((record["pass"], record["gradient"]), ("fused", "closed_form"))
+        with (
+            self.subTest(case="no closed form of F"),
+            mock.patch.object(task_class, "closed_form_eval", None),
+        ):
+            fused, record = fused_pass(evaluation, server, dataset)
+            self.assertFalse(fused.closed)
+            self.assertEqual((record["pass"], record["gradient"]), ("fused", "autograd"))
+            self.assertIn("closed_form_eval", record["gradient_reason"])
 
     def test_other_rows_are_not_f(self) -> None:
         from fedbrew.core.grad_norm import _same_rows

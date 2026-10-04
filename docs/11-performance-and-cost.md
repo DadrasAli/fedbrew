@@ -660,7 +660,10 @@ computes, bit for bit on the same device:
   fed-logistic-l1's pooled objective is; heterogeneous-quadratic's has steps
   alone. On a round that measures `grad_norm_sq` too, where that pass is F --
   its rows every client's train rows -- the gradient is taken through it, one
-  pass for both (`FusedPass`, `evaluation.grad_norm.fused`, chapter 08 §6.1).
+  pass for both (`FusedPass`, `evaluation.grad_norm.fused`, chapter 08 §6.1),
+  in the task's closed form where it gives one (`closed_form_eval`,
+  `evaluation.grad_norm.gradient_form`): Figure 1's smooth-nonconvex rounds
+  spent 0.83 ms of 1.98 on autograd's fused pass on 2026-10-04.
   Both are staged with the round's other values and read back
   in its one copy; the flush builds each client's `EvalResult` with its
   rule's `batched_evaluation_result`, and the central metrics with the task's

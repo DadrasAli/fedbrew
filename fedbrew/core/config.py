@@ -275,7 +275,18 @@ class GradNormEvaluationConfig:
     #: than its own chunks, so its last bits may differ (FINDINGS.md, POST-F37).
     #: run.json's ``reproducibility.grad_norm`` records which pass a run took.
     fused: bool = True
+    #: The fused pass's arithmetic: ``closed_form``, F and its gradient from
+    #: the task's closed form where it gives one (``closed_form_eval``), with
+    #: no graph and no backward, and autograd's elsewhere; ``autograd``, the
+    #: loss differentiated through autograd everywhere. The two differ in the
+    #: last bits of F and grad_norm_sq (FINDINGS.md, POST-F38); the gradient's
+    #: own pass, where there is no fused one, is autograd's either way.
+    gradient_form: str = "closed_form"
     extra: dict[str, Any] = field(default_factory=dict)
+
+
+#: What ``evaluation.grad_norm.gradient_form`` takes.
+GRAD_NORM_GRADIENT_FORMS = ("closed_form", "autograd")
 
 
 #: Which model each evaluation pass measures.
@@ -1860,8 +1871,17 @@ def _build_evaluation_config(values: object) -> EvaluationConfig:
     fused = grad_known.get("fused", defaults.grad_norm.fused)
     if not isinstance(fused, bool):
         raise RunRefused(f"evaluation.grad_norm.fused must be true or false, got {fused!r}")
+    form = grad_known.get("gradient_form", defaults.grad_norm.gradient_form)
+    if form not in GRAD_NORM_GRADIENT_FORMS:
+        raise RunRefused(
+            f"evaluation.grad_norm.gradient_form must be one of {list(GRAD_NORM_GRADIENT_FORMS)}, "
+            f"got {form!r}"
+        )
     grad_norm = GradNormEvaluationConfig(
-        every=grad_known.get("every", defaults.grad_norm.every), fused=fused, extra=grad_extra
+        every=grad_known.get("every", defaults.grad_norm.every),
+        fused=fused,
+        gradient_form=form,
+        extra=grad_extra,
     )
     extra = {
         key: value
