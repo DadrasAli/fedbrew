@@ -734,6 +734,61 @@ class SetTrainingTest(unittest.TestCase):
         self.assertEqual(calls, [False])
 
 
+@pytest.mark.fast
+class AOneChunkRoundsSumsAreKeptTest(unittest.TestCase):
+    """``_KeptSums``: the server's metric sums, kept while a round's columns are the last's.
+
+    Every round's result is a fresh accumulator's over the same columns:
+    kept for equal columns, counts and masks, summed again for any other,
+    a NaN or a 0.0 where -0.0 was, and never put into an accumulator that
+    already holds sums.
+    """
+
+    def test_kept_only_for_the_same_columns(self) -> None:
+        from unittest import mock
+
+        from fedbrew.core.resident import _KeptSums
+        from fedbrew.servers.fedavg import WeightedMetricAccumulator
+
+        def fresh(columns: Any, counts: Any, reported: Any) -> dict[str, float]:
+            accumulator = WeightedMetricAccumulator()
+            accumulator.add_columns(columns, counts, reported)
+            return accumulator.result()
+
+        kept = _KeptSums()
+        rounds = [
+            ({"a": [1.0, 2.0], "b": [0.5, 0.25]}, [3, 4], {}),
+            ({"a": [1.0, 2.0], "b": [0.5, 0.25]}, [3, 4], {}),
+            ({"a": [1.0, 2.5], "b": [0.5, 0.25]}, [3, 4], {}),
+            ({"a": [1.0, 2.5], "b": [0.5, 0.25]}, [3, 5], {}),
+            ({"a": [1.0, 2.5], "b": [0.5, 0.25]}, [3, 5], {"b": [True, False]}),
+            ({"a": [-0.0, 0.0], "b": [0.5, 0.25]}, [3, 5], {}),
+            ({"a": [0.0, 0.0], "b": [0.5, 0.25]}, [3, 5], {}),
+            ({"a": [float("nan"), 1.0], "b": [0.5, 0.25]}, [3, 5], {}),
+            ({"a": [float("nan"), 1.0], "b": [0.5, 0.25]}, [3, 5], {}),
+        ]
+        summed = mock.patch.object(
+            WeightedMetricAccumulator,
+            "add_columns",
+            autospec=True,
+            side_effect=WeightedMetricAccumulator.add_columns,
+        )
+        with summed as add_columns:
+            for columns, counts, reported in rounds:
+                accumulator = WeightedMetricAccumulator()
+                kept.add_columns(accumulator, columns, counts, reported)
+                self.assertEqual(repr(accumulator.result()), repr(fresh(columns, counts, reported)))
+        # Summed again for every round but the second and the seventh (0.0 sums as -0.0).
+        self.assertEqual(add_columns.call_count, len(rounds) + len(rounds) - 2)
+        busy = WeightedMetricAccumulator()
+        busy.add_columns({"a": [7.0]}, [1], {})
+        kept.add_columns(busy, *rounds[0])
+        expected = WeightedMetricAccumulator()
+        expected.add_columns({"a": [7.0]}, [1], {})
+        expected.add_columns(*rounds[0])
+        self.assertEqual(repr(busy.result()), repr(expected.result()))
+
+
 class TheWriterStagesCheckpointsTest(unittest.TestCase):
     """Each staged checkpoint is written to its temporary file by the writer, in order."""
 

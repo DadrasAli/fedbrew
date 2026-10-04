@@ -600,6 +600,7 @@ class ResidentRounds:
         self._held_eval_rows: tuple[Any, list[int]] | None = None
         #: The example counts the last aggregated round's clients reported, in order.
         self.reported: list[int] = []
+        self._kept_sums = _KeptSums()
         self._checked: tuple[Any, list[int]] | None = None
         self.graphs = RoundGraphs(self.device, executor.cuda_graphs, executor.record)
         #: The dtypes the fold sums the model's tensors in, in order of first use.
@@ -1541,7 +1542,8 @@ class ResidentRounds:
         done, total = 0, len(device_round.positions)
         report = getattr(observer, "fitted_stack", None)
         self.reported = []
-        for stacked, seconds in self.stacked_results(device_round, values):
+        chunks = self.stacked_results(device_round, values)
+        for stacked, seconds in chunks:
             if callable(report):
                 done += len(stacked)
                 report(stacked, seconds, done, total)
@@ -1554,7 +1556,10 @@ class ResidentRounds:
             columns, reported = stacked.metric_columns()
             counts = stacked.counts()
             self.reported.extend(counts)
-            metric_accumulator.add_columns(columns, counts, reported)
+            if len(chunks) == 1:
+                self._kept_sums.add_columns(metric_accumulator, columns, counts, reported)
+            else:
+                metric_accumulator.add_columns(columns, counts, reported)
         own = server.adopt_update(host_mean, host_carried, round_info)
         metrics = filter_metrics({**metric_accumulator.result(), **own}, server.metrics)
         round_info.metrics.update(metrics)
@@ -1667,6 +1672,49 @@ class ResidentRounds:
 
     def close(self) -> None:
         self.rows = None
+
+
+class _KeptSums:
+    """A one-chunk round's server metric sums, kept for a round whose columns are the same.
+
+    ``WeightedMetricAccumulator.add_columns`` into a new accumulator is a
+    function of the columns, the counts and the masks alone; where all three
+    compare equal to the last round's (``==``: a NaN never does, and a sum
+    from 0.0 is the same for 0.0 and -0.0 summands), its totals and weights
+    are the last round's, and are put in rather than summed again.
+    """
+
+    def __init__(self) -> None:
+        self._held: tuple[Any, ...] | None = None
+
+    def add_columns(
+        self,
+        accumulator: WeightedMetricAccumulator,
+        columns: dict[str, list[float]],
+        counts: list[int],
+        reported: dict[str, list[bool]],
+    ) -> None:
+        held = self._held
+        if (
+            held is not None
+            and held[0] == counts
+            and held[1] == reported
+            and held[2] == columns
+            and not accumulator._totals
+        ):
+            accumulator._totals.update(held[3])
+            accumulator._weights.update(held[4])
+            return
+        fresh = not accumulator._totals
+        accumulator.add_columns(columns, counts, reported)
+        if fresh:
+            self._held = (
+                counts,
+                reported,
+                columns,
+                dict(accumulator._totals),
+                dict(accumulator._weights),
+            )
 
 
 class _Requests:
