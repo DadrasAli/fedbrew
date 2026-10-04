@@ -594,6 +594,8 @@ class ResidentRounds:
         self._held_plans: dict[bool, RoundPlan] = {}
         self._stand_ins: dict[int, StateStack] = {}
         self._held_eval_rows: tuple[Any, list[int]] | None = None
+        #: The example counts the last aggregated round's clients reported, in order.
+        self.reported: list[int] = []
         self._checked: tuple[Any, list[int]] | None = None
         self.graphs = RoundGraphs(self.device, executor.cuda_graphs, executor.record)
         #: The dtypes the fold sums the model's tensors in, in order of first use.
@@ -1461,6 +1463,7 @@ class ResidentRounds:
         metric_accumulator = WeightedMetricAccumulator()
         done, total = 0, len(device_round.positions)
         report = getattr(observer, "fitted_stack", None)
+        self.reported = []
         for stacked, seconds in self.stacked_results(device_round, values):
             if callable(report):
                 done += len(stacked)
@@ -1472,7 +1475,9 @@ class ResidentRounds:
             if not len(stacked):
                 continue
             columns, reported = stacked.metric_columns()
-            metric_accumulator.add_columns(columns, stacked.counts(), reported)
+            counts = stacked.counts()
+            self.reported.extend(counts)
+            metric_accumulator.add_columns(columns, counts, reported)
         own = server.adopt_update(host_mean, host_carried, round_info)
         metrics = filter_metrics({**metric_accumulator.result(), **own}, server.metrics)
         round_info.metrics.update(metrics)
@@ -1561,6 +1566,7 @@ class ResidentRounds:
         total = len(results)
         for done, (result, seconds) in enumerate(results, start=1):
             observer.fitted(result, seconds, done, total)
+        self.reported = [result.num_examples for result, _ in results]
         return server.aggregate_folded(round_info, [result for result, _ in results], host_mean)
 
     def client_states(self) -> dict[str, Any] | None:
@@ -1935,7 +1941,7 @@ class _Loop:
                 start=self.host_model,
                 host_carried=host_carried,
             )
-            _check_weights(device_round, state)
+            _check_weights(device_round, rounds.reported)
             self.host_model = host_mean
         clock = device_round.clock
         timings = {
@@ -2223,11 +2229,13 @@ def _record_evaluation(
         round_info.metrics.update(central)
 
 
-def _check_weights(device_round: DeviceRound, state: Any) -> None:
-    """The weights the round was folded with are the example counts its records report."""
+def _check_weights(device_round: DeviceRound, counts: list[int]) -> None:
+    """The weights the round was folded with are the example counts its clients report.
 
-    records = state.client_update_metrics_history[-len(device_round.positions) :]
-    counts = [record.num_examples for record in records]
+    The counts each client's result carries, which its record holds where the
+    run keeps the records (``client_records``) and its summary sums.
+    """
+
     if counts != device_round.eval_rows:
         raise RuntimeError(
             f"round {device_round.round_id}: the resident fold's weights "

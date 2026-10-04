@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import heapq
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, fields, replace
 from typing import Any
 
@@ -104,6 +104,9 @@ class ClientHistorySummary:
     #: Every metric name seen, which is client_update_metrics.csv's column set.
     #: Deriving it was another full scan of the history on every flush.
     metric_names: set[str] = field(default_factory=set)
+    #: How many records arrived, whether the history keeps them or not
+    #: (``_AppendOnlyHistory.keeps``): run.json's counts of them.
+    records: int = 0
 
     def snapshot(self) -> ClientHistorySummary:
         """This summary as it is now, in containers of its own: what a flush writes.
@@ -219,25 +222,33 @@ class _AppendOnlyHistory(list):  # type: ignore[type-arg]
     desynchronising it. Nothing in the codebase uses them: these histories are
     appended to and read, never edited, and a summary that can drift from the
     list it describes is worse than the full scan it replaces.
+
+    ``keeps`` false keeps the summary and not the records: a run whose
+    per-client records nobody reads -- no per-client CSV, the only reader
+    (``run_fl_loop``'s ``client_records``) -- summarises them as they arrive
+    and holds none, and the stacked path builds none (``extend_stacked``).
     """
 
-    __slots__ = ("summary",)
+    __slots__ = ("summary", "keeps")
 
     def __init__(self) -> None:
         super().__init__()
         self.summary = ClientHistorySummary()
+        self.keeps = True
 
     def _accumulate(self, record: Any) -> None:
         raise NotImplementedError
 
     def append(self, record: Any) -> None:
         self._accumulate(record)
-        super().append(record)
+        if self.keeps:
+            super().append(record)
 
     def extend(self, records: Any) -> None:
         records = list(records)
         self._accumulate_all(records)
-        super().extend(records)
+        if self.keeps:
+            super().extend(records)
 
     def _accumulate_all(self, records: list[Any]) -> None:
         """``_accumulate`` of each record in turn: a round's records arrive together."""
@@ -286,6 +297,7 @@ class ClientEvaluationHistory(_AppendOnlyHistory):
         summary.client_ids.add(record.client_id)
         summary.train_examples += record.train_num_examples
         summary.test_examples += record.test_num_examples
+        summary.records += 1
 
 
 class ClientUpdateHistory(_AppendOnlyHistory):
@@ -307,10 +319,11 @@ class ClientUpdateHistory(_AppendOnlyHistory):
             examples += record.num_examples
             names.update(record.metrics)
         summary.num_examples = examples
+        summary.records += len(records)
 
     def extend_stacked(
         self,
-        records: list[ClientMetricRecord],
+        records: Callable[[], list[ClientMetricRecord]],
         phase: str,
         client_ids: Sequence[str],
         counts: Sequence[int],
@@ -318,20 +331,23 @@ class ClientUpdateHistory(_AppendOnlyHistory):
     ) -> None:
         """``extend`` with one stack's records, its summary taken a column at a time.
 
-        ``records`` are the stack's clients' of ``phase``, client ``p`` of
-        ``client_ids`` with ``counts[p]`` examples; ``names`` every metric name
-        some record holds. The totals ``_accumulate_all`` keeps -- a set of
-        ids, a count per phase, a sum of whole numbers, a set of names -- are
-        the same taken this way.
+        ``records`` makes the stack's clients' records of ``phase``, client
+        ``p`` of ``client_ids`` with ``counts[p]`` examples, and is called only
+        where the history keeps them; ``names`` every metric name some record
+        holds. The totals ``_accumulate_all`` keeps -- a set of ids, a count
+        per phase, a sum of whole numbers, a set of names, how many -- are the
+        same taken this way.
         """
 
-        if records:
+        if client_ids:
             summary = self.summary
             summary.client_ids.update(client_ids)
-            summary.phase_counts[phase] = summary.phase_counts.get(phase, 0) + len(records)
+            summary.phase_counts[phase] = summary.phase_counts.get(phase, 0) + len(client_ids)
             summary.num_examples += sum(counts)
             summary.metric_names.update(names)
-        list.extend(self, records)
+            summary.records += len(client_ids)
+        if self.keeps:
+            list.extend(self, records())
 
 
 @dataclass(slots=True)

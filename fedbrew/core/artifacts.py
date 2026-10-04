@@ -744,19 +744,21 @@ def save_run_json(
 
     final_record = history[-1] if history else None
     checkpoint_dir = Path(output_dir) / "checkpoints"
-    evaluation_records = client_history or []
-    update_records = client_update_history or []
+    # An empty history still carries its summary: one that keeps no records
+    # (``_AppendOnlyHistory.keeps``) is empty and counts them all.
+    evaluation_records = client_history if client_history is not None else []
+    update_records = client_update_history if client_update_history is not None else []
     clients = _unique_clients(evaluation_records, update_records)
     phase_counts = _client_update_metric_phase_counts(update_records)
     total_client_fits = _total_client_fits(history, client_update_history)
-    total_client_evaluations = len(evaluation_records)
+    total_client_evaluations = _record_count(evaluation_records)
     final_metrics = dict(final_record.metrics) if final_record else {}
 
     metadata = dict(run_metadata or {})
     scale: dict[str, Any] = {
         "total_client_fits": total_client_fits,
         "total_client_evaluations": total_client_evaluations,
-        "total_client_update_metric_records": len(update_records),
+        "total_client_update_metric_records": _record_count(update_records),
         "client_update_metric_phase_counts": phase_counts,
         "total_client_train_examples_evaluated": _total_client_train_examples(evaluation_records),
         "total_client_test_examples_evaluated": _total_client_test_examples(evaluation_records),
@@ -992,6 +994,13 @@ def _summary(history: Any) -> ClientHistorySummary | None:
 
     summary = getattr(history, "summary", None)
     return summary if isinstance(summary, ClientHistorySummary) else None
+
+
+def _record_count(history: list[Any]) -> int:
+    """How many records a history took, kept or not (``_AppendOnlyHistory.keeps``)."""
+
+    summary = _summary(history)
+    return summary.records if summary is not None else len(history)
 
 
 def _unique_clients(

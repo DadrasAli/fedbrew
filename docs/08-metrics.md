@@ -883,7 +883,9 @@ the `personal_` aggregates either way.
 One row per selected client per round, from the fit path. **Off by default** —
 `reporting.per_client_csv` gates *both* per-client CSVs, not just
 `client_metrics.csv` — `flush_round_artifacts` (`fedbrew/core/artifacts.py`) and
-`_artifact_file_names` (`fedbrew/core/runner.py`). **Appended**
+`_artifact_file_names` (`fedbrew/core/runner.py`); off, no record is built
+or held, and run.json counts them from the histories' summaries (chapter 11
+§4.2). **Appended**
 rather than rewritten — `flush_client_csvs` (`fedbrew/core/artifacts.py`): they
 used to be rewritten in
 full on every round that wrote a checkpoint, which `save_last` makes every

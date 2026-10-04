@@ -168,6 +168,14 @@ Two related reductions: the `.jsonl` twins of these files, which held
 byte-identical records in a larger format, are gone, and a checkpoint no longer
 stores the model twice.
 
+Off, the run builds no per-client record at all: those files are the records'
+only reader, so the histories keep their summary -- the clients, the counts
+and the metric names run.json's `scale` block reports -- and hold no record
+(`run_fl_loop(client_records=...)`, `_AppendOnlyHistory.keeps`,
+`fedbrew/core/state.py`), and the resident round builds none of a stack's
+(`extend_stacked`). A caller of `run_fl_loop` keeps them by default. Figure
+1's rounds spent 0.05 ms building 32 records each on 2026-10-04.
+
 ### 4.3 `runtime.performance.dataloader`
 
 The `dataloader` block holds four keys, and two of them are unreachable in

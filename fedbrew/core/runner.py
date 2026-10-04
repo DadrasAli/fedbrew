@@ -270,6 +270,9 @@ def _run_loop(
         executor=executor,
         evaluator=evaluator_for(executor),
         fused_pass=fused,
+        # Per-client records are read by the per-client CSVs alone; without
+        # them the run keeps their summary, which run.json reports.
+        client_records=config.reporting.per_client_csv,
     )
 
 

@@ -148,6 +148,7 @@ def frozen_state(state: Any) -> Any:
             setattr(frozen, name, list(history))
             continue
         copied = type(history).__new__(type(history))
+        copied.keeps = history.keeps
         list.extend(copied, history)
         summary = history.summary
         snapshot = getattr(summary, "snapshot", None)

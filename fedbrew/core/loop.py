@@ -191,6 +191,10 @@ def run_fl_loop(
     # F and its gradient in one pass on a round that measures both
     # (fedbrew/core/grad_norm.py, FusedPass); None measures them apart.
     fused_pass: Any = None,
+    # Whether the returned state holds every per-client record, or only their
+    # summary (run.json's counts): a caller that reads them in memory or a
+    # per-client CSV does, and the runner keeps them exactly when it writes one.
+    client_records: bool = True,
 ) -> ExperimentState:
     """Run a minimal task-agnostic federated loop."""
 
@@ -239,6 +243,9 @@ def run_fl_loop(
         # this far with a checkpoint did continue it.
         resumed=resume_from is not None,
     )
+    if not client_records and not reporting.per_client_csv:
+        for history in (state.client_metrics_history, state.client_update_metrics_history):
+            history.keeps = False  # type: ignore[attr-defined]
     if start_round > 1 and output_dir is not None:
         _load_existing_metric_history(state, output_dir, start_round)
         # The monitor is built fresh above, so without this a resumed run's
@@ -1004,7 +1011,14 @@ class _RoundFitObserver:
 
     def fitted(self, result: FitResult, seconds: float, done: int, total: int) -> None:
         self._totals.fit_seconds += seconds
-        self._state.client_update_metrics_history.append(_build_client_metric_record(result))
+        history = self._state.client_update_metrics_history
+        if getattr(history, "keeps", True):
+            history.append(_build_client_metric_record(result))
+        else:
+            # Summarised, and no record built: nothing reads one (``keeps``).
+            history.extend_stacked(
+                list, "fit", [result.client_id], [result.num_examples], result.metrics
+            )
         self._totals.num_examples += result.num_examples
         if self._on_progress is not None:
             self._on_progress(self._round_id, done, total, "fit")
@@ -1016,27 +1030,31 @@ class _RoundFitObserver:
 
         self._totals.fit_seconds += seconds
         counts = stacked.counts()
-        records = [
-            ClientMetricRecord(
-                round_id=stacked.round_id,
-                client_id=client_id,
-                phase="fit",
-                num_examples=count,
-                metrics=dict(metrics),
-            )
-            for client_id, count, metrics in zip(
-                stacked.client_ids, counts, stacked.metric_rows(), strict=True
-            )
-        ]
+
+        def records() -> list[ClientMetricRecord]:
+            return [
+                ClientMetricRecord(
+                    round_id=stacked.round_id,
+                    client_id=client_id,
+                    phase="fit",
+                    num_examples=count,
+                    metrics=dict(metrics),
+                )
+                for client_id, count, metrics in zip(
+                    stacked.client_ids, counts, stacked.metric_rows(), strict=True
+                )
+            ]
+
         history = self._state.client_update_metrics_history
         extend_stacked = getattr(history, "extend_stacked", None)
         if callable(extend_stacked):
-            # The stack's summary a column at a time: every name some client reports.
+            # The stack's summary a column at a time: every name some client
+            # reports; its records built only where the history keeps them.
             columns, reported = stacked.metric_columns()
             names = [name for name in columns if name not in reported or any(reported[name])]
             extend_stacked(records, "fit", stacked.client_ids, counts, names)
         else:
-            history.extend(records)
+            history.extend(records())
         for count in counts:
             self._totals.num_examples += count
         if self._on_progress is not None:

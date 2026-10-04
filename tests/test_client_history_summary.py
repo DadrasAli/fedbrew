@@ -147,16 +147,46 @@ class AStackIsSummarisedAsItsRecordsAreTest(unittest.TestCase):
             records = stack(round_id)
             one.extend(records)
             other.extend_stacked(
-                list(records),
+                lambda records=records: list(records),
                 "fit",
                 [record.client_id for record in records],
                 [record.num_examples for record in records],
                 ["fit_loss", "fit_accuracy"],
             )
-        other.extend_stacked([], "fit", [], [], [])
+        other.extend_stacked(list, "fit", [], [], [])
         self.assertEqual(list(other), list(one))
         self.assertEqual(other.summary, one.summary)
         self.assertEqual(list(other.summary.phase_counts), list(one.summary.phase_counts))
+        self.assertEqual(one.summary.records, 9)
+
+    def test_a_history_that_keeps_none_summarises_them_and_builds_none(self) -> None:
+        """``keeps`` false: the same summary, no record held, and none built."""
+
+        kept, evaluations = ClientUpdateHistory(), ClientEvaluationHistory()
+        unkept, unkept_evaluations = ClientUpdateHistory(), ClientEvaluationHistory()
+        unkept.keeps = unkept_evaluations.keeps = False
+        built = []
+
+        def records(round_id: int) -> list[ClientMetricRecord]:
+            made = [_update(round_id, f"c{index}") for index in range(3)]
+            built.append(round_id)
+            return made
+
+        for history in (kept, unkept):
+            history.append(_update(0, "c9", phase="eval"))
+            history.extend([_update(1, "c8")])
+        for round_id in (2, 3):
+            ids, counts = [f"c{index}" for index in range(3)], [7, 7, 7]
+            kept.extend_stacked(lambda r=round_id: records(r), "fit", ids, counts, ["fit_loss"])
+            unkept.extend_stacked(lambda r=round_id: records(r), "fit", ids, counts, ["fit_loss"])
+        for history in (evaluations, unkept_evaluations):
+            history.extend([_evaluation(1, "c0"), _evaluation(1, "c1")])
+        self.assertEqual(built, [2, 3])
+        self.assertEqual(len(kept), 8)
+        self.assertEqual((len(unkept), len(unkept_evaluations)), (0, 0))
+        self.assertEqual(unkept.summary, kept.summary)
+        self.assertEqual(unkept_evaluations.summary, evaluations.summary)
+        self.assertEqual((unkept.summary.records, unkept_evaluations.summary.records), (8, 2))
 
 
 @pytest.mark.fast
@@ -260,7 +290,7 @@ class AppendOnlyTest(unittest.TestCase):
         self.assertEqual(len(updates[1:3]), 2)
 
 
-def _write_config(directory: Path) -> Path:
+def _write_config(directory: Path, per_client: bool = False) -> Path:
     config_path = directory / "history.yaml"
     config_path.write_text(
         textwrap.dedent(
@@ -270,6 +300,7 @@ def _write_config(directory: Path) -> Path:
               output_dir: {directory / "run"}
             reporting:
               fit_metrics: [fit_loss]
+              per_client_csv: {"true" if per_client else "false"}
             server:
               strategy: fedavg
               participation_rate: 1
@@ -320,7 +351,7 @@ class RealRunTest(unittest.TestCase):
     def test_run_json_scale_matches_a_scan_of_the_same_records(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            state = runner.run(_write_config(root), runner.parse_args(["--quiet"]))
+            state = runner.run(_write_config(root, per_client=True), runner.parse_args(["--quiet"]))
             written = json.loads((root / "run" / "run.json").read_text(encoding="utf-8"))
             evaluations = list(state.client_metrics_history)
             updates = list(state.client_update_metrics_history)
@@ -360,6 +391,37 @@ class RealRunTest(unittest.TestCase):
         # Not a trivially-empty comparison.
         self.assertGreater(scale["total_client_fits"], 0)
         self.assertGreater(scale["unique_clients"], 0)
+
+    def test_a_run_without_per_client_csvs_keeps_no_records_and_writes_the_same(self) -> None:
+        self.maxDiff = None
+        """Without the per-client CSVs: no record held, and every file but those the same."""
+
+        written = {}
+        for per_client in (True, False):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config = _write_config(root, per_client=per_client)
+                state = runner.run(config, runner.parse_args(["--quiet"]))
+                histories = (state.client_metrics_history, state.client_update_metrics_history)
+                self.assertEqual([len(history) > 0 for history in histories], [per_client] * 2)
+                run = json.loads((root / "run" / "run.json").read_text(encoding="utf-8"))
+                rows = (root / "run" / "round_metrics.csv").read_text(encoding="utf-8")
+                written[per_client] = (run["scale"], _untimed(rows), histories)
+        self.assertEqual(written[False][0], written[True][0])
+        self.assertEqual(written[False][1], written[True][1])
+        for kept, unkept in zip(written[True][2], written[False][2], strict=True):
+            self.assertEqual(unkept.summary, kept.summary)
+        self.assertGreater(written[False][0]["total_client_update_metric_records"], 0)
+
+
+def _untimed(rows: str) -> list[dict[str, str]]:
+    import csv
+    import io
+
+    return [
+        {key: value for key, value in row.items() if not key.endswith("_sec")}
+        for row in csv.DictReader(io.StringIO(rows))
+    ]
 
 
 if __name__ == "__main__":
