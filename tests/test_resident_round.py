@@ -789,6 +789,47 @@ class AOneChunkRoundsSumsAreKeptTest(unittest.TestCase):
         self.assertEqual(repr(busy.result()), repr(expected.result()))
 
 
+@pytest.mark.fast
+class StagedValuesAreReadBackTest(unittest.TestCase):
+    """``staged_values``: each part joined in one stack where its values share a shape.
+
+    The staged floats are every value's own, in the order a stack per key
+    gives them: for 0-d values of mixed dtypes (float32, float64, int64,
+    bool), for per-client vectors, and for a part whose keys differ in shape,
+    which keeps a stack per key.
+    """
+
+    def test_the_floats_read_back(self) -> None:
+        from fedbrew.core.batched_executor import staged_values
+
+        generator = torch.Generator().manual_seed(8)
+
+        def scalar(dtype: torch.dtype) -> torch.Tensor:
+            value = torch.randn((), generator=generator, dtype=torch.float64) * 1e3
+            return value.to(dtype) if dtype != torch.bool else value > 0
+
+        dtypes = (torch.float32, torch.float64, torch.int64, torch.bool)
+        zero_d = [{f"k{i}": scalar(dtype) for i, dtype in enumerate(dtypes)} for _ in range(3)]
+        vectors = [
+            {"a": torch.randn(4, generator=generator), "b": torch.arange(4.0, dtype=torch.float64)}
+            for _ in range(2)
+        ]
+        mixed = [{"a": torch.randn(3, generator=generator), "b": torch.tensor(2.0)}]
+        parts = [(zero_d, [3]), (vectors, [2, 2, 2, 2]), (mixed, [1]), ([], [])]
+        columns = [torch.tensor([[1.0, 2.0], [3.0, 4.0]])]
+        staged, layout = staged_values(parts, columns)
+        self.assertEqual(staged.dtype, torch.float64)
+        # The values key by key, position by position, as a stack per key gives them.
+        flat = []
+        for outputs, _ in parts:
+            for key in list(outputs[0]) if outputs else []:
+                stacked = torch.stack([output[key] for output in outputs])
+                flat.extend(stacked.reshape(-1).to(torch.float64).tolist())
+        flat.extend(columns[0].reshape(-1).to(torch.float64).tolist())
+        self.assertEqual(repr(staged.tolist()), repr(flat))
+        self.assertEqual(layout[1], [4])
+
+
 class TheWriterStagesCheckpointsTest(unittest.TestCase):
     """Each staged checkpoint is written to its temporary file by the writer, in order."""
 

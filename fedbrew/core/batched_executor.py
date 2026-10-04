@@ -1136,16 +1136,25 @@ def staged_values(
     Every value is widened to float64 where it is: a float32 value and a
     count below 2**53 are exact in float64, so each float read back is the
     one its own ``float()`` would give. None when there is nothing to copy.
+    A part's values, key by key and position by position, are joined in one
+    stack where they share a shape and device, each widened first (exact, so
+    the same values in the same order); otherwise a stack per key.
     """
 
     pieces: list[Tensor] = []
     layout: list[tuple[list[str], int, int, list[int]]] = []
     for outputs, counts in parts:
         keys = list(outputs[0]) if outputs else []
-        for key in keys:
-            pieces.append(
-                torch.stack([output[key] for output in outputs]).reshape(-1).to(torch.float64)
-            )
+        values = [output[key] for key in keys for output in outputs]
+        if values and all(
+            (value.shape, value.device) == (values[0].shape, values[0].device) for value in values
+        ):
+            pieces.append(torch.stack([value.to(torch.float64) for value in values]).reshape(-1))
+        else:
+            for key in keys:
+                pieces.append(
+                    torch.stack([output[key] for output in outputs]).reshape(-1).to(torch.float64)
+                )
         layout.append((keys, len(outputs), len(counts), list(counts)))
     for column in columns:
         pieces.append(column.reshape(-1).to(torch.float64))
