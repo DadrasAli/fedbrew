@@ -322,6 +322,11 @@ def set_training(model: nn.Module, mode: bool) -> None:
     times then walks the modules only where a flag changes.
     """
 
+    if not model._modules:
+        # One module: its own flag is the walk.
+        if model.training != mode or type(model).train is not nn.Module.train:
+            model.train(mode)
+        return
     for module in model.modules():
         if module.training != mode or type(module).train is not nn.Module.train:
             model.train(mode)

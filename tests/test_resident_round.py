@@ -719,6 +719,20 @@ class SetTrainingTest(unittest.TestCase):
             set_training(model, False)
             train.assert_called_once_with(model, False)
 
+    def test_a_model_without_children_reads_its_own_flag(self) -> None:
+        model = nn.Linear(2, 2)
+        for start, mode in ((True, True), (True, False), (False, True), (False, False)):
+            model.training = start
+            with (
+                self.subTest(start=start, mode=mode),
+                mock.patch.object(nn.Module, "train", autospec=True) as train,
+            ):
+                set_training(model, mode)
+                if start == mode:
+                    train.assert_not_called()
+                else:
+                    train.assert_called_once_with(model, mode)
+
     def test_a_module_with_its_own_train_is_always_called(self) -> None:
         calls = []
 
