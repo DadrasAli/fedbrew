@@ -897,6 +897,48 @@ class FAndItsGradientInOnePassTest(ExecutorRuns):
                 self.assertEqual(_untimed(run / name), _untimed(other / name), name)
 
 
+class TheFusedPassReadsTheTrainingRowsTest(ExecutorRuns):
+    """A resident run's closed-form fused pass reads the stack the round trains on in closed form.
+
+    The prepared rows are held once (``FusedPass.share_rows``), and the run
+    writes what it writes with the pass's own copy, for every problem.
+    """
+
+    def test_each_problem(self) -> None:
+        from fedbrew.core.grad_norm import FusedPass
+        from fedbrew.core.resident import ResidentRounds
+
+        real = ResidentRounds._share_rows
+        for loss, penalty in problem.PROBLEMS:
+            with self.subTest(problem=f"{loss}+{penalty}"):
+                config = small_config(loss, penalty)
+                config["schedule"]["rounds"] = 3
+                config["evaluation"]["central_test"] = {"every": 1}
+                config["evaluation"]["grad_norm"] = {"every": 1}
+                runs, shared = {}, {}
+                for sharing in (True, False):
+                    seen: list[bool] = []
+
+                    def recording(rounds: Any, fused: Any, _seen: list[bool] = seen) -> bool:
+                        _seen.append(real(rounds, fused))
+                        return _seen[-1]
+
+                    declined = mock.patch.object(FusedPass, "share_rows", return_value=False)
+                    with (
+                        mock.patch.object(ResidentRounds, "_share_rows", recording),
+                        nullcontext() if sharing else declined,
+                    ):
+                        runs[sharing] = self.run_config(
+                            config, "batched", gradient_form="closed_form"
+                        )
+                    shared[sharing] = seen
+                self.assertEqual(shared, {True: [True], False: [False]})
+                self.assertEqual(
+                    _untimed(runs[True] / "round_metrics.csv"),
+                    _untimed(runs[False] / "round_metrics.csv"),
+                )
+
+
 class FAndItsGradientInClosedFormTest(unittest.TestCase):
     """``closed_form_eval``: ``functional_eval``'s outputs and autograd's gradient, in closed form.
 

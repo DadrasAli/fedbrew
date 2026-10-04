@@ -572,6 +572,39 @@ class WhereOnePassCannotBeTest(unittest.TestCase):
             self.assertEqual((record["pass"], record["gradient"]), ("fused", "autograd"))
             self.assertIn("closed_form_eval", record["gradient_reason"])
 
+    def test_the_closed_form_reads_a_stack_holding_its_rows(self) -> None:
+        """``share_rows``: the stack seen as one client where it is the batch, else nothing."""
+
+        from fedbrew.core.grad_norm import FusedPass
+
+        _, _, components = self._plan(self._logistic())
+        task = components.server.task
+        model = task.build_model(components.server.model_config)
+        generator = torch.Generator().manual_seed(4)
+        features = torch.randn(3, 5, 8, generator=generator, dtype=torch.float64)
+        labels = torch.where(torch.rand(3, 5, generator=generator) < 0.5, -1.0, 1.0).double()
+        pooled = (features.reshape(15, 8), labels.reshape(15))
+        (stack,) = task.closed_form_rows(model, (features, labels))
+
+        def fused(closed: Any = model) -> FusedPass:
+            return FusedPass(task, pooled, 15, True, closed=closed)
+
+        shared = fused()
+        self.assertTrue(shared.share_rows((stack,)))
+        (view,) = shared.batches[0]
+        self.assertEqual(view.data_ptr(), stack.data_ptr())
+        self.assertTrue(torch.equal(view, fused().batches[0][0]))
+        for label, other in (
+            ("other order", (stack.flip(0).contiguous(),)),
+            ("not contiguous", (stack.transpose(0, 1),)),
+            ("another dtype", (stack.float(),)),
+            ("two tensors", (stack, stack)),
+        ):
+            with self.subTest(case=label):
+                self.assertFalse(fused().share_rows(other))
+        self.assertFalse(fused(closed=None).share_rows((stack,)))
+        self.assertFalse(FusedPass(task, pooled, 5, True, closed=model).share_rows((stack,)))
+
     def test_other_rows_are_not_f(self) -> None:
         from fedbrew.core.grad_norm import _same_rows
 

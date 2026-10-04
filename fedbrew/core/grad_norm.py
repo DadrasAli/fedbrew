@@ -354,6 +354,32 @@ class FusedPass:
             self.batches = [closed_form_batch(task, closed, batch) for batch in self.batches]
         self._model: nn.Module | None = None
 
+    def share_rows(self, stack: tuple[Tensor, ...]) -> bool:
+        """Read the closed form's one batch from ``stack`` where it holds those rows: whether so.
+
+        ``stack`` is prepared rows with a leading client dimension and no
+        padding, contiguous, as the resident round trains on them: where they
+        are this pass's rows -- the same values in the same order, dtype and
+        device -- the batch becomes the stack seen as one client, the same
+        shape, strides and alignment, and the pass's own copy is let go. One
+        copy of the rows is then read each round where two were, and every
+        value is the same.
+        """
+
+        if not self.closed or len(self.batches) != 1:
+            return False
+        (batch,) = self.batches
+        if len(stack) != len(batch) or not all(tensor.is_contiguous() for tensor in stack):
+            return False
+        views = tuple(tensor.reshape(1, -1, *tensor.shape[2:]) for tensor in stack)
+        for view, own in zip(views, batch, strict=True):
+            if (view.shape, view.dtype, view.device) != (own.shape, own.dtype, own.device):
+                return False
+            if view.stride() != own.stride() or not torch.equal(view, own):
+                return False
+        self.batches = [views]
+        return True
+
     def measure(
         self, template: nn.Module, params: Mapping[str, Tensor], buffers: Mapping[str, Tensor]
     ) -> tuple[list[dict[str, Tensor]], dict[str, Tensor], Tensor]:

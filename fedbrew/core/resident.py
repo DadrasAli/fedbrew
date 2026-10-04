@@ -611,8 +611,25 @@ class ResidentRounds:
         from fedbrew.core.resident_evaluation import ResidentEvaluation
 
         self.evaluation = ResidentEvaluation(self) if self.unsupported is None else None
+        self.shares_rows = self._share_rows(getattr(context, "fused_pass", None))
 
     # -- set-up --------------------------------------------------------------
+
+    def _share_rows(self, fused: Any) -> bool:
+        """Whether the fused pass reads the rows the round trains on, one copy for both.
+
+        Where the steps take the closed form on every client's prepared rows,
+        unpadded and in the train dtype the pass measures in, and those are the
+        pass's rows (``FusedPass.share_rows``, which compares them).
+        """
+
+        rows = self.rows
+        if fused is None or rows is None or not self.closed or len(set(rows.lengths)) != 1:
+            return False
+        context = self.executor.context
+        dtype = context.train_dtype(self.template_dtype) if context else self.template_dtype
+        prepared = train_rows(rows.everyone(), dtype, self.task, self.template, True)
+        return bool(prepared.stacked and fused.share_rows(prepared.tensors))
 
     def _memory_unsupported(self) -> str | None:
         """Why every client's rows cannot stay on the device, or None."""
