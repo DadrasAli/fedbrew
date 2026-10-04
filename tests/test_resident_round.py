@@ -34,9 +34,11 @@ from unittest import mock
 import pytest
 import torch
 import yaml
+from torch import nn
 
 from fedbrew.core import resident
 from fedbrew.core.checkpointing import load_checkpoint
+from fedbrew.core.torch_utils import set_training
 from tests.test_batched_executor_tolerance import (
     CSVS,
     ExecutorRuns,
@@ -679,6 +681,57 @@ class AProgramsKeyIsKeptWhileItsValuesAreTest(unittest.TestCase):
                 self.assertIs(keys[1], keys[0])
                 self.assertIs(keys[4], keys[3])
                 self.assertEqual(keys[2] == keys[3], rated)
+
+
+def _two_level_model() -> nn.Module:
+    return nn.Sequential(nn.Linear(2, 3), nn.Sequential(nn.Dropout(0.5), nn.Linear(3, 1)))
+
+
+@pytest.mark.fast
+class SetTrainingTest(unittest.TestCase):
+    """``set_training``: ``model.train(mode)``, skipped only where it would change nothing.
+
+    Every module ends in the mode ``train`` leaves it in, from any mix; the
+    walk is skipped where every module holds it, never where one has a
+    ``train`` of its own.
+    """
+
+    def test_every_module_ends_in_the_mode(self) -> None:
+        for mode in (True, False):
+            for mixed in range(4):
+                with self.subTest(mode=mode, mixed=mixed):
+                    model = _two_level_model()
+                    for index, module in enumerate(model.modules()):
+                        module.training = bool((mixed >> (index % 2)) & 1)
+                    set_training(model, mode)
+                    self.assertEqual({m.training for m in model.modules()}, {mode})
+
+    def test_the_walk_is_skipped_only_where_nothing_changes(self) -> None:
+        model = _two_level_model()
+        model.eval()
+        with mock.patch.object(nn.Module, "train", autospec=True) as train:
+            set_training(model, False)
+            train.assert_not_called()
+            set_training(model, True)
+            train.assert_called_once_with(model, True)
+        model[1][0].training = True
+        with mock.patch.object(nn.Module, "train", autospec=True) as train:
+            set_training(model, False)
+            train.assert_called_once_with(model, False)
+
+    def test_a_module_with_its_own_train_is_always_called(self) -> None:
+        calls = []
+
+        class Own(nn.Linear):
+            def train(self, mode: bool = True) -> Own:
+                calls.append(mode)
+                return super().train(mode)
+
+        model = nn.Sequential(Own(2, 2))
+        model.eval()
+        calls.clear()
+        set_training(model, False)
+        self.assertEqual(calls, [False])
 
 
 class TheWriterStagesCheckpointsTest(unittest.TestCase):

@@ -313,6 +313,21 @@ _PROMOTED_ACCUMULATION_DTYPES: dict[torch.dtype, torch.dtype] = {
 }
 
 
+def set_training(model: nn.Module, mode: bool) -> None:
+    """``model.train(mode)``, skipped where it would change nothing.
+
+    Where every module of ``model`` already is in ``mode`` and none has a
+    ``train`` of its own, the call would set each flag to what it holds;
+    a round that switches its template between training and measuring several
+    times then walks the modules only where a flag changes.
+    """
+
+    for module in model.modules():
+        if module.training != mode or type(module).train is not nn.Module.train:
+            model.train(mode)
+            return
+
+
 def same_tensors(ours: Sequence[Tensor], theirs: Sequence[Tensor]) -> bool:
     """Whether two tuples of tensors hold the same rows laid out the same way.
 

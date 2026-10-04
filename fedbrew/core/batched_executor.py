@@ -81,7 +81,7 @@ from fedbrew.core.protocol import FitRequest, FitResult
 from fedbrew.core.refusal import RunRefused
 from fedbrew.core.round_planner import RoundPlanner, auto_workers, planned_for, roster_plan
 from fedbrew.core.stacked_results import StackedFitResults
-from fedbrew.core.torch_utils import StateStack, uploaded
+from fedbrew.core.torch_utils import StateStack, set_training, uploaded
 from fedbrew.tasks.base import BatchableTask
 
 #: ``runtime.performance.executor_chunk_bytes`` when unset: 1 GiB.
@@ -1038,7 +1038,7 @@ def measure_splits(
 
     stacked = getattr(task, "stacked_eval", None) if params_dim == 0 else None
     outputs: list[dict[str, Tensor]] = []
-    model.eval()
+    set_training(model, False)
     with torch.no_grad():
         for position in range(max(counts, default=0)):
             batch, mask = steps.batch(position)
@@ -1522,7 +1522,7 @@ class _Bucket:
         corrections = [reference, client_control, server_control]
         outputs: list[dict[str, Tensor]] = []
 
-        self.model.train()
+        set_training(self.model, True)
         if self.compiled and self.context.compiling:
             looped = self._compiled_loop(steps, params, state, corrections)
             if looped is not None:

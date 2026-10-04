@@ -47,6 +47,7 @@ from fedbrew.core.batched_executor import (
     unfolded,
 )
 from fedbrew.core.protocol import EvalRequest
+from fedbrew.core.torch_utils import set_training
 
 
 @dataclass(slots=True)
@@ -359,7 +360,7 @@ class ResidentEvaluation:
             return None
         features, targets, size = central.features, central.targets, central.batch_size
         outputs = []
-        self.template.eval()
+        set_training(self.template, False)
         if central.prepared is not None:
             with torch.no_grad():
                 outputs, terms = self.task.closed_form_central(
@@ -387,7 +388,7 @@ class ResidentEvaluation:
         """
 
         # In eval mode afterwards, as the central pass leaves the template.
-        self.template.eval()
+        set_training(self.template, False)
         outputs, terms, value = fused.measure(self.template, params, self.buffers)
         parts = [(outputs, [len(outputs)])]
         if fused.in_parts:

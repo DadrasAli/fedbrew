@@ -249,14 +249,16 @@ def measuring(model: nn.Module, device: torch.device | str | None = None) -> Any
     devices: list[Any] = []
     if device is not None and torch.device(device).type == "cuda":
         devices = [torch.device(device)]
+    from fedbrew.core.torch_utils import set_training
+
     was_training = model.training
     with torch.random.fork_rng(devices=devices):
-        model.eval()
+        set_training(model, False)
         try:
             with torch.enable_grad():
                 yield
         finally:
-            model.train(was_training)
+            set_training(model, was_training)
 
 
 def trainable(model: nn.Module) -> dict[str, Tensor]:
