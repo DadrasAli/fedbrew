@@ -18,7 +18,10 @@ loss averages -- under an l1 term, of F's minimum-norm subgradient
   gradient pass runs in any path and no column is written;
 - the plan header's columns are the ones written, for every task;
 - a task that declares no gradient refuses the key, and a monitor or a
-  selection on the column is refused while it is never measured.
+  selection on the column is refused while it is never measured;
+- the rule two computations of it are held to (FINDINGS.md, POST-F38):
+  within 1e-12 relative, or within a small multiple of machine epsilon times
+  the magnitudes of the rows' terms each coordinate of F's gradient sums.
 """
 
 from __future__ import annotations
@@ -26,9 +29,11 @@ from __future__ import annotations
 import copy
 import csv
 import dataclasses
+import functools
 import tempfile
 import unittest
-from contextlib import nullcontext
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -43,10 +48,14 @@ from fedbrew.core.config import divergence_direction, load_config
 from fedbrew.core.factory import build_components
 from fedbrew.core.grad_norm import (
     GRAD_NORM_COLUMN,
+    ROUNDING_UNITS,
     SequentialGradNorm,
     WeightedGradient,
+    gradient_terms,
     minimum_norm_gradient,
+    rounding_tolerance,
     trainable,
+    within_rounding,
 )
 from fedbrew.core.refusal import RunRefused
 from tests.test_batched_executor_tolerance import (
@@ -176,6 +185,135 @@ class AtRandomPointsTest(_Examples):
             self.assertLess(_relative(measured, expected), 1e-12)
 
 
+class TheRoundingRuleTest(_Examples):
+    """``grad_norm_sq`` to rounding: within 1e-12 relative, or the terms' rounding (POST-F38).
+
+    ``gradient_terms`` is each row's gradient of its loss alone, their mean
+    F's gradient and the mean of their magnitudes the terms' size;
+    ``rounding_tolerance`` is ``2 sum_j d_j (2 |g_j| + d_j)`` with ``d_j``
+    ``ROUNDING_UNITS`` epsilons of ``S_j``; ``within_rounding`` takes either.
+    """
+
+    def test_the_terms_are_each_rows_gradient(self) -> None:
+        generator = torch.Generator().manual_seed(5)
+        for name in EXAMPLES:
+            with self.subTest(example=name):
+                components = self.components(name)
+                server, dataset, task = components.server, components.dataset, components.task
+                server.initialize()
+                state = _random_point(server, generator)
+                model = copy.deepcopy(task.build_model(server.model_config))
+                task.load_federated_model_state(model, state)
+                rows = _pooled_rows(task, dataset)
+                params, buffers = dict(model.state_dict()), dict(model.named_buffers())
+                mean, magnitudes = gradient_terms(task, model, params, buffers, rows, chunk=7)
+                leaves = trainable(model)
+                each = []
+                for index in range(len(rows[0])):
+                    row = tuple(tensor[index : index + 1] for tensor in rows)
+                    loss, _ = task.functional_loss(model, None, None, row, None)
+                    grads = torch.autograd.grad(loss, list(leaves.values()))
+                    each.append(dict(zip(leaves, grads, strict=True)))
+                whole, _ = task.functional_loss(model, None, None, rows, None)
+                pooled = torch.autograd.grad(whole, list(leaves.values()))
+                for (key, leaf), gradient in zip(leaves.items(), pooled, strict=True):
+                    stacked = torch.stack([grads[key].double() for grads in each])
+                    self.assertEqual(magnitudes[key].shape, leaf.shape)
+                    torch.testing.assert_close(magnitudes[key], stacked.abs().mean(dim=0))
+                    torch.testing.assert_close(mean[key], stacked.mean(dim=0))
+                    # F is the rows' mean: its gradient is theirs.
+                    torch.testing.assert_close(mean[key], gradient.double(), rtol=1e-12, atol=1e-15)
+
+    def test_the_tolerance_is_the_terms_rounding_carried_through_the_square(self) -> None:
+        components = self.components("fed-lasso")
+        server, dataset, task = components.server, components.dataset, components.task
+        server.initialize()
+        state = _random_point(server, torch.Generator().manual_seed(6))
+        model = copy.deepcopy(task.build_model(server.model_config))
+        task.load_federated_model_state(model, state)
+        rows = _pooled_rows(task, dataset)
+        params, buffers = dict(model.state_dict()), dict(model.named_buffers())
+        mean, magnitudes = gradient_terms(task, model, params, buffers, rows)
+        minimum = minimum_norm_gradient(mean, params, task.objective_l1(model))
+        expected = 0.0
+        for key, g in minimum.items():
+            bound = ROUNDING_UNITS * torch.finfo(params[key].dtype).eps * magnitudes[key]
+            expected += float((2.0 * bound * (2.0 * g.abs() + bound)).sum())
+        self.assertGreater(expected, 0.0)
+        self.assertEqual(rounding_tolerance(task, model, params, buffers, rows), expected)
+
+    @pytest.mark.fast
+    def test_either_bound_holds_it(self) -> None:
+        self.assertTrue(within_rounding(1.0, 1.0, 0.0))
+        self.assertTrue(within_rounding(1.0 + 1e-13, 1.0, 0.0))
+        self.assertFalse(within_rounding(1.0 + 1e-11, 1.0, 0.0))
+        self.assertTrue(within_rounding(1.0 + 1e-11, 1.0, 2e-11))
+        # Near zero no relative bound holds two orders of a sum; the terms' does.
+        self.assertFalse(within_rounding(3.2e-32, 3.3e-32, 0.0))
+        self.assertTrue(within_rounding(3.2e-32, 3.3e-32, 1e-31))
+        self.assertFalse(within_rounding(3.2e-32, 3.3e-32, 1e-34))
+        self.assertTrue(within_rounding(0.0, -0.0, 0.0))
+
+
+@contextmanager
+def recorded_tolerances() -> Iterator[dict[float, Callable[[], float]]]:
+    """Each ``grad_norm_sq`` a fused pass measures, and the rule's tolerance at its point.
+
+    The tolerance (``rounding_tolerance`` over the pass's rows, at the point it
+    measured) is computed only when it is asked for: where the relative bound
+    holds, nothing is.
+    """
+
+    from fedbrew.core.grad_norm import FusedPass
+
+    measured: dict[float, Callable[[], float]] = {}
+    built, measure = FusedPass.__init__, FusedPass.measure
+
+    def init(self: Any, task: Any, rows: Any, *args: Any, **kwargs: Any) -> None:
+        built(self, task, rows, *args, **kwargs)
+        self.rule_rows = rows
+
+    def measuring(self: Any, template: Any, params: Any, buffers: Any) -> Any:
+        result = measure(self, template, params, buffers)
+        point = {key: value.detach().clone() for key, value in params.items()}
+        held = {key: value.detach().clone() for key, value in buffers.items()}
+        measured[float(result[2])] = functools.partial(
+            rounding_tolerance, self.task, template, point, held, self.rule_rows
+        )
+        return result
+
+    with (
+        mock.patch.object(FusedPass, "__init__", init),
+        mock.patch.object(FusedPass, "measure", measuring),
+    ):
+        yield measured
+
+
+def within_the_rule(
+    key: str, value: float, reference: float, tolerances: dict[float, Callable[[], float]]
+) -> bool:
+    """``value`` is ``reference`` by the rule: 1e-12 relative, or ``grad_norm_sq`` to rounding.
+
+    ``tolerances`` is what :func:`recorded_tolerances` recorded in the run
+    ``value`` comes from.
+    """
+
+    if within_rounding(value, reference, 0.0):
+        return True
+    rule = tolerances.get(value) if key == GRAD_NORM_COLUMN else None
+    return rule is not None and within_rounding(value, reference, rule())
+
+
+def _pooled_rows(task: Any, dataset: Any) -> tuple[torch.Tensor, ...]:
+    from fedbrew.core.grad_norm import _train_split
+
+    splits = [
+        task.split_rows(_train_split(dataset.get_client_data(client)))
+        for client in dataset.list_clients()
+    ]
+    return tuple(torch.cat([split[k] for split in splits]) for k in range(len(splits[0])))
+
+
 def _random_point(server: Any, generator: torch.Generator) -> dict[str, torch.Tensor]:
     """A random global model, a third of its coordinates exactly zero; set on the server."""
 
@@ -198,15 +336,9 @@ def _pooled(task: Any, server: Any, dataset: Any, state: dict[str, torch.Tensor]
     that does not trust it).
     """
 
-    from fedbrew.core.grad_norm import _train_split
-
     model = copy.deepcopy(task.build_model(server.model_config))
     task.load_federated_model_state(model, state)
-    splits = [
-        task.split_rows(_train_split(dataset.get_client_data(client)))
-        for client in dataset.list_clients()
-    ]
-    rows = tuple(torch.cat([split[k] for split in splits]) for k in range(len(splits[0])))
+    rows = _pooled_rows(task, dataset)
     params = trainable(model)
     loss, _ = task.functional_loss(model, None, None, rows, None)
     grads = dict(zip(params, torch.autograd.grad(loss, list(params.values())), strict=True))

@@ -713,8 +713,10 @@ its own pass. run.json's `reproducibility.grad_norm` says which a run took
 default, measures the fused pass with the task's closed form of F and its
 gradient where the task gives one (`closed_form_eval`, chapter 12;
 fed-logistic-l1's and heterogeneous-quadratic's): no graph and no backward,
-F and `grad_norm_sq` the same within `1e-12` relative and every other column
-bit for bit. Where the task gives none, and with `autograd`, the pass
+F and `grad_norm_sq` the same to rounding and every other column bit for bit
+-- within `1e-12` relative, or, where F's gradient is near its own rounding
+and no relative bound can hold it, within a small multiple of machine epsilon
+times the magnitudes of the terms its coordinates sum (chapter 08 §6.1). Where the task gives none, and with `autograd`, the pass
 differentiates the central pass's loss through autograd. The gradient's own
 pass, where a round has no fused one, is autograd's either way. run.json's
 `reproducibility.grad_norm.gradient` names the form; the default changed with

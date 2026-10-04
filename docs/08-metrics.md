@@ -578,11 +578,29 @@ closed form (`closed_form_eval`, `BatchableTask`), the fused pass takes each
 central batch from it -- a stack of one over the batch's prepared rows, with
 no graph and no backward -- rather than through autograd: the loss and the
 gradient are `closed_form_gradient`'s, every other output the iterate's. F
-and `grad_norm_sq` are then the same within `1e-12` relative and every other
-column bit for bit; on Figure 1's and heterogeneous-quadratic's shipped
+and `grad_norm_sq` are then the same to rounding, by the rule below, and every
+other column bit for bit; on Figure 1's and heterogeneous-quadratic's shipped
 configs F is bit for bit too. `gradient: "closed_form"` in the record says so;
 `"autograd"` with `gradient_reason` says why not (`asked for`, or a task with
 no closed form), and `gradient_form: autograd` keeps autograd's pass.
+
+**To rounding.** Two computations of a sum in two orders agree to rounding,
+and near zero no relative bound holds them: where F's gradient has fallen to
+its own rounding, as a run that converges takes it, `grad_norm_sq` is the
+square of rounding noise, and two orders of the sum can differ in its leading
+digit. The closed form is held to this rule (`within_rounding` and
+`rounding_tolerance`, `fedbrew/core/grad_norm.py`): within `1e-12` relative,
+or within a small multiple of machine epsilon times the sum of the magnitudes
+of the terms summed. Each coordinate `g_j` of F's gradient is the mean of the
+rows' terms, each row's loss differentiated alone (`gradient_terms`), whose
+magnitudes average `S_j`; summed in any order it is held within
+`d_j = 8 eps S_j` of the exact sum (`ROUNDING_UNITS`, `eps` the precision of
+the parameter), so two computations of `||g||^2` within
+`2 sum_j d_j (2 |g_j| + d_j)`, `g` F's minimum-norm subgradient under an l1
+term. The multiple is fixed, the same for every task and run, and the bound
+is far from what it takes: on fed-logistic-l1's smooth problems at a
+stationary point the two forms differ by about 2e-34 against a bound of
+about 6e-30.
 
 ### 6.2 The running mean over the run's iterates
 
@@ -1215,7 +1233,7 @@ head -1 <output_dir>/round_metrics.csv | tr ',' '\n'
 | `tests/test_client_history_summary.py` | The running totals `client_update_metrics.csv` column names come from. |
 | `tests/test_convergence_running_mean.py` | §6.2: the exact sum is `math.fsum` after every addition; the column is the mean of the metric's values on rounds 1 to t bit for bit; the section changes nothing but the columns it adds; resident, per-round and sequential agree; a resume continues the means and a checkpoint without them refuses it; the names resolve and a bad one is refused. |
 | `tests/test_analyze.py` | §6.3: `fedbrew analyze`'s per-run and across-seed statistics against hand-worked values on hand-made CSVs, the grouping by config without the seed, blank cells as not evaluated, the reconstruction and its warning, the written tables and the command's exits. |
-| `tests/test_grad_norm.py` | §6.1: `grad_norm_sq` is autograd's gradient of the pooled objective at random points on every linear example (fed-lasso's l1 case against its analytic subgradient), the three paths agree, a run with it on writes every other column and checkpoint as one with it off, off runs no pass, and the planned columns are the written ones for every task; `fused` is on by default and a bool, and `fused_pass` makes the pass exactly where the central pass is F and names why not elsewhere. `tests/test_fed_logistic_l1.py` and `tests/test_heterogeneous_quadratic.py` hold a fused run's central columns to the two passes' bit for bit and its `grad_norm_sq` within `1e-12`, in every path. |
+| `tests/test_grad_norm.py` | §6.1: `grad_norm_sq` is autograd's gradient of the pooled objective at random points on every linear example (fed-lasso's l1 case against its analytic subgradient), the three paths agree, a run with it on writes every other column and checkpoint as one with it off, off runs no pass, and the planned columns are the written ones for every task; `fused` is on by default and a bool, and `fused_pass` makes the pass exactly where the central pass is F and names why not elsewhere; §6.1's rule: `gradient_terms` is each row's gradient of its loss alone, their mean F's gradient, and `rounding_tolerance` and `within_rounding` the bound and its test. `tests/test_fed_logistic_l1.py` and `tests/test_heterogeneous_quadratic.py` hold a fused run's central columns to the two passes' bit for bit and its `grad_norm_sq` to rounding by the rule, in every path, and fed-logistic-l1's closed form to autograd's by the rule at a stationary point, where no relative bound holds them. |
 | `tests/test_metric_filter_scope.py` | §4.3, §7.2 and §7.3: both servers add diagnostics before the one filter, so the list keeps or drops them, the loop never filters, and §4.3 states the choice as one. Fails if a third server starts emitting diagnostics. |
 
 ### Known failure modes

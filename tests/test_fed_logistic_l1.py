@@ -46,6 +46,7 @@ from fedbrew.core.config import load_config, load_config_mapping, standalone_con
 from fedbrew.core.logging import _planned_metric_names
 from fedbrew.data.writers.torch_shards import load_client_shard, save_client_shard
 from tests.test_batched_executor_tolerance import CSVS, TOLERANCE, ExecutorRuns
+from tests.test_grad_norm import recorded_tolerances, within_the_rule
 from tests.test_planned_columns_are_written import BOOKKEEPING
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -807,10 +808,12 @@ class FAndItsGradientInOnePassTest(ExecutorRuns):
 
     For every problem, resident, batched per round and sequential: the fused
     run through autograd (``gradient_form: autograd``) has the two passes'
-    central columns bit for bit and their grad_norm_sq within 1e-12 relative;
-    the default, the task's closed form (``closed_form_eval``), has those of
-    autograd's fused run bit for bit but F's and grad_norm_sq's, which are
-    within 1e-12 relative; and run.json says which pass and form each run took.
+    central columns bit for bit and their grad_norm_sq to rounding; the
+    default, the task's closed form (``closed_form_eval``), has those of
+    autograd's fused run bit for bit but F's and grad_norm_sq's, which are the
+    same to rounding -- within 1e-12 relative, or grad_norm_sq within the
+    rounding of the rows' terms (POST-F38, ``within_the_rule``); and run.json
+    says which pass and form each run took.
     With the central pass every other round, the rounds between measure
     grad_norm_sq alone, in its own pass, and the run is the same again.
     """
@@ -832,7 +835,7 @@ class FAndItsGradientInOnePassTest(ExecutorRuns):
                         config = small_config(loss, penalty)
                         config["schedule"]["rounds"] = 4
                         config["evaluation"]["central_test"] = {"every": central}
-                        runs = {}
+                        runs, tolerances = {}, {}
                         for name, setting in settings.items():
                             config["evaluation"]["grad_norm"] = {"every": 1, **setting}
                             spy = mock.patch.object(
@@ -843,7 +846,11 @@ class FAndItsGradientInOnePassTest(ExecutorRuns):
                             )
                             executor = "sequential" if path == "sequential" else "batched"
                             context = per_round() if path == "per round" else nullcontext()
-                            with context, spy as fused_rounds:
+                            with (
+                                context,
+                                spy as fused_rounds,
+                                recorded_tolerances() as tolerances[name],
+                            ):
                                 runs[name] = self.run_config(config, executor)
                             # The rounds the central pass measures: every
                             # other one, pinned at the first and the last.
@@ -853,9 +860,17 @@ class FAndItsGradientInOnePassTest(ExecutorRuns):
                                 both if name != "separate" and path == "resident" else 0,
                             )
                         self._records(runs)
-                        self._same_but(runs["autograd"], runs["separate"], ("grad_norm_sq",))
                         self._same_but(
-                            runs["closed"], runs["autograd"], ("grad_norm_sq", "central_test_loss")
+                            runs["autograd"],
+                            runs["separate"],
+                            ("grad_norm_sq",),
+                            tolerances["autograd"],
+                        )
+                        self._same_but(
+                            runs["closed"],
+                            runs["autograd"],
+                            ("grad_norm_sq", "central_test_loss"),
+                            tolerances["closed"],
                         )
 
     def _records(self, runs: dict[str, Path]) -> None:
@@ -878,8 +893,10 @@ class FAndItsGradientInOnePassTest(ExecutorRuns):
         apart = {"pass": "separate", "asked": "separate", "reason": "asked for"}
         self.assertEqual(records["separate"], apart)
 
-    def _same_but(self, run: Path, other: Path, within: tuple[str, ...]) -> None:
-        """``run``'s CSVs are ``other``'s, but the columns ``within`` names, within 1e-12."""
+    def _same_but(
+        self, run: Path, other: Path, within: tuple[str, ...], tolerances: dict[float, Any]
+    ) -> None:
+        """``run``'s CSVs are ``other``'s, but the columns ``within`` names, to rounding."""
 
         rows = [_untimed(path / "round_metrics.csv") for path in (run, other)]
         assert rows[0] is not None and rows[1] is not None
@@ -891,7 +908,7 @@ class FAndItsGradientInOnePassTest(ExecutorRuns):
                     self.assertEqual(row[key], value, key)
                     continue
                 a, b = float(row[key]), float(value)
-                self.assertLessEqual(abs(a - b), 1e-12 * max(abs(a), abs(b)), key)
+                self.assertTrue(within_the_rule(key, a, b, tolerances), f"{key}: {a!r} {b!r}")
         for name in CSVS:
             if name != "round_metrics.csv":
                 self.assertEqual(_untimed(run / name), _untimed(other / name), name)
@@ -987,6 +1004,51 @@ class FAndItsGradientInClosedFormTest(unittest.TestCase):
                         self.assertTrue(
                             torch.allclose(grads["x"][client], gradient, rtol=1e-12, atol=0.0)
                         )
+
+
+class AtAStationaryPointTest(unittest.TestCase):
+    """Where F's gradient is at its own rounding, the closed form is autograd's by the rule.
+
+    At a stationary point of each smooth logistic problem (Newton's steps in
+    float64; tanh's loss is not convex enough for them to settle),
+    ``grad_norm_sq`` is the square of rounding noise: the two forms' values
+    are within ``rounding_tolerance``, which there is wider than 1e-12 of
+    either -- the case the relative bound cannot hold (POST-F38).
+    """
+
+    def test_every_smooth_problem(self) -> None:
+        from fedbrew.core.grad_norm import FusedPass, rounding_tolerance, within_rounding
+
+        generator = torch.Generator().manual_seed(17)
+        rows, dim = 64, 8
+        for loss, penalty in problem.PROBLEMS:
+            if (loss, penalty) not in (("logistic", "l2sq"), ("logistic", "nonconvex")):
+                continue
+            with self.subTest(problem=f"{loss}+{penalty}"):
+                task = _small_task(loss, penalty)
+                model = problem.LogisticModel(dim, 0.03, loss=loss, penalty=penalty)
+                features = torch.randn(rows, dim, generator=generator, dtype=torch.float64)
+                labels = torch.where(torch.rand(rows, generator=generator) < 0.5, -1.0, 1.0)
+                pooled = (features, labels.double())
+
+                def objective(
+                    x: torch.Tensor, task: Any = task, model: Any = model, rows: Any = pooled
+                ) -> torch.Tensor:
+                    return task.functional_loss(model, {"x": x}, {}, rows, None)[0]
+
+                x = torch.zeros(dim, dtype=torch.float64)
+                for _ in range(40):
+                    gradient = torch.autograd.functional.jacobian(objective, x)
+                    hessian = torch.autograd.functional.hessian(objective, x)
+                    x = x - torch.linalg.solve(hessian, gradient)
+                values = {}
+                for name, closed in (("closed", model), ("autograd", None)):
+                    fused = FusedPass(task, pooled, rows, True, closed=closed)
+                    values[name] = float(fused.measure(model, {"x": x}, {})[2])
+                tolerance = rounding_tolerance(task, model, {"x": x}, {}, pooled)
+                self.assertLess(max(values.values()), 1e-24)
+                self.assertGreater(tolerance, 1e-12 * max(values.values()))
+                self.assertTrue(within_rounding(values["closed"], values["autograd"], tolerance))
 
 
 def _run_task_class() -> Any:

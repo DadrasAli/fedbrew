@@ -135,6 +135,108 @@ def grad_norm_sq(
     return squared_norm(minimum_norm_gradient(gradient.mean(), params, l1))
 
 
+#: The relative bound two computations of a sum are first held to.
+RELATIVE_TOLERANCE = 1e-12
+#: Units of the terms' precision (``torch.finfo(dtype).eps``) a sum in any
+#: order is held to, times the sum of its terms' magnitudes: a small multiple,
+#: the same for every task and run (FINDINGS.md, POST-F38).
+ROUNDING_UNITS = 8
+
+
+def gradient_terms(
+    task: Any,
+    template: nn.Module,
+    params: Mapping[str, Tensor],
+    buffers: Mapping[str, Tensor],
+    rows: tuple[Tensor, ...],
+    chunk: int = 4096,
+) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+    """F's gradient at ``params`` and the magnitudes of the terms it sums, in float64.
+
+    F is the mean over ``rows`` of ``f_i``, the task's ``functional_loss`` of
+    row ``i`` alone (a parameter-only term, as fed-lasso's penalty, enters
+    every ``f_i`` once and so F once), and its gradient the mean of the
+    rows' gradients: returned is that mean and, per coordinate, the mean of
+    their magnitudes, ``S_j = (1/n) sum_i |d f_i / d x_j|``. Taken as
+    :func:`flat_chunk_gradient` takes its leaves, one row's gradient at a
+    time by ``torch.func``, ``chunk`` rows at once.
+    """
+
+    parameters = dict(template.named_parameters())
+    fixed = {name: value.detach() for name, value in params.items() if name in parameters}
+    held = {
+        **buffers,
+        **{name: value for name, value in params.items() if name not in parameters},
+    }
+    wanted = {name: fixed[name] for name, param in parameters.items() if param.requires_grad}
+
+    def row_loss(trainable: dict[str, Tensor], *row: Tensor) -> Tensor:
+        batch = tuple(tensor.unsqueeze(0) for tensor in row)
+        loss, _ = task.functional_loss(template, {**fixed, **trainable}, held, batch, None)
+        return loss
+
+    per_row = torch.func.vmap(torch.func.grad(row_loss), in_dims=(None, *([0] * len(rows))))
+    sums = {
+        name: torch.zeros(value.shape, dtype=torch.float64, device=value.device)
+        for name, value in wanted.items()
+    }
+    magnitudes = {name: torch.zeros_like(total) for name, total in sums.items()}
+    count = len(rows[0])
+    with measuring(template, next(iter(fixed.values())).device):
+        for first in range(0, count, max(1, int(chunk))):
+            grads = per_row(wanted, *(tensor[first : first + chunk] for tensor in rows))
+            for name, grad in grads.items():
+                sums[name] += grad.to(torch.float64).sum(dim=0)
+                magnitudes[name] += grad.to(torch.float64).abs().sum(dim=0)
+    return (
+        {name: total / count for name, total in sums.items()},
+        {name: total / count for name, total in magnitudes.items()},
+    )
+
+
+def rounding_tolerance(
+    task: Any,
+    template: nn.Module,
+    params: Mapping[str, Tensor],
+    buffers: Mapping[str, Tensor],
+    rows: tuple[Tensor, ...],
+) -> float:
+    """How far two computations of ``grad_norm_sq`` at ``params`` may differ by rounding alone.
+
+    Each coordinate of F's gradient is a sum of the rows' terms
+    (:func:`gradient_terms`); summed in any order, it is held within
+    ``d_j = ROUNDING_UNITS * eps * S_j`` of the exact sum, ``eps`` the
+    precision of the parameter it is the gradient of and ``S_j`` its terms'
+    magnitudes. Two such gradients are within ``d`` of one, so their squared
+    norms within ``2 sum_j d_j (2 |g_j| + d_j)`` of each other, ``g`` F's
+    gradient -- its minimum-norm subgradient where F carries an l1 term,
+    whose soft-threshold moves no coordinate further than ``d_j``.
+    """
+
+    gradient, magnitudes = gradient_terms(task, template, params, buffers, rows)
+    minimum = minimum_norm_gradient(gradient, params, task.objective_l1(template))
+    total = 0.0
+    for name, g in minimum.items():
+        eps = torch.finfo(params[name].dtype).eps
+        bound = ROUNDING_UNITS * eps * magnitudes[name]
+        total += float(torch.sum(2.0 * bound * (2.0 * g.abs() + bound)))
+    return total
+
+
+def within_rounding(value: float, reference: float, tolerance: float) -> bool:
+    """Whether ``value`` is ``reference`` to rounding (FINDINGS.md, POST-F38).
+
+    Within ``RELATIVE_TOLERANCE`` of the larger, or within ``tolerance``: a
+    sum's computations in two orders, held to a small multiple of machine
+    epsilon times the sum of its terms' magnitudes (:func:`rounding_tolerance`
+    for ``grad_norm_sq``), which bounds them where the sum is near its own
+    rounding and no relative bound can.
+    """
+
+    gap = abs(value - reference)
+    return gap <= RELATIVE_TOLERANCE * max(abs(value), abs(reference)) or gap <= tolerance
+
+
 @contextmanager
 def measuring(model: nn.Module, device: torch.device | str | None = None) -> Any:
     """The model in eval mode, and the random generators as they were, for the block.

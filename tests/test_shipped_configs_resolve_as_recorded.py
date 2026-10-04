@@ -156,7 +156,8 @@ INFERRED_AND_CHANGED = frozenset({"experiment.name"})
 #: results in the last digits: the first two within the batched executor's
 #: tolerance (FINDINGS.md, POST-F34 and POST-F35), the third grad_norm_sq within
 #: 1e-12 relative and nothing else (POST-F37), the fourth F and grad_norm_sq
-#: within 1e-12 relative and nothing else (POST-F38).
+#: to rounding -- within 1e-12 relative, or within the rounding of the terms
+#: F's gradient sums -- and nothing else (POST-F38).
 DEFAULTS_CHANGED: dict[str, tuple[str, str]] = {
     "runtime.extra.performance.executor": ("sequential", "batched"),
     "runtime.extra.performance.gradient_form": (

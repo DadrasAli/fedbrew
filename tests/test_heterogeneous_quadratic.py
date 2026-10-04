@@ -33,6 +33,7 @@ from fedbrew.core.config import standalone_config_mapping
 from fedbrew.core.grad_norm import minimum_norm_gradient
 from fedbrew.core.runner import run
 from fedbrew.data.generate import generate_from_config
+from tests.test_grad_norm import recorded_tolerances, within_the_rule
 
 REPO = Path(__file__).resolve().parent.parent
 EXAMPLE = REPO / "examples" / "heterogeneous-quadratic" / "problem.py"
@@ -384,10 +385,12 @@ class FAndItsGradientInOnePassTest(_Runs):
 
     FedAvg and SCAFFOLD, resident and sequential: through autograd
     (``gradient_form: autograd``) every central column is the two passes' bit
-    for bit and grad_norm_sq theirs within 1e-12 relative; in the task's
-    closed form (``closed_form_eval``, the default) every column is
-    autograd's fused run's bit for bit but F's and grad_norm_sq's, within
-    1e-12 relative; and run.json names the pass and the form.
+    for bit and grad_norm_sq theirs to rounding; in the task's closed form
+    (``closed_form_eval``, the default) every column is autograd's fused
+    run's bit for bit but F's and grad_norm_sq's, the same to rounding --
+    within 1e-12 relative, or grad_norm_sq within the rounding of the rows'
+    terms (POST-F38, ``within_the_rule``); and run.json names the pass and
+    the form.
     """
 
     def test_fedavg_and_scaffold(self) -> None:
@@ -402,28 +405,39 @@ class FAndItsGradientInOnePassTest(_Runs):
         for arm in ("fedavg_k10", "scaffold_k10"):
             for executor in ("batched", "sequential"):
                 with self.subTest(arm=arm, executor=executor):
-                    rows = {}
+                    rows, tolerances = {}, {}
                     for name, (setting, taken) in settings.items():
                         before = set(self.root.iterdir())
-                        rows[name] = self.run_arm(
-                            arm,
-                            manifest,
-                            executor,
-                            schedule__rounds=21,
-                            evaluation__grad_norm={"every": 10, **setting},
-                        )
+                        with recorded_tolerances() as tolerances[name]:
+                            rows[name] = self.run_arm(
+                                arm,
+                                manifest,
+                                executor,
+                                schedule__rounds=21,
+                                evaluation__grad_norm={"every": 10, **setting},
+                            )
                         (output,) = (
                             path for path in set(self.root.iterdir()) - before if path.is_dir()
                         )
                         record = json.loads((output / "run.json").read_text())["reproducibility"]
                         grad_norm = record["grad_norm"]
                         self.assertEqual((grad_norm["pass"], grad_norm.get("gradient")), taken)
-                    self._same_but(rows["autograd"], rows["separate"], ("grad_norm_sq",))
                     self._same_but(
-                        rows["closed"], rows["autograd"], ("grad_norm_sq", "central_test_loss")
+                        rows["autograd"],
+                        rows["separate"],
+                        ("grad_norm_sq",),
+                        tolerances["autograd"],
+                    )
+                    self._same_but(
+                        rows["closed"],
+                        rows["autograd"],
+                        ("grad_norm_sq", "central_test_loss"),
+                        tolerances["closed"],
                     )
 
-    def _same_but(self, rows: Any, others: Any, within: tuple[str, ...]) -> None:
+    def _same_but(
+        self, rows: Any, others: Any, within: tuple[str, ...], tolerances: dict[float, Any]
+    ) -> None:
         measured = 0
         for row, other in zip(rows, others, strict=True):
             for key, value in other.items():
@@ -434,7 +448,7 @@ class FAndItsGradientInOnePassTest(_Runs):
                     continue
                 measured += 1
                 a, b = float(row[key]), float(value)
-                self.assertLessEqual(abs(a - b), 1e-12 * max(abs(a), abs(b)), key)
+                self.assertTrue(within_the_rule(key, a, b, tolerances), f"{key}: {a!r} {b!r}")
         self.assertGreater(measured, 0)
 
 
