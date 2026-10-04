@@ -1799,21 +1799,48 @@ def _client_evaluations(fit: Any, size: int) -> list[Any]:
     return evaluations
 
 
+#: Per type: its fields' names where it is a frozen dataclass, None where it is
+#: another dataclass, and ``_NOT_A_DATACLASS`` where it is none (``_fields_of``).
+_DATACLASS_FIELDS: dict[type, tuple[str, ...] | None | object] = {}
+_NOT_A_DATACLASS = object()
+#: The immutable scalar types a program's values are made of.
+_SCALARS = frozenset({float, int, str, bool, type(None)})
+
+
+def _fields_of(kind: type) -> tuple[str, ...] | None | object:
+    """``kind``'s fields' names if it is a frozen dataclass, None if another one; read once."""
+
+    names = _DATACLASS_FIELDS.get(kind, _NOT_A_DATACLASS)
+    if names is _NOT_A_DATACLASS and kind not in _DATACLASS_FIELDS:
+        if dataclasses.is_dataclass(kind):
+            frozen = kind.__dataclass_params__.frozen  # type: ignore[attr-defined]
+            names = tuple(item.name for item in dataclasses.fields(kind)) if frozen else None
+        _DATACLASS_FIELDS[kind] = names
+    return names
+
+
 def _same_values(a: Any, b: Any) -> bool:
     """Whether ``a`` and ``b`` hold the same values: dataclass fields in turn, a float to its sign.
 
     What makes their reprs the same: ``==`` alone takes 0.0 for -0.0. Only
     a frozen dataclass's fields are read: a mutable one may be the same object
-    changed since.
+    changed since. Each type's fields are listed once (``_fields_of``), and
+    one immutable scalar object is its own value.
     """
 
-    if type(a) is not type(b):
+    kind = type(a)
+    if kind is not type(b):
         return False
-    if dataclasses.is_dataclass(a):
-        return type(a).__dataclass_params__.frozen and all(  # type: ignore[attr-defined]
-            _same_values(getattr(a, item.name), getattr(b, item.name))
-            for item in dataclasses.fields(a)
-        )
+    if a is b and kind in _SCALARS:
+        return True
+    names = _fields_of(kind)
+    if names is None:
+        return False
+    if names is not _NOT_A_DATACLASS:
+        for name in names:  # type: ignore[union-attr]
+            if not _same_values(getattr(a, name), getattr(b, name)):
+                return False
+        return True
     if isinstance(a, float):
         return a == b and math.copysign(1.0, a) == math.copysign(1.0, b) or (a != a and b != b)
     if isinstance(a, (tuple, list)):

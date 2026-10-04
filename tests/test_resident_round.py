@@ -626,7 +626,8 @@ class AProgramsKeyIsKeptWhileItsValuesAreTest(unittest.TestCase):
 
     The same values are the same fields, each the same float to its sign
     (``_same_values``): -0.0 is not 0.0, NaN is NaN, and a mutable dataclass is
-    never taken for the same.
+    never taken for the same, not even itself; the same values are the same
+    reprs.
     """
 
     def test_the_key_and_the_values_it_reads(self) -> None:
@@ -650,6 +651,18 @@ class AProgramsKeyIsKeptWhileItsValuesAreTest(unittest.TestCase):
             lr: float
 
         self.assertFalse(_same_values(Mutable(1.0), Mutable(1.0)))
+        mutable, nan = Mutable(1.0), float("nan")
+        # One object is its own value only where it is an immutable scalar.
+        self.assertFalse(_same_values(mutable, mutable))
+        self.assertTrue(_same_values(nan, nan))
+        self.assertTrue(_same_values(program(nan), program(nan)))
+        # Whatever the order of first use (each type's fields are listed once),
+        # the same values are the same reprs.
+        values = (0.5, 0.25, 0.0, -0.0, float("nan"), float("inf"))
+        for a, b in [(a, b) for a in values for b in values]:
+            ours, theirs = program(a, momentum=b), program(b, momentum=a)
+            same = repr(ours) == repr(theirs)
+            self.assertEqual(_same_values(ours, theirs), same, (a, b))
         for rated in (False, True):
             rounds = SimpleNamespace(rated=rated, _held_program=None)
             with self.subTest(rated=rated):
