@@ -154,8 +154,8 @@ INFERRED_AND_CHANGED = frozenset({"experiment.name"})
 #: Defaults changed since the record: a key a config may leave out -> what a
 #: config that leaves it out asked for then, and asks for now. Each changes
 #: results in the last digits: the first two within the batched executor's
-#: tolerance (FINDINGS.md, POST-F34 and POST-F35), the third grad_norm_sq within
-#: 1e-12 relative and nothing else (POST-F37), the fourth F and grad_norm_sq
+#: tolerance (FINDINGS.md, POST-F34 and POST-F35), the third grad_norm_sq to
+#: rounding by POST-F38's rule and nothing else (POST-F37), the fourth F and grad_norm_sq
 #: to rounding -- within 1e-12 relative, or within the rounding of the terms
 #: F's gradient sums -- and nothing else (POST-F38).
 DEFAULTS_CHANGED: dict[str, tuple[str, str]] = {

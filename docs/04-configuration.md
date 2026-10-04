@@ -703,8 +703,10 @@ rows that are every client's train rows (fed-logistic-l1's and
 heterogeneous-quadratic's, chapter 12) -- the gradient is taken through it:
 one forward and one backward give the `central_test_*` columns and
 `grad_norm_sq`, which is F's gradient summed over the central pass's batches,
-the same within `1e-12` relative and bit for bit where the rows and their
-order are the gradient pass's. The central columns never change. Elsewhere,
+the same to rounding -- within `1e-12` relative, or, where F's gradient is near
+its own rounding, within a small multiple of machine epsilon times the
+magnitudes of the terms its coordinates sum (chapter 08 §6.1) -- and bit for
+bit where the rows and their order are the gradient pass's. The central columns never change. Elsewhere,
 on a round that measures one of them, and with `false`, the gradient takes
 its own pass. run.json's `reproducibility.grad_norm` says which a run took
 (chapter 08 §6.1); the default changed with `POST-F37`.

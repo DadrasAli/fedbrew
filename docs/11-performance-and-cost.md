@@ -678,7 +678,11 @@ computes, bit for bit on the same device:
   pass for both (`FusedPass`, `evaluation.grad_norm.fused`, chapter 08 §6.1),
   in the task's closed form where it gives one (`closed_form_eval`,
   `evaluation.grad_norm.gradient_form`): Figure 1's smooth-nonconvex rounds
-  spent 0.83 ms of 1.98 on autograd's fused pass on 2026-10-04.
+  spent 0.83 ms of 1.98 on autograd's fused pass on 2026-10-04. Either form
+  sums F's gradient in another order than the gradient's own pass, so
+  `grad_norm_sq` is held to rounding by chapter 08 §6.1's rule -- within
+  `1e-12` relative, or within a small multiple of machine epsilon times the
+  magnitudes of the terms summed -- not by the executor's `1e-12` alone.
   Both are staged with the round's other values and read back
   in its one copy; the flush builds each client's `EvalResult` with its
   rule's `batched_evaluation_result`, and the central metrics with the task's

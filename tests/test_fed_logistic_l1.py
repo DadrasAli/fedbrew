@@ -1094,11 +1094,18 @@ class AtAStationaryPointTest(unittest.TestCase):
     float64; tanh's loss is not convex enough for them to settle),
     ``grad_norm_sq`` is the square of rounding noise: the two forms' values
     are within ``rounding_tolerance``, which there is wider than 1e-12 of
-    either -- the case the relative bound cannot hold (POST-F38).
+    either -- the case the relative bound cannot hold (POST-F38) -- and so is
+    autograd's fused pass to the gradient's own pass over chunks of the rows
+    (POST-F37).
     """
 
     def test_every_smooth_problem(self) -> None:
-        from fedbrew.core.grad_norm import FusedPass, rounding_tolerance, within_rounding
+        from fedbrew.core.grad_norm import (
+            FusedPass,
+            flat_chunk_gradient,
+            rounding_tolerance,
+            within_rounding,
+        )
 
         generator = torch.Generator().manual_seed(17)
         rows, dim = 64, 8
@@ -1126,10 +1133,15 @@ class AtAStationaryPointTest(unittest.TestCase):
                 for name, closed in (("closed", model), ("autograd", None)):
                     fused = FusedPass(task, pooled, rows, True, closed=closed)
                     values[name] = float(fused.measure(model, {"x": x}, {})[2])
+                chunks = [
+                    tuple(t[first : first + 16] for t in pooled) for first in range(0, rows, 16)
+                ]
+                values["separate"] = float(flat_chunk_gradient(task, model, {"x": x}, {}, chunks))
                 tolerance = rounding_tolerance(task, model, {"x": x}, {}, pooled)
                 self.assertLess(max(values.values()), 1e-24)
                 self.assertGreater(tolerance, 1e-12 * max(values.values()))
                 self.assertTrue(within_rounding(values["closed"], values["autograd"], tolerance))
+                self.assertTrue(within_rounding(values["autograd"], values["separate"], tolerance))
 
 
 def _run_task_class() -> Any:

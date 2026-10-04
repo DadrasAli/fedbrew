@@ -272,7 +272,8 @@ class GradNormEvaluationConfig:
     #: else, and with false, the gradient's own pass over the train rows. The
     #: central metrics are the same either way, bit for bit; grad_norm_sq is the
     #: same gradient summed over the rows in the central pass's batches rather
-    #: than its own chunks, so its last bits may differ (FINDINGS.md, POST-F37).
+    #: than its own chunks, so it may differ to rounding: within 1e-12 relative,
+    #: or within the terms' rounding near zero (FINDINGS.md, POST-F37, POST-F38).
     #: run.json's ``reproducibility.grad_norm`` records which pass a run took.
     fused: bool = True
     #: The fused pass's arithmetic: ``closed_form``, F and its gradient from
