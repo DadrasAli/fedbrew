@@ -47,6 +47,8 @@ why not (run.json ``executor.rounds``).
 
 from __future__ import annotations
 
+import dataclasses
+import math
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -547,6 +549,8 @@ class ResidentRounds:
         self.rows: ResidentRows | None = None
         self.members: list[Any] = [None] * len(self.roster)
         self._values: dict[tuple[Any, ...], ProgramValues] = {}
+        #: The last round's program and its key (``_program_key``).
+        self._held_program: tuple[Any, str] | None = None
         if self.unsupported is None:
             self.rows = ResidentRows(self.task, self.splits)
         self.model = self._placed(context.server._model_state)
@@ -1242,7 +1246,7 @@ class ResidentRounds:
 
         context = self.executor.context
         dtype = context.train_dtype(self.template_dtype) if context else self.template_dtype
-        key = (repr(program), size, steps, dtype)
+        key = (self._program_key(program), size, steps, dtype)
         values = self._values.get(key)
         if values is None:
             # Compiled, a step's own values are read per step, as the bucket reads them.
@@ -1251,6 +1255,21 @@ class ResidentRounds:
                 [program] * size, steps, dtype, self.device, per_step=per_step
             )
         return values
+
+    def _program_key(self, program: Any) -> str:
+        """The program's values as a key: its repr.
+
+        A round's program is the last round's -- the same fields, each the
+        same value, the same float to its sign -- far more often than not, and
+        then so is its key, which is kept rather than made again.
+        """
+
+        held = self._held_program
+        if held is not None and _same_values(held[0], program):
+            return held[1]
+        key = repr(program)
+        self._held_program = (program, key)
+        return key
 
     @property
     def template_dtype(self) -> torch.dtype:
@@ -1720,6 +1739,28 @@ def _client_evaluations(fit: Any, size: int) -> list[Any]:
             elif bucket.eval_outputs is not None:
                 evaluations[position] = bucket.eval_outputs[row]
     return evaluations
+
+
+def _same_values(a: Any, b: Any) -> bool:
+    """Whether ``a`` and ``b`` hold the same values: dataclass fields in turn, a float to its sign.
+
+    What makes their reprs the same: ``==`` alone takes 0.0 for -0.0. Only
+    a frozen dataclass's fields are read: a mutable one may be the same object
+    changed since.
+    """
+
+    if type(a) is not type(b):
+        return False
+    if dataclasses.is_dataclass(a):
+        return type(a).__dataclass_params__.frozen and all(  # type: ignore[attr-defined]
+            _same_values(getattr(a, item.name), getattr(b, item.name))
+            for item in dataclasses.fields(a)
+        )
+    if isinstance(a, float):
+        return a == b and math.copysign(1.0, a) == math.copysign(1.0, b) or (a != a and b != b)
+    if isinstance(a, (tuple, list)):
+        return len(a) == len(b) and all(_same_values(x, y) for x, y in zip(a, b, strict=True))
+    return isinstance(a, (str, int, bool, type(None))) and a == b
 
 
 def _runs(planned: PlannedRound, chunks: list[tuple[int, int]]) -> list[tuple[int, list[int]]]:

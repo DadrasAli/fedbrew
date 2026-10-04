@@ -620,6 +620,54 @@ def _stopping(round_id: int) -> Any:
     return reporter
 
 
+@pytest.mark.fast
+class AProgramsKeyIsKeptWhileItsValuesAreTest(unittest.TestCase):
+    """``_program_key``: the program's repr, without the server's rate, kept for the same values.
+
+    The same values are the same fields, each the same float to its sign
+    (``_same_values``): -0.0 is not 0.0, NaN is NaN, and a mutable dataclass is
+    never taken for the same.
+    """
+
+    def test_the_key_and_the_values_it_reads(self) -> None:
+        import dataclasses as dc
+        from types import SimpleNamespace
+
+        from fedbrew.clients.batched_update import LocalProgram, OptimizerSpec
+        from fedbrew.core.resident import ResidentRounds, _same_values
+
+        def program(lr: float, momentum: float = 0.0) -> LocalProgram:
+            return LocalProgram(optimizer=OptimizerSpec("sgd", lr=lr, momentum=momentum))
+
+        self.assertTrue(_same_values(program(0.5), program(0.5)))
+        self.assertFalse(_same_values(program(0.5), program(0.25)))
+        self.assertFalse(_same_values(program(0.0), program(-0.0)))
+        self.assertTrue(_same_values(program(float("nan")), program(float("nan"))))
+        self.assertFalse(_same_values(program(1.0), LocalProgram(OptimizerSpec("sgd", lr=1))))
+
+        @dc.dataclass
+        class Mutable:
+            lr: float
+
+        self.assertFalse(_same_values(Mutable(1.0), Mutable(1.0)))
+        for rated in (False, True):
+            rounds = SimpleNamespace(rated=rated, _held_program=None)
+            with self.subTest(rated=rated):
+                keys = []
+                for value in (0.5, 0.5, -0.0, 0.0, 0.0):
+                    made = program(value)
+                    keys.append(ResidentRounds._program_key(rounds, made))  # type: ignore[arg-type]
+                    shape = (
+                        dc.replace(made, optimizer=dc.replace(made.optimizer, lr=0.0))
+                        if rated
+                        else made
+                    )
+                    self.assertEqual(keys[-1], repr(shape))
+                self.assertIs(keys[1], keys[0])
+                self.assertIs(keys[4], keys[3])
+                self.assertEqual(keys[2] == keys[3], rated)
+
+
 class TheWriterStagesCheckpointsTest(unittest.TestCase):
     """Each staged checkpoint is written to its temporary file by the writer, in order."""
 

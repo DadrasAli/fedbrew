@@ -695,6 +695,10 @@ def sampled_client_ids(
         return []
     if participation_probability is None and participation_rate >= 1.0:
         return list(client_ids)
+    if participation_probability is not None and participation_probability >= 1.0:
+        # random() < 1.0 always: every id is kept, in roster order, and the
+        # generator, made for this call alone, is read by nothing else.
+        return list(client_ids)
     # Hashed, not added. Random(seed + round_id) makes seeds s and s+1 one
     # sequence read from two offsets: seed 43 sees at round r exactly the
     # clients seed 42 saw at round r+1, for every round but the last. A

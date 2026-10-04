@@ -59,11 +59,17 @@ def dataloader_seed(base_seed: int, round_id: int, client_id: str, phase: str) -
     )
 
 
+#: Each client's own fields of ``dataloader_seeds`` and the phase's after them,
+#: the same bytes every round: by the id's type, the id and the phase.
+_CLIENT_FIELDS: dict[tuple[type, object, str], bytes] = {}
+
+
 def dataloader_seeds(base_seed: int, round_id: int, client_ids: list[str], phase: str) -> list[int]:
     """``dataloader_seed`` for each client, the fields they share hashed once.
 
     The same digests: a hash is taken over the fields in order, so the state
-    after the shared prefix is copied for each client and the rest added.
+    after the shared prefix is copied for each client and the rest added. A
+    client's own fields, which no round changes, are encoded once a run.
     """
 
     prefix = hashlib.sha256()
@@ -73,10 +79,17 @@ def dataloader_seeds(base_seed: int, round_id: int, client_ids: list[str], phase
         + _seed_field("part_1", round_id)
         + _seed_field("part_2", "client")
     )
-    suffix = _seed_field("part_4", "dataloader") + _seed_field("part_5", phase)
     seeds = []
     for client_id in client_ids:
+        key = (type(client_id), client_id, phase)
+        fields = _CLIENT_FIELDS.get(key)
+        if fields is None:
+            fields = _CLIENT_FIELDS[key] = (
+                _seed_field("part_3", client_id)
+                + _seed_field("part_4", "dataloader")
+                + _seed_field("part_5", phase)
+            )
         hasher = prefix.copy()
-        hasher.update(_seed_field("part_3", client_id) + suffix)
+        hasher.update(fields)
         seeds.append(int.from_bytes(hasher.digest()[:4], byteorder="big", signed=False))
     return seeds

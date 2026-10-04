@@ -213,6 +213,30 @@ class NothingMovesTest(ExecutorRuns):
             iid_steps = batched_executor._Steps(stack, drawn, [0, 1, 2], torch.float64)
             self.assertIsNone(iid_steps.period)
 
+    def test_the_host_facts_are_the_tensor_reductions(self) -> None:
+        """Each step's width, fullness and alignment, read on the host, are the tensors' own."""
+
+        generator = torch.Generator().manual_seed(9)
+
+        class Orders:
+            def __init__(self, lengths: torch.Tensor, starts: torch.Tensor) -> None:
+                self.lengths, self.starts = lengths, starts
+                self.indices = torch.zeros((*lengths.shape, 4), dtype=torch.long)
+                self.contiguous = torch.zeros(len(lengths), dtype=torch.bool)
+
+        for clients, steps, spread in ((1, 1, 1), (3, 5, 1), (4, 6, 3), (32, 10, 2)):
+            lengths = torch.randint(1, 1 + spread, (clients, steps), generator=generator)
+            starts = torch.randint(0, spread, (clients, steps), generator=generator)
+            orders = Orders(lengths, starts)
+            slots = list(range(clients))
+            stack = _FakeRows(clients, 12)
+            on_host = batched_executor._Steps(stack, orders, slots, torch.float64)
+            with mock.patch.object(batched_executor, "_HOST_FACTS", 0):
+                reduced = batched_executor._Steps(stack, orders, slots, torch.float64)
+            with self.subTest(clients=clients, steps=steps, spread=spread):
+                for name in ("widths", "full", "aligned"):
+                    self.assertEqual(getattr(on_host, name), getattr(reduced, name), name)
+
     def test_the_period_is_the_fingerprint_search_s(self) -> None:
         """``_period`` finds what a search over every step's fingerprint found.
 

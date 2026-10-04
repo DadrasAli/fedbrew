@@ -817,15 +817,15 @@ class _Steps:
         if not lengths.shape[1]:
             self.widths, self.full, self.aligned = [], [], []
         elif lengths.numel() <= _HOST_FACTS:
+            # Whole numbers: a step is full where its narrowest batch is its
+            # widest, and aligned where every split starts at one row.
             by_step = list(zip(*lengths.tolist(), strict=True))
             self.widths = [max(column) for column in by_step]
             self.full = [
-                all(value == widest for value in column)
-                for column, widest in zip(by_step, self.widths, strict=True)
+                min(column) == widest for column, widest in zip(by_step, self.widths, strict=True)
             ]
             self.aligned = [
-                all(value == column[0] for value in column)
-                for column in zip(*starts.tolist(), strict=True)
+                min(column) == max(column) for column in zip(*starts.tolist(), strict=True)
             ]
         else:
             widths = lengths.amax(dim=0)

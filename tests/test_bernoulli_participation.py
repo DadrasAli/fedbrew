@@ -115,6 +115,26 @@ class TheDrawTest(unittest.TestCase):
             _bernoulli(0.5).sample_clients(_roster(3) + _roster(1), 1)
 
 
+class AProbabilityOfOneDrawsNothingTest(unittest.TestCase):
+    """At probability 1 every id is kept, in roster order: what the draw keeps, read without it."""
+
+    def test_every_roster_seed_and_round(self) -> None:
+        import random as stdlib_random
+
+        from fedbrew.core.seeding import derive_seed
+        from fedbrew.servers.fedavg import sampled_client_ids
+
+        rosters = (["b", "a", "c"], [f"c{index}" for index in range(33)], ["x"], [])
+        for roster in rosters:
+            for seed, round_id in ((0, 1), (42, 7), (2**31, 900)):
+                rng = stdlib_random.Random(derive_seed(seed, "participation", round_id))
+                chosen = {client for client in sorted(roster) if rng.random() < 1.0}
+                drawn = [client for client in roster if client in chosen]
+                with self.subTest(roster=len(roster), seed=seed, round_id=round_id):
+                    self.assertEqual(sampled_client_ids(roster, seed, round_id, 1.0, 1.0), drawn)
+                    self.assertEqual(drawn, roster)
+
+
 class ExactlyOneSchemeTest(unittest.TestCase):
     def test_the_server_refuses_both_neither_and_a_value_outside_the_interval(self) -> None:
         with self.assertRaisesRegex(ValueError, "exactly one of participation_rate"):

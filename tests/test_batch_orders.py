@@ -299,6 +299,20 @@ class DataloaderSeedsTest(unittest.TestCase):
                 [dataloader_seed(base, round_id, client, phase) for client in clients],
             )
 
+    def test_a_clients_fields_are_encoded_once_and_by_type(self) -> None:
+        """The kept encoding is the one made afresh: again, and for an int id beside its text."""
+
+        from fedbrew.core import seeding
+
+        clients: list[Any] = ["7", 7, "client_1"]
+        for _ in range(2):
+            self.assertEqual(
+                dataloader_seeds(5, 2, clients, "fit"),
+                [dataloader_seed(5, 2, client, "fit") for client in clients],
+            )
+        self.assertNotEqual(*dataloader_seeds(5, 2, ["7", 7], "fit"))
+        self.assertIn((int, 7, "fit"), seeding._CLIENT_FIELDS)
+
 
 if __name__ == "__main__":
     unittest.main()
