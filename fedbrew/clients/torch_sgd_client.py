@@ -1451,7 +1451,8 @@ def _counted_without_the_pass(
         for bucket in chunk.buckets
     ):
         return None
-    if any(type(member)._batched_post_fit is not own for member in members):
+    # Each rule's type once: a run's clients share one or a few.
+    if any(kind._batched_post_fit is not own for kind in {type(member) for member in members}):
         return None
     return [plan.eval_rows or _infer_split_num_examples(plan.train_data) for plan in plans]
 
