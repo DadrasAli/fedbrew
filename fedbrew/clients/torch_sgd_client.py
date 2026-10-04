@@ -735,15 +735,14 @@ class TorchSGDClient(ClientUpdate, Generic[TaskT]):
         for position, (member, plan) in enumerate(zip(members, plans, strict=True)):
             for name, value in member._batched_extra_metrics(plan).items():
                 columns.put(name, [position], [value])
-        metrics, reported = columns.tensors()
         metadata = chunk.model_state_metadata
+        # The columns as lists: the tensors are made only where something asks for them.
         return StackedFitResults(
             round_id=requests[0].round_id,
             client_ids=[member.client_id for member in members],
-            num_examples=torch.tensor(num_examples, dtype=torch.int64),
+            num_examples=None,
             states=[(bucket.states, bucket.positions) for bucket in chunk.buckets],
-            metrics=metrics,
-            reported=reported,
+            metrics=None,
             payload={
                 "model_state_scope": str(metadata["model_state_scope"]),
                 "model_state_metadata": metadata,

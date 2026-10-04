@@ -414,6 +414,42 @@ class AStackReadsItsListsAsItsTensorsTest(unittest.TestCase):
         kept.counts()[0] = 0
         self.assertEqual(repr(kept.metric_columns()), repr(plain.metric_columns()))
         self.assertEqual(kept.counts(), counts)
+        # Given only the lists, the tensors are made when asked for, and are the same.
+        lists = StackedFitResults(
+            round_id=1,
+            client_ids=stacked.client_ids,
+            num_examples=None,
+            states=stacked.states,
+            metrics=None,
+            payload=dict(stacked.payload),
+            columns=columns.lists(),
+            num_counts=list(counts),
+        )
+        self.assertIsNone(lists.metrics)
+        self.assertEqual(lists.metric_names(), plain.metric_names())
+        self.assertEqual(repr(lists.metric_rows()), repr(plain.metric_rows()))
+        self.assertIsNone(lists.metrics)
+        made, made_metrics, made_reported = lists.tensors()
+        self.assertTrue(torch.equal(made, torch.tensor(counts, dtype=torch.int64)))
+        self.assertEqual(list(made_metrics), list(metrics))
+        for name, tensor in metrics.items():
+            # repr, as above: a column may hold nan.
+            self.assertEqual(made_metrics[name].dtype, tensor.dtype)
+            self.assertEqual(repr(made_metrics[name].tolist()), repr(tensor.tolist()), name)
+        self.assertEqual(list(made_reported), list(reported))
+        for name, mask in reported.items():
+            self.assertTrue(torch.equal(made_reported[name], mask), name)
+        self.assertIs(lists.tensors()[1], made_metrics)
+        with self.assertRaises(ValueError):
+            StackedFitResults(
+                round_id=1,
+                client_ids=stacked.client_ids,
+                num_examples=None,
+                states=stacked.states,
+                metrics=None,
+                payload={},
+                num_counts=list(counts),
+            )
 
 
 if __name__ == "__main__":

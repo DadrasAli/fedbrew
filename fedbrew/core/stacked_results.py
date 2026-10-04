@@ -39,29 +39,54 @@ class StackedFitResults:
     state -- the scope and metadata, each client's its own copy. ``columns``,
     where given, is ``metrics`` and ``reported`` as the lists they were made
     from, and ``num_counts`` ``num_examples`` so: what the readers below read,
-    which then crosses no tensor back to a list.
+    which then crosses no tensor back to a list. Given those, ``metrics``,
+    ``reported`` and ``num_examples`` may be left None, and are made from them
+    only where something asks for the tensors (``tensors``).
     """
 
     round_id: int
     client_ids: list[str]
-    num_examples: Tensor
+    num_examples: Tensor | None
     states: list[tuple[StateStack, list[int]]]
-    metrics: dict[str, Tensor]
+    metrics: dict[str, Tensor] | None
     payload: dict[str, Any]
     reported: dict[str, Tensor] = field(default_factory=dict)
     _rows: list[dict[str, float]] | None = None
     columns: tuple[dict[str, list[float]], dict[str, list[bool]]] | None = None
     num_counts: list[int] | None = None
 
+    def __post_init__(self) -> None:
+        if self.metrics is None and self.columns is None:
+            raise ValueError("stacked results need their metrics as tensors or as columns")
+        if self.num_examples is None and self.num_counts is None:
+            raise ValueError("stacked results need their example counts as a tensor or a list")
+
     def __len__(self) -> int:
         return len(self.client_ids)
+
+    def tensors(self) -> tuple[Tensor, dict[str, Tensor], dict[str, Tensor]]:
+        """The counts, metrics and masks as tensors: made from the lists the first time asked."""
+
+        if self.num_examples is None:
+            assert self.num_counts is not None
+            self.num_examples = torch.tensor(self.num_counts, dtype=torch.int64)
+        if self.metrics is None:
+            assert self.columns is not None
+            values, reported = self.columns
+            self.metrics = {
+                name: torch.tensor(column, dtype=torch.float64) for name, column in values.items()
+            }
+            self.reported = {
+                name: torch.tensor(mask, dtype=torch.bool) for name, mask in reported.items()
+            }
+        return self.num_examples, self.metrics, self.reported
 
     def counts(self) -> list[int]:
         """Each client's example count, as its FitResult's ``num_examples``."""
 
         if self.num_counts is not None:
             return list(self.num_counts)
-        return [int(count) for count in self.num_examples.tolist()]
+        return [int(count) for count in self.tensors()[0].tolist()]
 
     def metric_columns(self) -> tuple[dict[str, list[float]], dict[str, list[bool]]]:
         """Each name's values over the clients, and, for a name not all report, which do."""
@@ -72,15 +97,18 @@ class StackedFitResults:
                 {name: list(column) for name, column in values.items()},
                 {name: list(mask) for name, mask in reported.items()},
             )
+        _, metrics, reported_masks = self.tensors()
         return (
-            {name: values.tolist() for name, values in self.metrics.items()},
-            {name: mask.tolist() for name, mask in self.reported.items()},
+            {name: values.tolist() for name, values in metrics.items()},
+            {name: mask.tolist() for name, mask in reported_masks.items()},
         )
 
     def metric_names(self) -> list[str]:
         """Every name some client reports, in the order the names are first reported."""
 
-        return list(self.metrics)
+        if self.columns is not None:
+            return list(self.columns[0])
+        return list(self.tensors()[1])
 
     def metric_rows(self) -> list[dict[str, float]]:
         """Each client's metrics, as its FitResult holds them; built once."""
