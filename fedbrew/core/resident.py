@@ -1822,7 +1822,9 @@ class _Fold:
             else:
                 divisor = self.inputs[self.plan.inputs[("divisor", total.dtype)]]
                 mean[key] = total.div_(divisor).to(dtype)
-        finite = torch.stack([torch.isfinite(value).all() for value in mean.values()]).all()
+        checks = [torch.isfinite(value).all() for value in mean.values()]
+        # One tensor's check is the round's: a stack of one and its all() give it again.
+        finite = checks[0] if len(checks) == 1 else torch.stack(checks).all()
         return mean, finite
 
 
