@@ -1501,12 +1501,14 @@ class _Bucket:
         """Every step: the trained stack, each step's outputs, and how many batches were taken."""
 
         program = self.program
-        if self.compiled:
-            steps = self.context.functions(
-                self.task, self.model, self.buffers, program, closed=self.closed
-            )
-        else:
-            steps = step_functions(
+
+        def functions() -> Any:
+            # Made where a path calls them: the summed steps call none.
+            if self.compiled:
+                return self.context.functions(
+                    self.task, self.model, self.buffers, program, closed=self.closed
+                )
+            return step_functions(
                 self.task,
                 self.model,
                 self.buffers,
@@ -1514,7 +1516,7 @@ class _Bucket:
                 self.context.autocast(self.device),
                 closed=self.closed,
             )
-        batch_update, gradient_sum, combined_update = steps
+
         # Compiled, a step is told only whether it is the first, which is
         # all SGD's arithmetic reads; AdamW's corrections are then values.
         numbered = (lambda number: 1 if number == 1 else 2) if self.compiled else (lambda n: n)
@@ -1533,13 +1535,14 @@ class _Bucket:
 
         set_training(self.model, True)
         if self.compiled and self.context.compiling:
-            looped = self._compiled_loop(steps, params, state, corrections)
+            looped = self._compiled_loop(functions(), params, state, corrections)
             if looped is not None:
                 return looped
         if self.summed or (self.closed and self.stacked and not self.compiled):
             return self._run_summed(params, state, corrections, outputs)
         if self._stepwise():
             return self._run_stepwise(params, state, corrections, outputs)
+        batch_update, gradient_sum, combined_update = functions()
         step = 0
         for number, count in enumerate(self.structure, start=1):
             if program.combine == "batch":
