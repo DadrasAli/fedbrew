@@ -583,7 +583,7 @@ central batch from it -- a stack of one over the batch's prepared rows, with
 no graph and no backward -- rather than through autograd: the loss and the
 gradient are `closed_form_gradient`'s, every other output the iterate's. F
 and `grad_norm_sq` are then the same to rounding, by the rule below, and every
-other column bit for bit; on Figure 1's and heterogeneous-quadratic's shipped
+other column bit for bit; on a logistic-regression study's and heterogeneous-quadratic's shipped
 configs F is bit for bit too. `gradient: "closed_form"` in the record says so;
 `"autograd"` with `gradient_reason` says why not (`asked for`, or a task with
 no closed form), and `gradient_form: autograd` keeps autograd's pass.

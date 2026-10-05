@@ -671,13 +671,13 @@ computes, bit for bit on the same device:
   of its own (`ResidentRounds._share_central`, compared once at set-up): the
   stacked rows themselves, or, where the steps take the closed form, the
   prepared stack through the task's `closed_form_central`, steps and terms
-  from one set of rows (Figure 1's convex runs read three copies of the
+  from one set of rows (a logistic-regression study's convex runs read three copies of the
   rows a round before, the training stack, the pass's rows and the gap's,
   where a hand-written reference reads one). On a round that measures `grad_norm_sq` too, where that pass is F --
   its rows every client's train rows -- the gradient is taken through it, one
   pass for both (`FusedPass`, `evaluation.grad_norm.fused`, chapter 08 §6.1),
   in the task's closed form where it gives one (`closed_form_eval`,
-  `evaluation.grad_norm.gradient_form`): Figure 1's smooth-nonconvex rounds
+  `evaluation.grad_norm.gradient_form`): a logistic-regression study's smooth-nonconvex rounds
   spent 0.83 ms of 1.98 on autograd's fused pass on 2026-10-04. Either form
   sums F's gradient in another order than the gradient's own pass, so
   `grad_norm_sq` is held to rounding by chapter 08 §6.1's rule -- within
