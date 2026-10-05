@@ -1,4 +1,4 @@
-"""FedLADA (arXiv:2308.00522), as AdaFed's port reads it: the server and the client.
+"""FedLADA (arXiv:2308.00522), as a reference port reads it: the server and the client.
 
 - the server's fold, worked out by hand: ``x + eta_g (x_bar - x)``, ``v`` the
   mean of the ``v_hat_i``, ``g_a`` the mean of the clients' terms, and a refused

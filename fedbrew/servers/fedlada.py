@@ -2,8 +2,8 @@
 
 Implements the server half of FedLADA, the third algorithm of Section 3 of Sun
 et al., "Efficient Federated Learning via Local Adaptive Amended Optimizer
-with Linear Speedup" (arXiv:2308.00522), as AdaFed's port reads it
-(``AdaFed/adafed/fl.py``). Each round, from the sampled clients' final models
+with Linear Speedup" (arXiv:2308.00522), as a reference port of the
+method reads it. Each round, from the sampled clients' final models
 ``x_i``, the second moments ``v_hat_i`` they ended on, and their amended
 directions ``(x_t - x_i) / (alpha_l K_i)``:
 

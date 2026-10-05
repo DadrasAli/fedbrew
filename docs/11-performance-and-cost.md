@@ -673,7 +673,7 @@ computes, bit for bit on the same device:
   prepared stack through the task's `closed_form_central`, steps and terms
   from one set of rows (Figure 1's convex runs read three copies of the
   rows a round before, the training stack, the pass's rows and the gap's,
-  where the AdaFed code reads one). On a round that measures `grad_norm_sq` too, where that pass is F --
+  where a hand-written reference reads one). On a round that measures `grad_norm_sq` too, where that pass is F --
   its rows every client's train rows -- the gradient is taken through it, one
   pass for both (`FusedPass`, `evaluation.grad_norm.fused`, chapter 08 §6.1),
   in the task's closed form where it gives one (`closed_form_eval`,
@@ -880,7 +880,7 @@ does not compile -- no C++ compiler for inductor, an operation dynamo does
 not trace, more recompilations than the limit -- leaves that round and
 every later one to the eager steps; the run prints why on stderr and records it
 (`compile: {used: off, fallback: ...}`), and is then the reference run bit for
-bit. Inductor needs a C++ compiler: on Berzelius the `g++` first on `PATH` is
+bit. Inductor needs a C++ compiler: on some clusters the `g++` first on `PATH` is
 a wrapper that refuses to run without a build-environment module, so set
 `CXX=/usr/bin/g++`. On CUDA it also needs Triton, which the conda build of
 torch 2.5.1 the repository's environments use does not bring: there a

@@ -568,7 +568,7 @@ weighted by its rows, rather than the gradient pass's chunks -- the same to
 rounding by the rule below, and bit for bit where those are the same rows in
 the same order (fed-logistic-l1 and heterogeneous-quadratic's shipped
 configs). Near F's rounding no relative bound holds even this change of
-order: on Figure 2's exact fedadagrad and adafed runs the fused pass's
+order: on exact fedadagrad and adaptive-step-size runs of a second study the fused pass's
 `grad_norm_sq` differs from the two passes' by up to `8.0e-12` and `4.9e-9`
 relative, every row within the rule. A
 round that measures only one runs it alone, and `fused: false` keeps the two

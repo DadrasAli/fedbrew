@@ -1,4 +1,4 @@
-"""FAFED (AAAI 2023, arXiv:2212.00974), as AdaFed's port reads it: the server, the client, the loop.
+"""FAFED (AAAI 2023, arXiv:2212.00974) as a reference port reads it: server, client, loop.
 
 - the server: the initial moments are the mean and mean square of the clients'
   initial gradients, a round's fold is ``x_bar - eta m / (sqrt(v) + rho)`` with

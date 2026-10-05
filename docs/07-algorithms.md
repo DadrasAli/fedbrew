@@ -345,7 +345,7 @@ the local-update modes cannot drift apart, which is the point.
 ### 3.6 `fedlada`
 
 FedLADA, the third algorithm of Section 3 of Sun et al.,
-[arXiv:2308.00522](https://arxiv.org/abs/2308.00522), as AdaFed's port reads it
+[arXiv:2308.00522](https://arxiv.org/abs/2308.00522), as a reference port of the method reads it
 (`FedLADAServer`, `fedbrew/servers/fedlada.py`). Each round, from the sampled
 clients' final models `x_i`, the second moments `v_hat_i` they ended on and their
 amended directions:
@@ -370,7 +370,7 @@ arm** (§5), and two columns are its own: `second_moment_norm` and
 
 FAFED, Algorithm 2 of Wu et al., AAAI 2023,
 [arXiv:2212.00974](https://arxiv.org/abs/2212.00974), with q = K and a constant step
-and alpha, as AdaFed's port reads it (`FAFEDServer`, `fedbrew/servers/fafed.py`).
+and alpha, as a reference port of the method reads it (`FAFEDServer`, `fedbrew/servers/fafed.py`).
 **Before round 1** the loop asks every client for its gradient `g_0` at `x_0` on an
 initial batch (`initial_requests`, `absorb_initial`; `_initial_pass` in
 `fedbrew/core/loop.py`, which no other strategy declares and a resumed run skips),

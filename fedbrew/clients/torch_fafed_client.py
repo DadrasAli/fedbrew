@@ -2,7 +2,7 @@
 
 Implements the client half of FAFED, Algorithm 2 of Wu et al., "Faster Adaptive
 Federated Learning" (AAAI 2023, arXiv:2212.00974), with q = K and a constant
-step ``eta`` and ``alpha``, as AdaFed's port reads it (``AdaFed/adafed/fl.py``).
+step ``eta`` and ``alpha``, as a reference port of the method reads it.
 
 Before round 1 (the server's initial request) the client returns its gradient
 ``g_0`` at ``x_0`` on an initial batch -- every row under ``full_gradient``,

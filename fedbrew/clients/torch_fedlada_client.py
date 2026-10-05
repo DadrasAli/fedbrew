@@ -2,8 +2,8 @@
 
 Implements the client half of FedLADA, the third algorithm of Section 3 of
 Sun et al., "Efficient Federated Learning via Local Adaptive Amended Optimizer
-with Linear Speedup" (arXiv:2308.00522), as AdaFed's port reads it
-(``AdaFed/adafed/fl.py``). Each round the client starts from the broadcast
+with Linear Speedup" (arXiv:2308.00522), as a reference port of the
+method reads it. Each round the client starts from the broadcast
 ``x_t``, from ``m = 0`` and from ``v = v_hat = v`` (the server's average of the
 clients' last ``v_hat``), and per local step, on the step's gradient ``g``:
 
