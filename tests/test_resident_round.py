@@ -665,22 +665,15 @@ class AProgramsKeyIsKeptWhileItsValuesAreTest(unittest.TestCase):
             ours, theirs = program(a, momentum=b), program(b, momentum=a)
             same = repr(ours) == repr(theirs)
             self.assertEqual(_same_values(ours, theirs), same, (a, b))
-        for rated in (False, True):
-            rounds = SimpleNamespace(rated=rated, _held_program=None)
-            with self.subTest(rated=rated):
-                keys = []
-                for value in (0.5, 0.5, -0.0, 0.0, 0.0):
-                    made = program(value)
-                    keys.append(ResidentRounds._program_key(rounds, made))  # type: ignore[arg-type]
-                    shape = (
-                        dc.replace(made, optimizer=dc.replace(made.optimizer, lr=0.0))
-                        if rated
-                        else made
-                    )
-                    self.assertEqual(keys[-1], repr(shape))
-                self.assertIs(keys[1], keys[0])
-                self.assertIs(keys[4], keys[3])
-                self.assertEqual(keys[2] == keys[3], rated)
+        rounds = SimpleNamespace(_held_program=None)
+        keys = []
+        for value in (0.5, 0.5, -0.0, 0.0, 0.0):
+            made = program(value)
+            keys.append(ResidentRounds._program_key(rounds, made))  # type: ignore[arg-type]
+            self.assertEqual(keys[-1], repr(made))
+        self.assertIs(keys[1], keys[0])
+        self.assertIs(keys[4], keys[3])
+        self.assertNotEqual(keys[2], keys[3])
 
 
 def _two_level_model() -> nn.Module:
