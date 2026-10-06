@@ -30,7 +30,6 @@ from __future__ import annotations
 import csv
 import dataclasses
 import json
-import sys
 import tempfile
 import unittest
 from contextlib import nullcontext
@@ -41,7 +40,7 @@ from unittest import mock
 import torch
 import yaml
 
-from fedbrew.core import extensions
+from fedbrew.core import extensions, registry
 from fedbrew.core.config import load_config, load_config_mapping, standalone_config_mapping
 from fedbrew.core.logging import _planned_metric_names
 from fedbrew.data.writers.torch_shards import load_client_shard, save_client_shard
@@ -1145,15 +1144,17 @@ class AtAStationaryPointTest(unittest.TestCase):
 
 
 def _run_task_class() -> Any:
-    """The task class a run builds: the extension as ``load_extensions`` imports it.
+    """The task class a run builds: the extension as ``load_extensions`` loads it.
 
     ``extensions._import_file`` runs the file afresh, so ``problem`` above is
-    another module; what a run must see is patched on this one.
+    another module; what a run must see is patched on this one. The class is
+    the one the registered factory builds, read from the factory's own module
+    rather than from ``sys.modules``, which another test's cleanup may have
+    emptied of a module the loader still remembers.
     """
 
     extensions.load_extensions([str(EXTENSION)])
-    name = f"{extensions._FILE_MODULE_PREFIX}.{extensions._sha256(EXTENSION)[:16]}"
-    return sys.modules[name].FedLogisticL1Task
+    return registry.tasks.get(problem.TASK_NAME).__globals__["FedLogisticL1Task"]
 
 
 def _untimed(path: Path) -> list[dict[str, str]] | None:
