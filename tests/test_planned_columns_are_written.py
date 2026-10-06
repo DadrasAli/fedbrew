@@ -152,7 +152,11 @@ def _write_rule(root: Path, name: str, rule: str, *, fit_metrics: list[str]) -> 
 
     raw = yaml.safe_load(BASE_CONFIG.read_text(encoding="utf-8"))
     raw["experiment"]["output_dir"] = str(root / name)
-    raw["server"] = {"strategy": RULES[rule]["strategy"], "participation_rate": 1}
+    raw["server"] = {
+        "strategy": RULES[rule]["strategy"],
+        "participation_rate": 1,
+        **RULES[rule].get("server", {}),
+    }
     raw["client"] = {"update_rule": rule, **RULES[rule]["client"]}
     raw.setdefault("reporting", {})["fit_metrics"] = list(fit_metrics)
     if "evaluation" in RULES[rule]:
